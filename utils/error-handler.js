@@ -17,6 +17,25 @@ export const catchAsync = (fn) => {
 export const errorHandler = (err, req, res, next) => {
   void req;
   void next;
+  if (process.env.NODE_ENV === 'development' && !(err instanceof AppError)) {
+    console.error('[unhandled]', err);
+  }
+
+  if (err?.name === 'MulterError') {
+    return res.status(400).json({
+      success: false,
+      code: 'UPLOAD_ERROR',
+      message: err.message || 'File upload failed',
+    });
+  }
+  if (err?.message && typeof err.message === 'string' && err.message.includes('JPEG')) {
+    return res.status(400).json({
+      success: false,
+      code: 'UPLOAD_ERROR',
+      message: err.message,
+    });
+  }
+
   const error = err instanceof AppError ? err : new AppError(500, 'Internal server error');
 
   res.status(error.statusCode).json({

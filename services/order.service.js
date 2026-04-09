@@ -1,5 +1,6 @@
 import { PrismaClient } from '@prisma/client';
 import { AppError } from '../utils/error-handler.js';
+import { assertAndDecrementOrderStock } from './inventory.service.js';
 
 const prisma = new PrismaClient();
 
@@ -84,33 +85,42 @@ export class OrderService {
 
     let totalAmount = 0;
 
-    const products = await Promise.all(
-      items.map((item) => prisma.product.findUnique({ where: { publicId: item.productId } }))
-    );
-
-    products.forEach((product, index) => {
-      if (!product) {
-        throw new AppError(404, `Product not found for item ${index + 1}`);
+    return prisma.$transaction(async (tx) => {
+      const products = [];
+      for (let index = 0; index < items.length; index += 1) {
+        const item = items[index];
+        const product = await tx.product.findUnique({
+          where: { publicId: item.productId },
+          include: { variants: { orderBy: { sortOrder: 'asc' } } },
+        });
+        if (!product) {
+          throw new AppError(404, `Product not found for item ${index + 1}`);
+        }
+        totalAmount += product.price * item.quantity;
+        products.push(product);
       }
-      totalAmount += product.price * items[index].quantity;
-    });
 
-    const order = await prisma.order.create({
-      data: {
-        userId: user.id,
-        totalAmount,
-        orderItems: {
-          create: items.map((item, index) => ({
-            productId: products[index].id,
-            quantity: item.quantity,
-            price: products[index].price,
-          })),
+      for (let index = 0; index < items.length; index += 1) {
+        await assertAndDecrementOrderStock(tx, products[index], items[index].quantity);
+      }
+
+      const order = await tx.order.create({
+        data: {
+          userId: user.id,
+          totalAmount,
+          orderItems: {
+            create: items.map((item, index) => ({
+              productId: products[index].id,
+              quantity: item.quantity,
+              price: products[index].price,
+            })),
+          },
         },
-      },
-      include: { orderItems: { include: { product: true } } },
-    });
+        include: { orderItems: { include: { product: true } } },
+      });
 
-    return order;
+      return order;
+    });
   }
 
   async updateOrderStatus(orderPublicId, status) {

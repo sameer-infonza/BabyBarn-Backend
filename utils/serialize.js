@@ -10,6 +10,7 @@ const INTERNAL_FK_KEYS = new Set([
   'categoryId',
   'productId',
   'orderId',
+  'productVariantId',
 ]);
 
 export function toPublicJson(value) {

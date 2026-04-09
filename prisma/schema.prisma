@@ -17,6 +17,11 @@ enum OrderStatus {
   CANCELLED
 }
 
+enum ProductType {
+  NEW
+  REFURBISHED
+}
+
 model Role {
   id        Int      @id @default(autoincrement())
   publicId  String   @unique @default(cuid())
@@ -37,9 +42,10 @@ model User {
   roleId     Int
   role       Role     @relation(fields: [roleId], references: [id], onDelete: Restrict)
 
-  orders               Order[]
-  addresses            Address[]
-  passwordResetTokens  PasswordResetToken[]
+  orders                 Order[]
+  addresses              Address[]
+  passwordResetTokens    PasswordResetToken[]
+  inventoryAdjustments   InventoryAdjustment[]
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -83,16 +89,24 @@ model Address {
 }
 
 model Category {
-  id          Int       @id @default(autoincrement())
-  publicId    String    @unique @default(cuid())
-  name        String    @unique
-  slug        String    @unique
+  id          Int        @id @default(autoincrement())
+  publicId    String     @unique @default(cuid())
+  name        String
+  slug        String
   description String?
+  parentId    Int?
+  parent      Category?  @relation("CategoryTree", fields: [parentId], references: [id], onDelete: Restrict)
+  children    Category[] @relation("CategoryTree")
+  isActive    Boolean    @default(true)
 
   products Product[]
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
+
+  @@unique([parentId, name])
+  @@unique([parentId, slug])
+  @@index([parentId])
 }
 
 model Product {
@@ -107,8 +121,25 @@ model Product {
   imageUrl    String?
   sku         String   @unique
 
-  category   Category    @relation(fields: [categoryId], references: [id], onDelete: Cascade)
+  memberPrice          Float?
+  compareAtPrice       Float?
+  unitPriceAmount      Float?
+  unitPriceReference   String?
+  fabric               String?
+  care                 String?
+  sizeAgeGroup         String?
+  vendor               String?
+  tags                 String?
+  isDraft              Boolean  @default(false)
+  isActiveListing      Boolean  @default(true)
+  inventoryModel       String      @default("simple")
+  gallery              Json?
+  productType          ProductType @default(NEW)
+
+  category   Category                @relation(fields: [categoryId], references: [id], onDelete: Cascade)
   orderItems OrderItem[]
+  variants   ProductVariant[]
+  inventoryAdjustments InventoryAdjustment[]
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -116,6 +147,29 @@ model Product {
   @@index([categoryId])
   @@index([slug])
   @@index([publicId])
+  @@index([isDraft])
+  @@index([productType])
+}
+
+model ProductVariant {
+  id            Int      @id @default(autoincrement())
+  publicId      String   @unique @default(cuid())
+  productId     Int
+  product       Product  @relation(fields: [productId], references: [id], onDelete: Cascade)
+  combination   Json
+  sku           String
+  stock         Int      @default(0)
+  priceOverride Float?
+  imageUrl      String?
+  sortOrder     Int      @default(0)
+
+  inventoryAdjustments InventoryAdjustment[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([productId, sku])
+  @@index([productId])
 }
 
 model Order {
@@ -152,4 +206,23 @@ model OrderItem {
 
   @@index([orderId])
   @@index([productId])
+}
+
+model InventoryAdjustment {
+  id               Int             @id @default(autoincrement())
+  publicId         String          @unique @default(cuid())
+  productId        Int
+  product          Product         @relation(fields: [productId], references: [id], onDelete: Cascade)
+  productVariantId Int?
+  productVariant   ProductVariant? @relation(fields: [productVariantId], references: [id], onDelete: SetNull)
+  userId           Int
+  user             User            @relation(fields: [userId], references: [id], onDelete: Restrict)
+  quantityChange   Int
+  reason           String?
+  createdAt        DateTime        @default(now())
+
+  @@index([productId])
+  @@index([productVariantId])
+  @@index([userId])
+  @@index([createdAt])
 }
