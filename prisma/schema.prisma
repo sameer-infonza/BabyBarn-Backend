@@ -1,0 +1,155 @@
+// Internal joins use numeric `id`; clients use `publicId` (cuid) only.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum OrderStatus {
+  PENDING
+  PROCESSING
+  SHIPPED
+  DELIVERED
+  CANCELLED
+}
+
+model Role {
+  id        Int      @id @default(autoincrement())
+  publicId  String   @unique @default(cuid())
+  name      String   @unique
+  users     User[]
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+model User {
+  id         Int      @id @default(autoincrement())
+  publicId   String   @unique @default(cuid())
+  email      String   @unique
+  password   String
+  firstName  String?
+  lastName   String?
+  phone      String?
+  roleId     Int
+  role       Role     @relation(fields: [roleId], references: [id], onDelete: Restrict)
+
+  orders               Order[]
+  addresses            Address[]
+  passwordResetTokens  PasswordResetToken[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([email])
+  @@index([roleId])
+  @@index([publicId])
+}
+
+model PasswordResetToken {
+  id        Int       @id @default(autoincrement())
+  publicId  String    @unique @default(cuid())
+  token     String    @unique
+  userId    Int
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  expiresAt DateTime
+  usedAt    DateTime?
+  createdAt DateTime  @default(now())
+
+  @@index([userId])
+  @@index([token])
+}
+
+model Address {
+  id        Int      @id @default(autoincrement())
+  publicId  String   @unique @default(cuid())
+  userId    Int
+  street    String
+  city      String
+  state     String
+  zipCode   String
+  country   String
+  isDefault Boolean  @default(false)
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([userId])
+}
+
+model Category {
+  id          Int       @id @default(autoincrement())
+  publicId    String    @unique @default(cuid())
+  name        String    @unique
+  slug        String    @unique
+  description String?
+
+  products Product[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+model Product {
+  id          Int      @id @default(autoincrement())
+  publicId    String   @unique @default(cuid())
+  name        String
+  slug        String   @unique
+  description String?
+  price       Float
+  stock       Int      @default(0)
+  categoryId  Int
+  imageUrl    String?
+  sku         String   @unique
+
+  category   Category    @relation(fields: [categoryId], references: [id], onDelete: Cascade)
+  orderItems OrderItem[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([categoryId])
+  @@index([slug])
+  @@index([publicId])
+}
+
+model Order {
+  id          Int         @id @default(autoincrement())
+  publicId    String      @unique @default(cuid())
+  userId      Int
+  status      OrderStatus @default(PENDING)
+  totalAmount Float
+
+  user       User        @relation(fields: [userId], references: [id], onDelete: Cascade)
+  orderItems OrderItem[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([userId])
+  @@index([status])
+  @@index([publicId])
+}
+
+model OrderItem {
+  id        Int     @id @default(autoincrement())
+  publicId String  @unique @default(cuid())
+  orderId   Int
+  productId Int
+  quantity  Int
+  price     Float
+
+  order   Order   @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  product Product @relation(fields: [productId], references: [id], onDelete: Cascade)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([orderId])
+  @@index([productId])
+}

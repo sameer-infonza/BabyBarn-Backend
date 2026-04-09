@@ -1,0 +1,160 @@
+import { PrismaClient } from '@prisma/client';
+import { AppError } from '../utils/error-handler.js';
+
+const prisma = new PrismaClient();
+
+const userForOrderList = {
+  select: {
+    id: true,
+    publicId: true,
+    email: true,
+    firstName: true,
+    lastName: true,
+    role: { select: { name: true } },
+  },
+};
+
+export class OrderService {
+  async getUserOrders(userPublicId, page = 1, limit = 10) {
+    const user = await prisma.user.findUnique({
+      where: { publicId: userPublicId },
+      select: { id: true },
+    });
+    if (!user) {
+      throw new AppError(401, 'Unauthorized');
+    }
+
+    const skip = (page - 1) * limit;
+
+    const [orders, total] = await Promise.all([
+      prisma.order.findMany({
+        where: { userId: user.id },
+        skip,
+        take: limit,
+        include: { orderItems: { include: { product: true } } },
+        orderBy: { createdAt: 'desc' },
+      }),
+      prisma.order.count({ where: { userId: user.id } }),
+    ]);
+
+    return {
+      orders,
+      pagination: {
+        total,
+        page,
+        limit,
+        pages: Math.ceil(total / limit),
+      },
+    };
+  }
+
+  async getOrderById(orderPublicId, userPublicId) {
+    const [order, viewer] = await Promise.all([
+      prisma.order.findUnique({
+        where: { publicId: orderPublicId },
+        include: { orderItems: { include: { product: true } } },
+      }),
+      prisma.user.findUnique({
+        where: { publicId: userPublicId },
+        select: { id: true },
+      }),
+    ]);
+
+    if (!order) {
+      throw new AppError(404, 'Order not found');
+    }
+    if (!viewer) {
+      throw new AppError(401, 'Unauthorized');
+    }
+    if (order.userId !== viewer.id) {
+      throw new AppError(403, 'Unauthorized to access this order');
+    }
+
+    return order;
+  }
+
+  async createOrder(userPublicId, items) {
+    const user = await prisma.user.findUnique({
+      where: { publicId: userPublicId },
+      select: { id: true },
+    });
+    if (!user) {
+      throw new AppError(401, 'Unauthorized');
+    }
+
+    let totalAmount = 0;
+
+    const products = await Promise.all(
+      items.map((item) => prisma.product.findUnique({ where: { publicId: item.productId } }))
+    );
+
+    products.forEach((product, index) => {
+      if (!product) {
+        throw new AppError(404, `Product not found for item ${index + 1}`);
+      }
+      totalAmount += product.price * items[index].quantity;
+    });
+
+    const order = await prisma.order.create({
+      data: {
+        userId: user.id,
+        totalAmount,
+        orderItems: {
+          create: items.map((item, index) => ({
+            productId: products[index].id,
+            quantity: item.quantity,
+            price: products[index].price,
+          })),
+        },
+      },
+      include: { orderItems: { include: { product: true } } },
+    });
+
+    return order;
+  }
+
+  async updateOrderStatus(orderPublicId, status) {
+    const order = await prisma.order.findUnique({
+      where: { publicId: orderPublicId },
+    });
+
+    if (!order) {
+      throw new AppError(404, 'Order not found');
+    }
+
+    return prisma.order.update({
+      where: { id: order.id },
+      data: { status },
+      include: { orderItems: { include: { product: true } } },
+    });
+  }
+
+  async getAllOrders(page = 1, limit = 20) {
+    const skip = (page - 1) * limit;
+
+    const [orders, total] = await Promise.all([
+      prisma.order.findMany({
+        skip,
+        take: limit,
+        include: {
+          orderItems: { include: { product: true } },
+          user: userForOrderList,
+        },
+        orderBy: { createdAt: 'desc' },
+      }),
+      prisma.order.count(),
+    ]);
+
+    return {
+      orders,
+      pagination: {
+        total,
+        page,
+        limit,
+        pages: Math.ceil(total / limit),
+      },
+    };
+  }
+}
+
+export const orderService = new OrderService();
