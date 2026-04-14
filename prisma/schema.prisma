@@ -17,6 +17,12 @@ enum OrderStatus {
   CANCELLED
 }
 
+enum OrderPaymentStatus {
+  UNPAID
+  PAID
+  FAILED
+}
+
 enum ProductType {
   NEW
   REFURBISHED
@@ -46,6 +52,9 @@ model User {
   addresses              Address[]
   passwordResetTokens    PasswordResetToken[]
   inventoryAdjustments   InventoryAdjustment[]
+
+  stripeCustomerId   String?
+  accessMemberUntil  DateTime?
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -164,6 +173,7 @@ model ProductVariant {
   sortOrder     Int      @default(0)
 
   inventoryAdjustments InventoryAdjustment[]
+  orderItems           OrderItem[]
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -178,6 +188,8 @@ model Order {
   userId      Int
   status      OrderStatus @default(PENDING)
   totalAmount Float
+  paymentStatus            OrderPaymentStatus @default(PAID)
+  stripeCheckoutSessionId  String?            @unique
 
   user       User        @relation(fields: [userId], references: [id], onDelete: Cascade)
   orderItems OrderItem[]
@@ -188,6 +200,7 @@ model Order {
   @@index([userId])
   @@index([status])
   @@index([publicId])
+  @@index([paymentStatus])
 }
 
 model OrderItem {
@@ -195,17 +208,20 @@ model OrderItem {
   publicId String  @unique @default(cuid())
   orderId   Int
   productId Int
+  productVariantId Int?
   quantity  Int
   price     Float
 
   order   Order   @relation(fields: [orderId], references: [id], onDelete: Cascade)
   product Product @relation(fields: [productId], references: [id], onDelete: Cascade)
+  productVariant ProductVariant? @relation(fields: [productVariantId], references: [id], onDelete: SetNull)
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
   @@index([orderId])
   @@index([productId])
+  @@index([productVariantId])
 }
 
 model InventoryAdjustment {

@@ -7,10 +7,28 @@ import { toPublicJson } from '../utils/serialize.js';
 export class ProductController {
   async getAllProducts(req, res) {
     const page = parseInt(String(req.query.page), 10) || 1;
-    const limit = parseInt(String(req.query.limit), 10) || 20;
+    const rawLimit = parseInt(String(req.query.limit), 10) || 20;
+    const limit = Math.min(Math.max(rawLimit, 1), 48);
     const categoryId = req.query.categoryId ? String(req.query.categoryId) : undefined;
+    const search = req.query.search ? String(req.query.search) : undefined;
+    const sort = req.query.sort ? String(req.query.sort) : undefined;
+    const productType = req.query.productType ? String(req.query.productType) : undefined;
+    const minPrice = req.query.minPrice != null && req.query.minPrice !== '' ? Number(req.query.minPrice) : undefined;
+    const maxPrice = req.query.maxPrice != null && req.query.maxPrice !== '' ? Number(req.query.maxPrice) : undefined;
 
-    const result = await productService.getAllProducts(page, limit, categoryId, { admin: false });
+    const listFilters = {
+      search,
+      sort,
+      productType:
+        productType === 'NEW' || productType === 'REFURBISHED' ? productType : undefined,
+      minPrice: Number.isFinite(minPrice) ? minPrice : undefined,
+      maxPrice: Number.isFinite(maxPrice) ? maxPrice : undefined,
+    };
+
+    const result = await productService.getAllProducts(page, limit, categoryId, {
+      admin: false,
+      listFilters,
+    });
 
     res.status(200).json({
       success: true,

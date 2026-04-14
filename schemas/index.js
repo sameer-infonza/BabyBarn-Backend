@@ -79,6 +79,7 @@ export const createOrderSchema = z.object({
     z.object({
       productId: z.string(),
       quantity: z.number().int().min(1, 'Quantity must be at least 1'),
+      variantId: z.string().min(1).optional(),
     })
   ),
 });

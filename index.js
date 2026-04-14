@@ -9,6 +9,8 @@ import authRoutes from './routes/auth.js';
 import productRoutes from './routes/products.js';
 import orderRoutes from './routes/orders.js';
 import inventoryRoutes from './routes/inventory.js';
+import paymentRoutes from './routes/payments.js';
+import { stripeWebhook } from './controllers/payment.controller.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -26,13 +28,32 @@ if (config.trustProxy) {
   app.set('trust proxy', 1);
 }
 
-app.use(express.json());
 app.use(
   cors({
-    origin: config.corsOrigin,
+    origin(origin, callback) {
+      // Allow non-browser or same-origin server requests with no Origin header.
+      if (!origin) {
+        callback(null, true);
+        return;
+      }
+
+      if (config.corsOrigins.includes(origin)) {
+        callback(null, true);
+        return;
+      }
+
+      callback(new AppError(403, `CORS origin rejected: ${origin}`));
+    },
     credentials: true,
+    optionsSuccessStatus: 204,
   })
 );
+
+app.post('/api/stripe/webhook', express.raw({ type: 'application/json' }), (req, res, next) =>
+  stripeWebhook(req, res).catch(next)
+);
+
+app.use(express.json());
 
 app.get('/health', (req, res) => {
   res.json({ status: 'OK' });
@@ -44,6 +65,7 @@ function mountApi(prefix) {
   app.use(`${prefix}/products`, productRoutes);
   app.use(`${prefix}/orders`, orderRoutes);
   app.use(`${prefix}/inventory`, inventoryRoutes);
+  app.use(`${prefix}/payments`, paymentRoutes);
 }
 
 mountApi('/api');
@@ -66,7 +88,7 @@ app.get('/api/v1', (req, res) => {
     health: '/health',
     routes: {
       auth: ['/register', '/login', '/forgot-password', '/reset-password', '/me'],
-      products: ['/', '/categories', '/:id'],
+      products: ['/', '/categories', '/:slugOrPublicId'],
       orders: ['/', '/admin/all', '/:id', '/:id/status'],
     },
   });

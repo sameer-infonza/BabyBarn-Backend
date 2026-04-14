@@ -13,6 +13,14 @@ export function computeTotalStock(product) {
   return product.stock;
 }
 
+/** Validates aggregate stock without mutating (for unpaid checkout orders). */
+export function assertStockAvailable(product, quantity) {
+  const total = computeTotalStock(product);
+  if (total < quantity) {
+    throw new AppError(400, `Insufficient stock for "${product.name}"`);
+  }
+}
+
 export function stockStatusFromTotal(total) {
   if (total <= 0) return 'out_of_stock';
   if (total <= LOW_STOCK_THRESHOLD) return 'low_stock';
@@ -26,7 +34,7 @@ export function combinationLabel(combination) {
   return entries.map(([k, val]) => `${k}: ${String(val)}`).join(' · ');
 }
 
-async function syncParentStockFromVariants(tx, productId) {
+export async function syncParentStockFromVariants(tx, productId) {
   const sum = await tx.productVariant.aggregate({
     where: { productId },
     _sum: { stock: true },

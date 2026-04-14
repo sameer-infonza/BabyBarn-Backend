@@ -1,8 +1,5 @@
 import { PrismaClient } from '@prisma/client';
 import bcrypt from 'bcryptjs';
-import dotenv from 'dotenv';
-
-dotenv.config();
 
 const prisma = new PrismaClient();
 
@@ -15,82 +12,103 @@ const DEFAULT_ROLES = [
   'MANAGER',
 ];
 
+const SEED_USERS = [
+  {
+    key: 'DEFAULT_ADMIN',
+    email: 'admin@babyburn.local',
+    password: 'ChangeMe_Admin_123!',
+    firstName: 'System',
+    lastName: 'Admin',
+    role: 'ADMIN',
+    enabledInProduction: true,
+  },
+  {
+    key: 'DEMO_USER',
+    email: 'demo@babyburn.local',
+    password: 'ChangeMe_User_123!',
+    firstName: 'Demo',
+    lastName: 'User',
+    role: 'CUSTOMER',
+    enabledInProduction: false,
+  },
+];
+
 async function seedRoles() {
+  let created = 0;
+  let skipped = 0;
+
   for (const roleName of DEFAULT_ROLES) {
-    await prisma.role.upsert({
-      where: { name: roleName },
-      update: {},
-      create: { name: roleName },
-    });
+    const existing = await prisma.role.findUnique({ where: { name: roleName } });
+    if (existing) {
+      skipped += 1;
+      console.log(`[SKIP] role already exists: ${roleName}`);
+      continue;
+    }
+
+    await prisma.role.create({ data: { name: roleName } });
+    created += 1;
+    console.log(`[CREATE] role: ${roleName}`);
   }
+
+  return { created, skipped };
 }
 
 /**
- * Ensures one ADMIN user exists (idempotent: does not change password if user already exists).
- * Configure with SUPER_ADMIN_EMAIL / SUPER_ADMIN_PASSWORD (required in production to create).
+ * Idempotent user seeding:
+ * - create only when missing
+ * - never update existing records
+ * - credentials are defined only in this script (not in env/config)
  */
-async function seedSuperAdmin() {
-  if (process.env.SKIP_SUPER_ADMIN_SEED === 'true') {
-    console.log('Super admin seed skipped (SKIP_SUPER_ADMIN_SEED=true).');
-    return;
-  }
+async function seedUsers() {
+  let created = 0;
+  let skipped = 0;
+  const isProduction = process.env.NODE_ENV === 'production';
 
-  const email = (process.env.SUPER_ADMIN_EMAIL || 'admin@babyburn.local').trim().toLowerCase();
-
-  const adminRole = await prisma.role.findUnique({ where: { name: 'ADMIN' } });
-  if (!adminRole) {
-    throw new Error('ADMIN role missing; seed roles first.');
-  }
-
-  const existing = await prisma.user.findUnique({ where: { email } });
-
-  if (existing) {
-    if (existing.roleId !== adminRole.id) {
-      await prisma.user.update({
-        where: { id: existing.id },
-        data: { roleId: adminRole.id },
-      });
-      console.log(`Super admin: assigned ADMIN role to existing user ${email}.`);
-    } else {
-      console.log(`Super admin: ${email} already exists (password unchanged).`);
+  for (const seedUser of SEED_USERS) {
+    if (isProduction && !seedUser.enabledInProduction) {
+      skipped += 1;
+      console.log(`[SKIP] ${seedUser.key} disabled in production`);
+      continue;
     }
-    return;
+
+    const email = seedUser.email.trim().toLowerCase();
+    const existing = await prisma.user.findUnique({ where: { email } });
+    if (existing) {
+      skipped += 1;
+      console.log(`[SKIP] user already exists: ${email}`);
+      continue;
+    }
+
+    const role = await prisma.role.findUnique({ where: { name: seedUser.role } });
+    if (!role) {
+      throw new Error(`Missing role "${seedUser.role}" for ${seedUser.key}`);
+    }
+
+    const hashedPassword = await bcrypt.hash(seedUser.password, 10);
+    await prisma.user.create({
+      data: {
+        email,
+        password: hashedPassword,
+        firstName: seedUser.firstName,
+        lastName: seedUser.lastName,
+        roleId: role.id,
+      },
+    });
+
+    created += 1;
+    console.log(`[CREATE] user: ${email} (${seedUser.role})`);
   }
 
-  let password = process.env.SUPER_ADMIN_PASSWORD;
-
-  if (!password && process.env.NODE_ENV === 'production') {
-    console.warn(
-      'Super admin: SUPER_ADMIN_PASSWORD not set; skipping user creation in production. Set SUPER_ADMIN_EMAIL and SUPER_ADMIN_PASSWORD to create.'
-    );
-    return;
-  }
-
-  if (!password) {
-    password = 'ChangeMe123!';
-    console.warn(
-      'Super admin: SUPER_ADMIN_PASSWORD not set; using dev-only default "ChangeMe123!". Change it after first login.'
-    );
-  }
-
-  const hashedPassword = await bcrypt.hash(password, 10);
-  await prisma.user.create({
-    data: {
-      email,
-      password: hashedPassword,
-      firstName: process.env.SUPER_ADMIN_FIRST_NAME?.trim() || 'Super',
-      lastName: process.env.SUPER_ADMIN_LAST_NAME?.trim() || 'Admin',
-      roleId: adminRole.id,
-    },
-  });
-
-  console.log(`Super admin created: ${email}`);
+  return { created, skipped };
 }
 
 async function main() {
-  await seedRoles();
-  console.log(`Seeded ${DEFAULT_ROLES.length} roles.`);
-  await seedSuperAdmin();
+  const roles = await seedRoles();
+  const users = await seedUsers();
+
+  console.log('\nSeed summary');
+  console.log(`Roles -> created: ${roles.created}, skipped: ${roles.skipped}`);
+  console.log(`Users -> created: ${users.created}, skipped: ${users.skipped}`);
 }
 
 main()

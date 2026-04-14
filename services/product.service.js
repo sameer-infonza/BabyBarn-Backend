@@ -45,10 +45,9 @@ export class ProductService {
   }
 
   /**
-   * @param {object} [listFilters] — only used when `admin` is true
-   * @param {string} [listFilters.search]
-   * @param {string} [listFilters.sizeAgeGroup]
-   * @param {string} [listFilters.status] — active | inactive | draft | low_stock | all
+   * @param {object} [listFilters]
+   * **Public:** `search`, `sort` (newest | price_asc | price_desc | name_asc | name_desc), `productType`, `minPrice`, `maxPrice`
+   * **Admin:** `search`, `sizeAgeGroup`, `status` (active | inactive | draft | low_stock | all)
    */
   async getAllProducts(page = 1, limit = 20, categoryPublicId, { admin = false, listFilters } = {}) {
     const skip = (page - 1) * limit;
@@ -70,6 +69,33 @@ export class ProductService {
     if (!admin) {
       where.isDraft = false;
       where.isActiveListing = true;
+      if (listFilters) {
+        const { search, productType, minPrice, maxPrice } = listFilters;
+        if (productType === 'NEW' || productType === 'REFURBISHED') {
+          where.productType = productType;
+        }
+        if (search && String(search).trim()) {
+          const q = String(search).trim();
+          where.AND = where.AND ?? [];
+          where.AND.push({
+            OR: [
+              { name: { contains: q, mode: 'insensitive' } },
+              { description: { contains: q, mode: 'insensitive' } },
+              { sku: { contains: q, mode: 'insensitive' } },
+            ],
+          });
+        }
+        const pf = {};
+        if (minPrice != null && Number.isFinite(Number(minPrice))) {
+          pf.gte = Number(minPrice);
+        }
+        if (maxPrice != null && Number.isFinite(Number(maxPrice))) {
+          pf.lte = Number(maxPrice);
+        }
+        if (Object.keys(pf).length > 0) {
+          where.price = pf;
+        }
+      }
     } else if (listFilters) {
       const { search, sizeAgeGroup, status } = listFilters;
       if (sizeAgeGroup && String(sizeAgeGroup).trim()) {
@@ -101,9 +127,32 @@ export class ProductService {
       }
     }
 
+    let orderBy = { updatedAt: 'desc' };
+    if (!admin && listFilters?.sort) {
+      const s = String(listFilters.sort);
+      if (s === 'price_asc') orderBy = { price: 'asc' };
+      else if (s === 'price_desc') orderBy = { price: 'desc' };
+      else if (s === 'name_asc') orderBy = { name: 'asc' };
+      else if (s === 'name_desc') orderBy = { name: 'desc' };
+      else if (s === 'newest') orderBy = { updatedAt: 'desc' };
+    }
+
     const include = {
       category: true,
-      ...(admin ? { variants: { orderBy: { sortOrder: 'asc' } } } : {}),
+      ...(admin
+        ? { variants: { orderBy: { sortOrder: 'asc' } } }
+        : {
+            variants: {
+              orderBy: { sortOrder: 'asc' },
+              select: {
+                publicId: true,
+                sku: true,
+                stock: true,
+                priceOverride: true,
+                combination: true,
+              },
+            },
+          }),
     };
 
     const [products, total] = await Promise.all([
@@ -111,7 +160,7 @@ export class ProductService {
         where,
         skip,
         take: limit,
-        orderBy: { updatedAt: 'desc' },
+        orderBy,
         include,
       }),
       prisma.product.count({ where }),
@@ -128,11 +177,27 @@ export class ProductService {
     };
   }
 
-  async getProductById(publicId, { admin = false } = {}) {
-    const product = await prisma.product.findUnique({
-      where: { publicId },
+  /**
+   * Public storefront: resolve by URL slug first, then by publicId (legacy links).
+   * Admin callers should pass publicId only.
+   */
+  async getProductById(identifier, { admin = false } = {}) {
+    const raw = String(identifier ?? '').trim();
+    if (!raw) {
+      throw new AppError(404, 'Product not found');
+    }
+
+    let product = await prisma.product.findUnique({
+      where: { slug: raw },
       include: { category: true, variants: { orderBy: { sortOrder: 'asc' } } },
     });
+
+    if (!product) {
+      product = await prisma.product.findUnique({
+        where: { publicId: raw },
+        include: { category: true, variants: { orderBy: { sortOrder: 'asc' } } },
+      });
+    }
 
     if (!product) {
       throw new AppError(404, 'Product not found');
@@ -325,6 +390,21 @@ export class ProductService {
         if (other) {
           throw new AppError(400, 'Product with this SKU already exists');
         }
+      }
+
+      if (updatePayload.slug !== undefined && updatePayload.slug !== null) {
+        const s = String(updatePayload.slug).trim();
+        if (!s) {
+          throw new AppError(400, 'Slug cannot be empty');
+        }
+        const otherSlug = await tx.product.findFirst({
+          where: { slug: s, NOT: { id: product.id } },
+          select: { id: true },
+        });
+        if (otherSlug) {
+          throw new AppError(400, 'Product with this slug already exists');
+        }
+        updatePayload.slug = s;
       }
 
       const inv =

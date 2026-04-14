@@ -106,6 +106,7 @@ export class AuthService {
         lastName: true,
         phone: true,
         createdAt: true,
+        accessMemberUntil: true,
         role: { select: { name: true } },
       },
     });
@@ -122,6 +123,9 @@ export class AuthService {
       role: user.role.name,
       phone: user.phone,
       createdAt: user.createdAt,
+      accessMemberUntil: user.accessMemberUntil?.toISOString() ?? null,
+      accessMemberActive:
+        user.accessMemberUntil != null && user.accessMemberUntil > new Date(),
     };
   }
 
