@@ -18,10 +18,19 @@ CREATE UNIQUE INDEX IF NOT EXISTS "EmailVerificationToken_token_key" ON "EmailVe
 CREATE INDEX IF NOT EXISTS "EmailVerificationToken_userId_idx" ON "EmailVerificationToken"("userId");
 CREATE INDEX IF NOT EXISTS "EmailVerificationToken_token_idx" ON "EmailVerificationToken"("token");
 
-ALTER TABLE "EmailVerificationToken"
-ADD CONSTRAINT IF NOT EXISTS "EmailVerificationToken_userId_fkey"
-FOREIGN KEY ("userId") REFERENCES "User"("id")
-ON DELETE CASCADE ON UPDATE CASCADE;
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1
+    FROM pg_constraint
+    WHERE conname = 'EmailVerificationToken_userId_fkey'
+  ) THEN
+    ALTER TABLE "EmailVerificationToken"
+    ADD CONSTRAINT "EmailVerificationToken_userId_fkey"
+    FOREIGN KEY ("userId") REFERENCES "User"("id")
+    ON DELETE CASCADE ON UPDATE CASCADE;
+  END IF;
+END $$;
 
 -- Add richer address profile fields
 ALTER TABLE "Address"
