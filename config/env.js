@@ -59,6 +59,6 @@ export const config = {
   },
   storeUrl: (process.env.STORE_PUBLIC_URL || 'http://localhost:3000').replace(/\/$/, ''),
   trustProxy: process.env.TRUST_PROXY === 'true',
-  /** Base URL for absolute image URLs returned to the client (no trailing slash). */
-  publicBaseUrl: (process.env.PUBLIC_URL || `http://localhost:${port}`).replace(/\/$/, ''),
+  /** Optional base URL for absolute image URLs returned to the client (no trailing slash). */
+  publicBaseUrl: (process.env.PUBLIC_URL || '').replace(/\/$/, ''),
 };
