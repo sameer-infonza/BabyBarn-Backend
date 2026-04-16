@@ -2,8 +2,36 @@ import { randomBytes } from 'crypto';
 import { Prisma, PrismaClient } from '@prisma/client';
 import { AppError } from '../utils/error-handler.js';
 import { slugifyName } from '../utils/slug.js';
+import { config } from '../config/env.js';
 
 const prisma = new PrismaClient();
+
+function normalizeMediaUrl(url) {
+  if (!url) return null;
+  const u = String(url).trim();
+  if (!u) return null;
+  if (u.startsWith('/')) return u;
+
+  const knownBases = [
+    config.publicBaseUrl,
+    `http://localhost:${config.port}`,
+    `https://localhost:${config.port}`,
+  ].filter(Boolean);
+
+  for (const base of knownBases) {
+    if (u.startsWith(base)) {
+      const rest = u.slice(base.length);
+      return rest.startsWith('/') ? rest : `/${rest}`;
+    }
+  }
+
+  const match = u.match(/^https?:\/\/[^/]+(\/.*)$/);
+  if (match) {
+    return match[1] || '/';
+  }
+
+  return u;
+}
 
 function randomSku(prefix) {
   const hex = randomBytes(5).toString('hex').toUpperCase();
@@ -289,12 +317,23 @@ export class ProductService {
         }
       }
 
-      const galleryValue =
+      const normalizedImageUrl = normalizeMediaUrl(imageUrl);
+
+      const normalizedGallery =
         gallery === null || gallery === undefined
           ? undefined
           : Array.isArray(gallery) && gallery.length === 0
             ? Prisma.JsonNull
-            : gallery;
+            : Array.isArray(gallery)
+              ? gallery.map((g) => {
+                  if (!g || typeof g !== 'object') return g;
+                  const anyG = g;
+                  if (typeof anyG.url === 'string') {
+                    return { ...anyG, url: normalizeMediaUrl(anyG.url) || anyG.url };
+                  }
+                  return g;
+                })
+              : gallery;
 
       const product = await tx.product.create({
         data: {
@@ -304,7 +343,7 @@ export class ProductService {
           price,
           stock: totalStock,
           categoryId: category.id,
-          imageUrl: imageUrl ?? null,
+          imageUrl: normalizedImageUrl,
           sku,
           memberPrice: memberPrice ?? null,
           compareAtPrice: compareAtPrice ?? null,
@@ -319,7 +358,7 @@ export class ProductService {
           isActiveListing,
           inventoryModel,
           productType,
-          gallery: galleryValue,
+          gallery: normalizedGallery,
           variants: isVariantProduct
             ? {
                 create: variants.map((v, i) => ({
@@ -327,7 +366,7 @@ export class ProductService {
                   sku: v.sku,
                   stock: v.stock,
                   priceOverride: v.priceOverride ?? null,
-                  imageUrl: v.imageUrl ?? null,
+                  imageUrl: normalizeMediaUrl(v.imageUrl),
                   sortOrder: i,
                 })),
               }
@@ -355,6 +394,7 @@ export class ProductService {
       variants: variantsPayload,
       variantAxes: _variantAxes,
       gallery,
+      imageUrl,
       ...rest
     } = data;
 
@@ -364,11 +404,24 @@ export class ProductService {
     return prisma.$transaction(async (tx) => {
       const updatePayload = { ...rest };
 
+      if (imageUrl !== undefined) {
+        updatePayload.imageUrl = normalizeMediaUrl(imageUrl);
+      }
+
       if (gallery !== undefined) {
         updatePayload.gallery =
           gallery === null || (Array.isArray(gallery) && gallery.length === 0)
             ? Prisma.JsonNull
-            : gallery;
+            : Array.isArray(gallery)
+              ? gallery.map((g) => {
+                  if (!g || typeof g !== 'object') return g;
+                  const anyG = g;
+                  if (typeof anyG.url === 'string') {
+                    return { ...anyG, url: normalizeMediaUrl(anyG.url) || anyG.url };
+                  }
+                  return g;
+                })
+              : gallery;
       }
 
       if (categoryPublicId !== undefined) {
@@ -451,7 +504,7 @@ export class ProductService {
                   sku: v.sku,
                   stock: v.stock,
                   priceOverride: v.priceOverride ?? null,
-                  imageUrl: v.imageUrl ?? null,
+                  imageUrl: normalizeMediaUrl(v.imageUrl),
                   sortOrder: i,
                 })),
               },
