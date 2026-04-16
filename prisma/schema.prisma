@@ -51,10 +51,12 @@ model User {
   orders                 Order[]
   addresses              Address[]
   passwordResetTokens    PasswordResetToken[]
+  emailVerificationTokens EmailVerificationToken[]
   inventoryAdjustments   InventoryAdjustment[]
 
   stripeCustomerId   String?
   accessMemberUntil  DateTime?
+  emailVerifiedAt    DateTime?
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -62,6 +64,20 @@ model User {
   @@index([email])
   @@index([roleId])
   @@index([publicId])
+}
+
+model EmailVerificationToken {
+  id        Int      @id @default(autoincrement())
+  publicId  String   @unique @default(cuid())
+  token     String   @unique
+  userId    Int
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  expiresAt DateTime
+  usedAt    DateTime?
+  createdAt DateTime @default(now())
+
+  @@index([userId])
+  @@index([token])
 }
 
 model PasswordResetToken {
@@ -82,11 +98,15 @@ model Address {
   id        Int      @id @default(autoincrement())
   publicId  String   @unique @default(cuid())
   userId    Int
+  fullName  String?
+  addressLine1 String?
+  addressLine2 String?
   street    String
   city      String
   state     String
   zipCode   String
   country   String
+  phoneNumber String?
   isDefault Boolean  @default(false)
 
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)

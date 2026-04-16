@@ -1,8 +1,15 @@
 import { z } from 'zod';
 
+const passwordComplexityMessage =
+  'Password must be at least 8 characters and include uppercase, lowercase, number, and special character';
+const passwordSchema = z
+  .string()
+  .min(8, passwordComplexityMessage)
+  .regex(/^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)(?=.*[^A-Za-z\d]).+$/, passwordComplexityMessage);
+
 export const registerSchema = z.object({
   email: z.string().email('Invalid email address'),
-  password: z.string().min(8, 'Password must be at least 8 characters'),
+  password: passwordSchema,
   firstName: z.string().optional(),
   lastName: z.string().optional(),
 });
@@ -17,9 +24,38 @@ export const resetPasswordSchema = z.object({
 });
 
 export const confirmPasswordSchema = z.object({
-  password: z.string().min(8, 'Password must be at least 8 characters'),
+  password: passwordSchema,
   token: z.string(),
 });
+
+export const verifyEmailSchema = z.object({
+  token: z.string().min(1, 'Verification token is required'),
+});
+
+export const updateProfileSchema = z.object({
+  firstName: z.string().min(1).optional(),
+  lastName: z.string().min(1).optional(),
+  phone: z.string().min(6).max(30).optional().nullable(),
+});
+
+export const changePasswordSchema = z.object({
+  currentPassword: z.string().min(1, 'Current password is required'),
+  newPassword: passwordSchema,
+});
+
+export const addressCreateSchema = z.object({
+  fullName: z.string().min(1, 'Full name is required'),
+  addressLine1: z.string().min(1, 'Address line 1 is required'),
+  addressLine2: z.string().optional().nullable(),
+  city: z.string().min(1, 'City is required'),
+  state: z.string().min(1, 'State is required'),
+  zipCode: z.string().min(1, 'ZIP code is required'),
+  country: z.string().min(1, 'Country is required'),
+  phoneNumber: z.string().min(6).max(30),
+  isDefault: z.boolean().optional(),
+});
+
+export const addressUpdateSchema = addressCreateSchema.partial();
 
 const variantInputSchema = z.object({
   combination: z.record(z.string(), z.string()),

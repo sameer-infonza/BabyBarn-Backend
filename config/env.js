@@ -45,6 +45,18 @@ export const config = {
     connectMembership: process.env.STRIPE_CONNECT_ACCOUNT_MEMBERSHIP || '',
     connectStore: process.env.STRIPE_CONNECT_ACCOUNT_STORE || '',
   },
+  mail: {
+    from: process.env.MAIL_FROM || 'Baby Barn <no-reply@babyburn.local>',
+    host: process.env.SMTP_HOST || '',
+    port: parseInt(process.env.SMTP_PORT || '587', 10),
+    user: process.env.SMTP_USER || '',
+    pass: process.env.SMTP_PASS || '',
+    secure: process.env.SMTP_SECURE === 'true',
+  },
+  frontend: {
+    customerUrl: (process.env.CUSTOMER_FRONTEND_URL || process.env.FRONTEND_URL || 'http://localhost:3000').replace(/\/$/, ''),
+    adminUrl: (process.env.ADMIN_FRONTEND_URL || 'http://localhost:3001').replace(/\/$/, ''),
+  },
   storeUrl: (process.env.STORE_PUBLIC_URL || 'http://localhost:3000').replace(/\/$/, ''),
   trustProxy: process.env.TRUST_PROXY === 'true',
   /** Base URL for absolute image URLs returned to the client (no trailing slash). */
