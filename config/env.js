@@ -61,4 +61,6 @@ export const config = {
   trustProxy: process.env.TRUST_PROXY === 'true',
   /** Optional base URL for absolute image URLs returned to the client (no trailing slash). */
   publicBaseUrl: (process.env.PUBLIC_URL || '').replace(/\/$/, ''),
+  /** Inbound contact form notifications (falls back to SMTP user if unset). */
+  contactAdminEmail: (process.env.CONTACT_ADMIN_EMAIL || process.env.ADMIN_EMAIL || '').trim(),
 };

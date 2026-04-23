@@ -110,6 +110,36 @@ export const createProductSchema = createProductBodySchema.superRefine((data, ct
 /** Partial updates: `.partial()` must run on `ZodObject`, not on `ZodEffects` from `.superRefine()`. */
 export const updateProductSchema = createProductBodySchema.partial();
 
+const checkoutAddressPayloadSchema = z.object({
+  fullName: z.string().optional(),
+  addressLine1: z.string().optional(),
+  addressLine2: z.string().optional().nullable(),
+  city: z.string().optional(),
+  state: z.string().optional(),
+  zipCode: z.string().optional(),
+  country: z.string().optional(),
+  phoneNumber: z.string().optional(),
+});
+
+const checkoutParcelSchema = z.object({
+  length: z.union([z.number().positive(), z.string().min(1)]),
+  width: z.union([z.number().positive(), z.string().min(1)]),
+  height: z.union([z.number().positive(), z.string().min(1)]),
+  weight: z.union([z.number().positive(), z.string().min(1)]),
+  distance_unit: z.enum(['in', 'cm', 'ft', 'm', 'mm', 'yd']).optional(),
+  mass_unit: z.enum(['lb', 'oz', 'g', 'kg']).optional(),
+});
+
+const checkoutSelectedRateSchema = z.object({
+  rateId: z.string().min(1).optional().nullable(),
+  provider: z.string().optional().nullable(),
+  serviceLevel: z.string().optional().nullable(),
+  serviceToken: z.string().optional().nullable(),
+  amount: z.number().min(0).optional().nullable(),
+  currency: z.string().optional().nullable(),
+  estimatedDays: z.number().int().nonnegative().optional().nullable(),
+});
+
 export const createOrderSchema = z.object({
   items: z.array(
     z.object({
@@ -117,7 +147,105 @@ export const createOrderSchema = z.object({
       quantity: z.number().int().min(1, 'Quantity must be at least 1'),
       variantId: z.string().min(1).optional(),
     })
-  ),
+  ).min(1),
+  shippingAddress: checkoutAddressPayloadSchema.optional(),
+  billingAddress: checkoutAddressPayloadSchema.optional(),
+  parcels: z.array(checkoutParcelSchema).optional(),
+  selectedRateId: z.string().min(1).optional(),
+  selectedRate: checkoutSelectedRateSchema.optional(),
+  storeCreditToApply: z.number().min(0).optional(),
+});
+
+export const checkoutQuoteSchema = z.object({
+  items: z.array(
+    z.object({
+      productId: z.string().min(1),
+      quantity: z.number().int().min(1),
+      variantId: z.string().min(1).optional().nullable(),
+    })
+  ).min(1),
+  shippingAddress: checkoutAddressPayloadSchema.optional(),
+  parcels: z.array(checkoutParcelSchema).optional(),
+  selectedRateId: z.string().min(1).optional(),
+  storeCreditToApply: z.number().min(0).optional(),
+});
+
+export const trackingUpdateSchema = z.object({
+  trackingNumber: z.string().min(1),
+  shippingCarrier: z.string().min(1).optional(),
+  /** Carrier label PDF URL or print link (UPS, etc.). */
+  shippingLabelUrl: z.string().max(2000).optional().nullable(),
+});
+
+export const orderStatusUpdateSchema = z.object({
+  status: z.enum([
+    'PENDING',
+    'PROCESSING',
+    'CONFIRMED',
+    'SHIPPED',
+    'DELIVERED',
+    'CANCELLED',
+    'RETURNED',
+    'REFUNDED',
+  ]),
+});
+
+export const cancelOrderRequestSchema = z.object({
+  reason: z.string().max(500).optional().nullable(),
+});
+
+export const orderCancellationReviewSchema = z.object({
+  decision: z.enum(['approve', 'reject']),
+  note: z.string().max(1000).optional().nullable(),
+});
+
+/** Admin PATCH /orders/:id/shipping — at least one field. */
+export const adminShippingUpdateSchema = z
+  .object({
+    trackingNumber: z.string().min(1).optional(),
+    shippingCarrier: z.string().min(1).optional(),
+    shippingLabelUrl: z.string().max(2000).optional().nullable(),
+  })
+  .refine(
+    (d) =>
+      Boolean(d.trackingNumber?.trim()) ||
+      Boolean(d.shippingCarrier?.trim()) ||
+      d.shippingLabelUrl !== undefined,
+    { message: 'Provide trackingNumber, shippingCarrier, and/or shippingLabelUrl' }
+  );
+
+export const adminShippingOptionsSchema = z.object({
+  carrier: z.string().min(1).optional(),
+  parcels: z.array(checkoutParcelSchema).optional(),
+});
+
+const selectedRateSnapshotSchema = z.object({
+  rateId: z.string().min(1).optional().nullable(),
+  provider: z.string().optional().nullable(),
+  serviceLevel: z.string().optional().nullable(),
+  serviceToken: z.string().optional().nullable(),
+  amount: z.number().min(0).optional().nullable(),
+  currency: z.string().optional().nullable(),
+  estimatedDays: z.number().int().nonnegative().optional().nullable(),
+});
+
+export const adminGenerateLabelSchema = z.object({
+  rateId: z.string().min(1),
+  labelFileType: z.enum(['PDF_4x6', 'PDF_A4', 'PNG', 'ZPLII']).optional(),
+  shipmentId: z.string().min(1).optional(),
+  selectedRate: selectedRateSnapshotSchema.optional(),
+});
+
+export const returnRequestCreateSchema = z.object({
+  orderId: z.string().min(1),
+  orderItemId: z.string().min(1).optional(),
+  type: z.enum(['STANDARD', 'REFURBISHMENT']).optional().default('STANDARD'),
+  reason: z.string().min(3).max(1000),
+});
+
+export const returnStatusUpdateSchema = z.object({
+  status: z.enum(['REQUESTED', 'RECEIVED', 'UNDER_INSPECTION', 'APPROVED', 'REJECTED']),
+  notes: z.string().max(2000).optional().nullable(),
 });
 
 export const createCategorySchema = z.object({
@@ -150,4 +278,55 @@ export const inventoryAdjustSchema = z.object({
 
 export const inventoryProductTypeSchema = z.object({
   productType: z.enum(['NEW', 'REFURBISHED']),
+});
+
+const shipAddressSchema = z.object({
+  fullName: z.string().min(1).optional(),
+  name: z.string().min(1).optional(),
+  addressLine1: z.string().min(1).optional(),
+  addressLine2: z.string().optional().nullable(),
+  city: z.string().min(1),
+  state: z.string().min(1),
+  zipCode: z.string().min(1).optional(),
+  zip: z.string().min(1).optional(),
+  country: z.string().min(2),
+  phoneNumber: z.string().min(6).max(30).optional().nullable(),
+  email: z.string().email().optional().nullable(),
+});
+
+const parcelSchema = z.object({
+  length: z.union([z.number().positive(), z.string().min(1)]),
+  width: z.union([z.number().positive(), z.string().min(1)]),
+  height: z.union([z.number().positive(), z.string().min(1)]),
+  weight: z.union([z.number().positive(), z.string().min(1)]),
+  distance_unit: z.enum(['in', 'cm', 'ft', 'm', 'mm', 'yd']).optional(),
+  mass_unit: z.enum(['lb', 'oz', 'g', 'kg']).optional(),
+});
+
+export const shippingRatesSchema = z.object({
+  shippingAddress: shipAddressSchema.optional(),
+  toAddress: shipAddressSchema.optional(),
+  fromAddress: shipAddressSchema.optional(),
+  parcels: z.array(parcelSchema).optional(),
+  useDummyAddress: z.boolean().optional(),
+  useDummyFromAddress: z.boolean().optional(),
+  dummyCountry: z.enum(['US', 'CA']).optional(),
+}).refine((d) => d.useDummyAddress || Boolean(d.shippingAddress || d.toAddress), {
+  message: 'Provide shippingAddress/toAddress or set useDummyAddress=true',
+});
+
+export const shippingShipmentSchema = z.object({
+  shippingAddress: shipAddressSchema.optional(),
+  toAddress: shipAddressSchema.optional(),
+  fromAddress: shipAddressSchema.optional(),
+  parcels: z.array(parcelSchema).min(1),
+  metadata: z.string().max(500).optional().nullable(),
+}).refine((d) => Boolean(d.shippingAddress || d.toAddress), {
+  message: 'shippingAddress or toAddress is required',
+});
+
+export const shippingLabelSchema = z.object({
+  rateId: z.string().min(1),
+  labelFileType: z.enum(['PDF_4x6', 'PDF_A4', 'PNG', 'ZPLII']).optional(),
+  orderId: z.string().min(1).optional(),
 });

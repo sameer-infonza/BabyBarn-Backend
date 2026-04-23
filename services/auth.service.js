@@ -13,13 +13,22 @@ const RESET_TOKEN_TTL_MS = 60 * 60 * 1000;
 const VERIFY_TOKEN_TTL_MS = 24 * 60 * 60 * 1000;
 
 function toPublicUser(user) {
-  return {
+  const accessUntil = user.accessMemberUntil ?? null;
+  const accessActive = accessUntil != null && accessUntil > new Date();
+  const roleName = typeof user.role === 'object' && user.role?.name ? user.role.name : user.role;
+  const out = {
     id: user.publicId,
     email: user.email,
     firstName: user.firstName ?? undefined,
     lastName: user.lastName ?? undefined,
-    role: user.role.name,
+    role: roleName,
+    accessMemberUntil: accessUntil ? accessUntil.toISOString() : null,
+    accessMemberActive: Boolean(accessActive),
   };
+  if (roleName === 'ADMIN' || roleName === 'ADMIN_TEAM') {
+    out.adminModules = user.adminModules !== undefined ? user.adminModules : null;
+  }
+  return out;
 }
 
 export class AuthService {
@@ -132,6 +141,10 @@ export class AuthService {
       throw new AppError(401, 'Invalid credentials');
     }
 
+    if (user.isActive === false) {
+      throw new AppError(403, 'This account has been deactivated.');
+    }
+
     if (this.isCustomerRole(user.role.name) && !user.emailVerifiedAt) {
       throw new AppError(
         403,
@@ -145,6 +158,9 @@ export class AuthService {
       email: user.email,
       role: user.role.name,
     };
+    if (user.role.name === 'ADMIN_TEAM') {
+      payload.adminModules = user.adminModules ?? null;
+    }
 
     const token = generateToken(payload);
 
@@ -165,6 +181,7 @@ export class AuthService {
         phone: true,
         createdAt: true,
         accessMemberUntil: true,
+        adminModules: true,
         role: { select: { name: true } },
       },
     });
@@ -173,7 +190,7 @@ export class AuthService {
       throw new AppError(404, 'User not found');
     }
 
-    return {
+    const base = {
       id: user.publicId,
       email: user.email,
       firstName: user.firstName ?? undefined,
@@ -185,6 +202,10 @@ export class AuthService {
       accessMemberActive:
         user.accessMemberUntil != null && user.accessMemberUntil > new Date(),
     };
+    if (user.role.name === 'ADMIN' || user.role.name === 'ADMIN_TEAM') {
+      base.adminModules = user.adminModules ?? null;
+    }
+    return base;
   }
 
   async updateProfile(publicId, payload) {

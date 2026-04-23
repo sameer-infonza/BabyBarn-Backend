@@ -74,7 +74,7 @@ export class ProductService {
 
   /**
    * @param {object} [listFilters]
-   * **Public:** `search`, `sort` (newest | price_asc | price_desc | name_asc | name_desc), `productType`, `minPrice`, `maxPrice`
+   * **Public:** `search`, `sort` (newest | price_asc | price_desc | name_asc | name_desc), `productType`, `minPrice`, `maxPrice`, `sizeAgeGroup`
    * **Admin:** `search`, `sizeAgeGroup`, `status` (active | inactive | draft | low_stock | all)
    */
   async getAllProducts(page = 1, limit = 20, categoryPublicId, { admin = false, listFilters } = {}) {
@@ -98,9 +98,12 @@ export class ProductService {
       where.isDraft = false;
       where.isActiveListing = true;
       if (listFilters) {
-        const { search, productType, minPrice, maxPrice } = listFilters;
+        const { search, productType, minPrice, maxPrice, sizeAgeGroup } = listFilters;
         if (productType === 'NEW' || productType === 'REFURBISHED') {
           where.productType = productType;
+        }
+        if (sizeAgeGroup && String(sizeAgeGroup).trim()) {
+          where.sizeAgeGroup = String(sizeAgeGroup).trim();
         }
         if (search && String(search).trim()) {
           const q = String(search).trim();
@@ -125,7 +128,10 @@ export class ProductService {
         }
       }
     } else if (listFilters) {
-      const { search, sizeAgeGroup, status } = listFilters;
+      const { search, sizeAgeGroup, status, productType } = listFilters;
+      if (productType === 'NEW' || productType === 'REFURBISHED') {
+        where.productType = productType;
+      }
       if (sizeAgeGroup && String(sizeAgeGroup).trim()) {
         where.sizeAgeGroup = String(sizeAgeGroup).trim();
       }

@@ -12,20 +12,50 @@ datasource db {
 enum OrderStatus {
   PENDING
   PROCESSING
+  CONFIRMED
   SHIPPED
   DELIVERED
   CANCELLED
+  RETURNED
+  REFUNDED
 }
 
 enum OrderPaymentStatus {
   UNPAID
   PAID
   FAILED
+  REFUNDED
+}
+
+enum ReturnType {
+  STANDARD
+  REFURBISHMENT
+}
+
+enum ReturnStatus {
+  REQUESTED
+  RECEIVED
+  UNDER_INSPECTION
+  APPROVED
+  REJECTED
+}
+
+enum StoreCreditTxnType {
+  EARNED
+  REDEEMED
+  ADJUSTED
 }
 
 enum ProductType {
   NEW
   REFURBISHED
+}
+
+enum CancellationReviewStatus {
+  NONE
+  PENDING
+  APPROVED
+  REJECTED
 }
 
 model Role {
@@ -53,10 +83,16 @@ model User {
   passwordResetTokens    PasswordResetToken[]
   emailVerificationTokens EmailVerificationToken[]
   inventoryAdjustments   InventoryAdjustment[]
+  returnRequests         ReturnRequest[]
+  storeCreditWallet      StoreCreditWallet?
 
   stripeCustomerId   String?
   accessMemberUntil  DateTime?
   emailVerifiedAt    DateTime?
+  // When false, customer cannot sign in.
+  isActive           Boolean  @default(true)
+  // JSON array of admin console module slugs; null = all modules (ADMIN_TEAM).
+  adminModules       Json?
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -64,6 +100,7 @@ model User {
   @@index([email])
   @@index([roleId])
   @@index([publicId])
+  @@index([isActive])
 }
 
 model EmailVerificationToken {
@@ -208,11 +245,43 @@ model Order {
   userId      Int
   status      OrderStatus @default(PENDING)
   totalAmount Float
+  shippingCost Float @default(0)
+  shippingAddressJson Json?
+  billingAddressJson Json?
+  shippingCarrier String?
+  trackingNumber String?
+  // UPS / carrier label PDF or print URL (set by admin).
+  shippingLabelUrl String?
+  selectedRateId String?
+  selectedRateProvider String?
+  selectedRateServiceLevel String?
+  selectedRateServiceToken String?
+  selectedRateAmount Float?
+  selectedRateCurrency String?
+  selectedRateEstimatedDays Int?
+  shippingShipmentId String?
+  shippingTransactionId String?
+  returnShipmentId String?
+  returnLabelUrl String?
+  returnTrackingNumber String?
+  returnShippingCarrier String?
+  returnTransactionId String?
+  trackingStatus String?
+  trackingStatusDetails String?
+  trackingStatusDate DateTime?
+  trackingEta DateTime?
+  trackingHistoryJson Json?
   paymentStatus            OrderPaymentStatus @default(PAID)
   stripeCheckoutSessionId  String?            @unique
 
+  cancellationReviewStatus  CancellationReviewStatus @default(NONE)
+  cancellationRequestedAt   DateTime?
+  cancellationRequestReason String?
+  cancellationReviewNote    String?
+
   user       User        @relation(fields: [userId], references: [id], onDelete: Cascade)
   orderItems OrderItem[]
+  returnRequests ReturnRequest[]
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -221,6 +290,7 @@ model Order {
   @@index([status])
   @@index([publicId])
   @@index([paymentStatus])
+  @@index([cancellationReviewStatus])
 }
 
 model OrderItem {
@@ -235,6 +305,7 @@ model OrderItem {
   order   Order   @relation(fields: [orderId], references: [id], onDelete: Cascade)
   product Product @relation(fields: [productId], references: [id], onDelete: Cascade)
   productVariant ProductVariant? @relation(fields: [productVariantId], references: [id], onDelete: SetNull)
+  returnRequests ReturnRequest[]
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -242,6 +313,78 @@ model OrderItem {
   @@index([orderId])
   @@index([productId])
   @@index([productVariantId])
+}
+
+model ReturnRequest {
+  id Int @id @default(autoincrement())
+  publicId String @unique @default(cuid())
+  userId Int
+  orderId Int
+  orderItemId Int?
+  type ReturnType @default(STANDARD)
+  status ReturnStatus @default(REQUESTED)
+  reason String?
+  notes String?
+  creditAwarded Float @default(0)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  order Order @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  orderItem OrderItem? @relation(fields: [orderItemId], references: [id], onDelete: SetNull)
+
+  @@index([userId])
+  @@index([orderId])
+  @@index([status])
+}
+
+model AdminAuditLog {
+  id         Int    @id @default(autoincrement())
+  publicId   String @unique @default(cuid())
+  actorId    String?
+  actorEmail String?
+  action     String
+  entityType String
+  entityId   String
+  meta       Json?
+  createdAt  DateTime @default(now())
+
+  @@index([entityType, entityId])
+  @@index([createdAt])
+}
+
+// Singleton row (id = 1) for editable business defaults (e.g. ACCESS price).
+model BusinessSettings {
+  id                        Int      @id @default(1)
+  accessMembershipPriceUsd  Float    @default(49)
+  updatedAt                 DateTime @updatedAt
+}
+
+model StoreCreditWallet {
+  id Int @id @default(autoincrement())
+  publicId String @unique @default(cuid())
+  userId Int @unique
+  balance Float @default(0)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  transactions StoreCreditTransaction[]
+}
+
+model StoreCreditTransaction {
+  id Int @id @default(autoincrement())
+  publicId String @unique @default(cuid())
+  walletId Int
+  type StoreCreditTxnType
+  amount Float
+  note String?
+  createdAt DateTime @default(now())
+
+  wallet StoreCreditWallet @relation(fields: [walletId], references: [id], onDelete: Cascade)
+
+  @@index([walletId])
+  @@index([type])
 }
 
 model InventoryAdjustment {

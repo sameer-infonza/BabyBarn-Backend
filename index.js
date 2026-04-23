@@ -10,6 +10,11 @@ import productRoutes from './routes/products.js';
 import orderRoutes from './routes/orders.js';
 import inventoryRoutes from './routes/inventory.js';
 import paymentRoutes from './routes/payments.js';
+import contactRoutes from './routes/contact.js';
+import returnsRoutes from './routes/returns.js';
+import walletRoutes from './routes/wallet.js';
+import adminRoutes from './routes/admin.js';
+import shippingRoutes from './routes/shipping.js';
 import { stripeWebhook } from './controllers/payment.controller.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -53,7 +58,14 @@ app.post('/api/stripe/webhook', express.raw({ type: 'application/json' }), (req,
   stripeWebhook(req, res).catch(next)
 );
 
-app.use(express.json());
+app.use(
+  express.json({
+    verify(req, res, buf) {
+      void res;
+      req.rawBody = Buffer.from(buf);
+    },
+  })
+);
 
 app.get('/health', (req, res) => {
   res.json({ status: 'OK' });
@@ -66,6 +78,11 @@ function mountApi(prefix) {
   app.use(`${prefix}/orders`, orderRoutes);
   app.use(`${prefix}/inventory`, inventoryRoutes);
   app.use(`${prefix}/payments`, paymentRoutes);
+  app.use(`${prefix}/contact`, contactRoutes);
+  app.use(`${prefix}/returns`, returnsRoutes);
+  app.use(`${prefix}/wallet`, walletRoutes);
+  app.use(`${prefix}/admin`, adminRoutes);
+  app.use(`${prefix}/shipping`, shippingRoutes);
 }
 
 mountApi('/api');

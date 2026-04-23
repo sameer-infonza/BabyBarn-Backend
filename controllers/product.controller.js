@@ -15,6 +15,10 @@ export class ProductController {
     const productType = req.query.productType ? String(req.query.productType) : undefined;
     const minPrice = req.query.minPrice != null && req.query.minPrice !== '' ? Number(req.query.minPrice) : undefined;
     const maxPrice = req.query.maxPrice != null && req.query.maxPrice !== '' ? Number(req.query.maxPrice) : undefined;
+    const sizeAgeGroup =
+      req.query.sizeAgeGroup != null && String(req.query.sizeAgeGroup).trim()
+        ? String(req.query.sizeAgeGroup).trim()
+        : undefined;
 
     const listFilters = {
       search,
@@ -23,6 +27,7 @@ export class ProductController {
         productType === 'NEW' || productType === 'REFURBISHED' ? productType : undefined,
       minPrice: Number.isFinite(minPrice) ? minPrice : undefined,
       maxPrice: Number.isFinite(maxPrice) ? maxPrice : undefined,
+      sizeAgeGroup,
     };
 
     const result = await productService.getAllProducts(page, limit, categoryId, {
@@ -43,8 +48,14 @@ export class ProductController {
     const search = req.query.search ? String(req.query.search) : undefined;
     const sizeAgeGroup = req.query.sizeAgeGroup ? String(req.query.sizeAgeGroup) : undefined;
     const status = req.query.status ? String(req.query.status) : undefined;
+    const productType = req.query.productType ? String(req.query.productType) : undefined;
 
-    const listFilters = { search, sizeAgeGroup, status };
+    const listFilters = {
+      search,
+      sizeAgeGroup,
+      status,
+      productType: productType === 'NEW' || productType === 'REFURBISHED' ? productType : undefined,
+    };
 
     const [result, stats] = await Promise.all([
       productService.getAllProducts(page, limit, categoryId, { admin: true, listFilters }),

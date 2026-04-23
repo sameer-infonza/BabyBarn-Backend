@@ -1,4 +1,4 @@
--- Legacy pre-intPK migration compatibility (Product.id was TEXT at this point).
+-- Re-apply pricing columns and ProductVariant after int PK migration reset.
 ALTER TABLE "Product" ADD COLUMN IF NOT EXISTS "memberPrice" DOUBLE PRECISION;
 ALTER TABLE "Product" ADD COLUMN IF NOT EXISTS "compareAtPrice" DOUBLE PRECISION;
 ALTER TABLE "Product" ADD COLUMN IF NOT EXISTS "unitPriceAmount" DOUBLE PRECISION;
@@ -16,7 +16,7 @@ ALTER TABLE "Product" ADD COLUMN IF NOT EXISTS "gallery" JSONB;
 CREATE TABLE IF NOT EXISTS "ProductVariant" (
     "id" SERIAL NOT NULL,
     "publicId" TEXT NOT NULL,
-    "productId" TEXT NOT NULL,
+    "productId" INTEGER NOT NULL,
     "combination" JSONB NOT NULL,
     "sku" TEXT NOT NULL,
     "stock" INTEGER NOT NULL DEFAULT 0,
