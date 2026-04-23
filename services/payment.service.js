@@ -40,13 +40,60 @@ function getStripe() {
   return stripeClient;
 }
 
+function hasValidConnectAccountId(value) {
+  return typeof value === 'string' && /^acct_[A-Za-z0-9]+$/.test(value.trim());
+}
+
+async function createCheckoutSessionWithOptionalTransfer(stripe, basePayload, destinationAccount, flow) {
+  const hasDestination = hasValidConnectAccountId(destinationAccount);
+  const payload = hasDestination
+    ? {
+        ...basePayload,
+        payment_intent_data: {
+          ...(basePayload.payment_intent_data || {}),
+          transfer_data: { destination: destinationAccount.trim() },
+        },
+      }
+    : basePayload;
+
+  try {
+    return await stripe.checkout.sessions.create(payload);
+  } catch (error) {
+    const stripeCode = error?.code ? String(error.code) : '';
+    const stripeType = error?.type ? String(error.type) : '';
+    const rawMessage = error?.message ? String(error.message) : 'Stripe checkout session creation failed';
+    const lower = rawMessage.toLowerCase();
+    const connectDestinationProblem =
+      hasDestination &&
+      (stripeCode === 'resource_missing' ||
+        stripeCode === 'account_invalid' ||
+        lower.includes('transfer_data[destination]') ||
+        lower.includes('no such destination') ||
+        lower.includes('connected account'));
+
+    if (connectDestinationProblem) {
+      const fallbackPayload = { ...basePayload };
+      const retrySession = await stripe.checkout.sessions.create(fallbackPayload);
+      console.warn(`[payments] ${flow} checkout fallback without transfer_data`, {
+        destinationAccount,
+        stripeCode,
+        stripeType,
+      });
+      return retrySession;
+    }
+
+    throw new AppError(502, rawMessage, 'STRIPE_CHECKOUT_CREATE_FAILED', {
+      stripeCode: stripeCode || null,
+      stripeType: stripeType || null,
+      flow,
+    });
+  }
+}
+
 function assertConnectAccountsForOrder() {
   const stripe = getStripe();
   if (!stripe) {
     throw new AppError(503, 'Payments are not configured (missing STRIPE_SECRET_KEY)');
-  }
-  if (!config.stripe.connectStore) {
-    throw new AppError(503, 'Store payouts are not configured (missing STRIPE_CONNECT_ACCOUNT_STORE)');
   }
   return stripe;
 }
@@ -55,12 +102,6 @@ function assertConnectAccountsForMembership() {
   const stripe = getStripe();
   if (!stripe) {
     throw new AppError(503, 'Payments are not configured (missing STRIPE_SECRET_KEY)');
-  }
-  if (!config.stripe.connectMembership) {
-    throw new AppError(
-      503,
-      'Membership payouts are not configured (missing STRIPE_CONNECT_ACCOUNT_MEMBERSHIP)'
-    );
   }
   return stripe;
 }
@@ -86,7 +127,9 @@ export async function createMembershipCheckoutSession(userPublicId, opts = {}) {
 
   const unitCents = await getMembershipUnitAmountCents();
 
-  const session = await stripe.checkout.sessions.create({
+  const session = await createCheckoutSessionWithOptionalTransfer(
+    stripe,
+    {
     mode: 'payment',
     customer_email: user.email,
     line_items: [
@@ -102,18 +145,16 @@ export async function createMembershipCheckoutSession(userPublicId, opts = {}) {
         },
       },
     ],
-    payment_intent_data: {
-      transfer_data: {
-        destination: config.stripe.connectMembership,
-      },
-    },
     metadata: {
       flow: 'membership',
       userPublicId: user.publicId,
     },
     success_url: successUrl,
     cancel_url: cancelUrl,
-  });
+    },
+    config.stripe.connectMembership,
+    'membership'
+  );
 
   return { url: session.url, sessionId: session.id };
 }
@@ -141,7 +182,9 @@ export async function createOrderCheckoutSession(userPublicId, items, opts = {})
   const successUrl = `${config.storeUrl}/checkout/success?session_id={CHECKOUT_SESSION_ID}`;
   const cancelUrl = `${config.storeUrl}/checkout/error?reason=cancelled`;
 
-  const session = await stripe.checkout.sessions.create({
+  const session = await createCheckoutSessionWithOptionalTransfer(
+    stripe,
+    {
     mode: 'payment',
     customer_email: user.email,
     customer_creation: 'always',
@@ -155,18 +198,16 @@ export async function createOrderCheckoutSession(userPublicId, items, opts = {})
         },
       },
     })),
-    payment_intent_data: {
-      transfer_data: {
-        destination: config.stripe.connectStore,
-      },
-    },
     metadata: {
       flow: 'order',
       orderPublicId: order.publicId,
     },
     success_url: successUrl,
     cancel_url: cancelUrl,
-  });
+    },
+    config.stripe.connectStore,
+    'order'
+  );
 
   await prisma.order.update({
     where: { id: order.id },

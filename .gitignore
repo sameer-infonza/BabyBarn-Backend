@@ -1,10 +1,9 @@
 node_modules
 dist
 uploads
-.env
-.env.local
 .env.*.local
 .DS_Store
 *.log
 .vscode
 .idea
+config.bat
