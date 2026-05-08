@@ -9,6 +9,33 @@ import { shippingService } from './shipping.service.js';
 import { writeAdminAudit } from './audit.service.js';
 
 const prisma = new PrismaClient();
+let ensureOrderCheckoutColumnsPromise = null;
+
+async function ensureOrderCheckoutColumns() {
+  if (!ensureOrderCheckoutColumnsPromise) {
+    ensureOrderCheckoutColumnsPromise = prisma.$executeRawUnsafe(`
+      ALTER TABLE "Order"
+        ADD COLUMN IF NOT EXISTS "shippingCost" DOUBLE PRECISION NOT NULL DEFAULT 0,
+        ADD COLUMN IF NOT EXISTS "shippingAddressJson" JSONB,
+        ADD COLUMN IF NOT EXISTS "billingAddressJson" JSONB,
+        ADD COLUMN IF NOT EXISTS "shippingCarrier" TEXT,
+        ADD COLUMN IF NOT EXISTS "selectedRateId" TEXT,
+        ADD COLUMN IF NOT EXISTS "selectedRateProvider" TEXT,
+        ADD COLUMN IF NOT EXISTS "selectedRateServiceLevel" TEXT,
+        ADD COLUMN IF NOT EXISTS "selectedRateServiceToken" TEXT,
+        ADD COLUMN IF NOT EXISTS "selectedRateAmount" DOUBLE PRECISION,
+        ADD COLUMN IF NOT EXISTS "selectedRateCurrency" TEXT,
+        ADD COLUMN IF NOT EXISTS "selectedRateEstimatedDays" INTEGER,
+        ADD COLUMN IF NOT EXISTS "shippingShipmentId" TEXT,
+        ADD COLUMN IF NOT EXISTS "stripeCheckoutSessionId" TEXT;
+    `).catch((error) => {
+      // Allow retry on next request if DB role cannot alter schema.
+      ensureOrderCheckoutColumnsPromise = null;
+      throw error;
+    });
+  }
+  await ensureOrderCheckoutColumnsPromise;
+}
 
 /** Same rules as checkout quote: variant override, then ACCESS memberPrice cap when eligible. */
 function computeAppliedUnitPrice(product, variant, hasAccess) {
@@ -311,6 +338,8 @@ export class OrderService {
    * Unpaid order for Stripe Checkout — stock validated but not decremented until webhook payment success.
    */
   async createPendingOrderForStripe(userPublicId, items, opts = {}) {
+    await ensureOrderCheckoutColumns();
+
     const user = await prisma.user.findUnique({
       where: { publicId: userPublicId },
       select: { id: true, accessMemberUntil: true },
