@@ -123,10 +123,15 @@ export class ProductController {
 
   async getAllCategories(req, res) {
     const categories = await categoryService.getAllCategoriesPublic();
+    const normalized = categories.map((category) => ({
+      ...category,
+      parentId: category.parent?.publicId ?? null,
+      parent: undefined,
+    }));
 
     res.status(200).json({
       success: true,
-      data: toPublicJson(categories),
+      data: toPublicJson(normalized),
     });
   }
 }

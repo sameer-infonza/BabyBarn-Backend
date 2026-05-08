@@ -307,7 +307,12 @@ export async function listAdminTeamMembers(actorPublicId) {
       createdAt: true,
     },
   });
-  return { members: users };
+  return {
+    members: users.map((user) => ({
+      ...user,
+      roleTitle: user.phone || null,
+    })),
+  };
 }
 
 export async function createAdminTeamMember(actorPublicId, payload) {
@@ -381,7 +386,10 @@ export async function createAdminTeamMember(actorPublicId, payload) {
       meta: { error: String(error?.message || error) },
     });
   }
-  return created;
+  return {
+    ...created,
+    roleTitle: created.phone || null,
+  };
 }
 
 export async function setTeamMemberModules(actorPublicId, targetPublicId, modules) {
@@ -420,7 +428,10 @@ export async function setTeamMemberModules(actorPublicId, targetPublicId, module
     entityId: updated.publicId,
     meta: { modules: normalized },
   });
-  return updated;
+  return {
+    ...updated,
+    roleTitle: updated.phone || null,
+  };
 }
 
 export async function updateTeamMember(actorPublicId, targetPublicId, payload) {
@@ -463,5 +474,8 @@ export async function updateTeamMember(actorPublicId, targetPublicId, payload) {
       modules: updated.adminModules,
     },
   });
-  return updated;
+  return {
+    ...updated,
+    roleTitle: updated.phone || null,
+  };
 }

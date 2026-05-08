@@ -73,7 +73,10 @@ export class CategoryService {
     return prisma.category.findMany({
       where: { isActive: true },
       orderBy: { name: 'asc' },
-      include: { _count: { select: { products: true } } },
+      include: {
+        _count: { select: { products: true } },
+        parent: { select: { publicId: true } },
+      },
     });
   }
 
@@ -81,13 +84,16 @@ export class CategoryService {
   async getCategoryTree() {
     const rows = await loadAllRows();
     const byParent = buildParentMap(rows);
+    const byId = new Set(rows.map((row) => row.id));
 
     const toNode = (row) => ({
       ...row,
       children: (byParent.get(row.id) ?? []).map(toNode),
     });
 
-    const roots = byParent.get(null) ?? [];
+    const explicitRoots = byParent.get(null) ?? [];
+    const orphanRoots = rows.filter((row) => row.parentId != null && !byId.has(row.parentId));
+    const roots = [...explicitRoots, ...orphanRoots].sort((a, b) => a.name.localeCompare(b.name));
     return roots.map(toNode);
   }
 

@@ -8,6 +8,7 @@ const INTERNAL_FK_KEYS = new Set([
   'userId',
   'roleId',
   'categoryId',
+  'parentId',
   'productId',
   'orderId',
   'productVariantId',
