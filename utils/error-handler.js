@@ -14,9 +14,36 @@ export const catchAsync = (fn) => {
   };
 };
 
+function mapPrismaError(err) {
+  const prismaCode = typeof err?.code === 'string' ? err.code : '';
+  if (!/^P\d{4}$/.test(prismaCode)) return null;
+
+  if (prismaCode === 'P2025') {
+    return new AppError(404, 'Requested record was not found', `PRISMA_${prismaCode}`, { prismaCode });
+  }
+  if (prismaCode === 'P2002') {
+    return new AppError(409, 'Unique constraint failed', `PRISMA_${prismaCode}`, { prismaCode });
+  }
+  if (prismaCode === 'P2003') {
+    return new AppError(409, 'Related record constraint failed', `PRISMA_${prismaCode}`, { prismaCode });
+  }
+
+  return new AppError(500, 'Internal server error', `PRISMA_${prismaCode}`, { prismaCode });
+}
+
 export const errorHandler = (err, req, res, next) => {
   void req;
   void next;
+  const prismaMappedError = mapPrismaError(err);
+  if (prismaMappedError) {
+    console.error('[prisma]', {
+      code: err.code,
+      message: err.message,
+      meta: err.meta || null,
+    });
+    err = prismaMappedError;
+  }
+
   if (process.env.NODE_ENV === 'development' && !(err instanceof AppError)) {
     console.error('[unhandled]', err);
   }
