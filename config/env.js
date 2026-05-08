@@ -57,7 +57,12 @@ export const config = {
     customerUrl: (process.env.CUSTOMER_FRONTEND_URL || process.env.FRONTEND_URL || 'http://localhost:3000').replace(/\/$/, ''),
     adminUrl: (process.env.ADMIN_FRONTEND_URL || 'http://localhost:3001').replace(/\/$/, ''),
   },
-  storeUrl: (process.env.STORE_PUBLIC_URL || 'http://localhost:3000').replace(/\/$/, ''),
+  storeUrl: (
+    process.env.STORE_PUBLIC_URL ||
+    process.env.CUSTOMER_FRONTEND_URL ||
+    process.env.FRONTEND_URL ||
+    'http://localhost:3000'
+  ).replace(/\/$/, ''),
   trustProxy: process.env.TRUST_PROXY === 'true',
   /** Optional base URL for absolute image URLs returned to the client (no trailing slash). */
   publicBaseUrl: (process.env.PUBLIC_URL || '').replace(/\/$/, ''),

@@ -384,11 +384,24 @@ export async function processStripeWebhook(rawBody, signatureHeader) {
       return { handled: true, error: 'missing userPublicId' };
     }
     const days = parseInt(process.env.ACCESS_MEMBERSHIP_DAYS || '365', 10);
-    const until = new Date();
+    const existingUser = await prisma.user.findUnique({
+      where: { publicId: userPublicId },
+      select: { id: true, accessMemberUntil: true },
+    });
+    if (!existingUser) {
+      return { handled: true, error: 'missing user' };
+    }
+
+    // Preserve remaining active membership days on renewal.
+    const now = new Date();
+    const base = existingUser.accessMemberUntil && existingUser.accessMemberUntil > now
+      ? new Date(existingUser.accessMemberUntil)
+      : now;
+    const until = new Date(base);
     until.setUTCDate(until.getUTCDate() + days);
 
     await prisma.user.update({
-      where: { publicId: userPublicId },
+      where: { id: existingUser.id },
       data: {
         accessMemberUntil: until,
         ...(typeof session.customer === 'string' ? { stripeCustomerId: session.customer } : {}),
@@ -402,24 +415,23 @@ export async function processStripeWebhook(rawBody, signatureHeader) {
     if (!orderPublicId) {
       return { handled: true, error: 'missing orderPublicId' };
     }
+    const existingOrder = await prisma.order.findUnique({
+      where: { publicId: orderPublicId },
+      select: { paymentStatus: true },
+    });
+    if (!existingOrder) {
+      return { handled: true, flow: 'order', error: 'missing order' };
+    }
+    const alreadyPaid = existingOrder.paymentStatus === 'PAID';
+
+    let paidOrder = null;
     try {
-      const paidOrder = await orderService.fulfillUnpaidOrderAfterPayment(orderPublicId);
-      const user = await prisma.user.findUnique({
-        where: { id: paidOrder.userId },
-        select: { email: true, firstName: true, lastName: true },
-      });
-      if (user?.email) {
-        await emailService.sendTemplate({
-          to: user.email,
-          template: 'order-confirmation',
-          context: {
-            name: [user.firstName, user.lastName].filter(Boolean).join(' '),
-            orderId: paidOrder.publicId,
-            total: `$${Number(paidOrder.totalAmount).toFixed(2)}`,
-            actionUrl: `${config.frontend.customerUrl}/dashboard/orders/${paidOrder.publicId}`,
-          },
-        });
-      }
+      paidOrder = alreadyPaid
+        ? await prisma.order.findUnique({
+            where: { publicId: orderPublicId },
+            select: { userId: true, publicId: true, totalAmount: true },
+          })
+        : await orderService.fulfillUnpaidOrderAfterPayment(orderPublicId);
     } catch (err) {
       console.error('[stripe webhook] fulfill order failed', orderPublicId, err);
       await prisma.order.updateMany({
@@ -428,7 +440,33 @@ export async function processStripeWebhook(rawBody, signatureHeader) {
       });
       return { handled: true, flow: 'order', error: String(err?.message || err) };
     }
-    return { handled: true, flow: 'order' };
+
+    // Do not send a duplicate confirmation email for replayed events.
+    if (!alreadyPaid && paidOrder?.userId) {
+      try {
+        const user = await prisma.user.findUnique({
+          where: { id: paidOrder.userId },
+          select: { email: true, firstName: true, lastName: true },
+        });
+        if (user?.email) {
+          await emailService.sendTemplate({
+            to: user.email,
+            template: 'order-confirmation',
+            context: {
+              name: [user.firstName, user.lastName].filter(Boolean).join(' '),
+              orderId: paidOrder.publicId,
+              total: `$${Number(paidOrder.totalAmount).toFixed(2)}`,
+              actionUrl: `${config.frontend.customerUrl}/dashboard/orders/${paidOrder.publicId}`,
+            },
+          });
+        }
+      } catch (emailErr) {
+        // Payment/order success must not be reverted due to notification failure.
+        console.error('[stripe webhook] order confirmation email failed', orderPublicId, emailErr);
+      }
+    }
+
+    return { handled: true, flow: 'order', alreadyPaid };
   }
 
   return { handled: false };
