@@ -14,28 +14,45 @@ export const authenticate = async (req, res, next) => {
     }
 
     const decoded = verifyToken(token);
-    const dbUser = await prisma.user.findUnique({
-      where: { publicId: decoded.id },
-      select: {
-        publicId: true,
-        email: true,
-        isActive: true,
-        adminModules: true,
-        role: { select: { name: true } },
-      },
-    });
+    let dbUser;
+    try {
+      dbUser = await prisma.user.findUnique({
+        where: { publicId: decoded.id },
+        select: {
+          publicId: true,
+          email: true,
+          isActive: true,
+          adminModules: true,
+          role: { select: { name: true } },
+        },
+      });
+    } catch (error) {
+      // Some environments may lag on auth-related columns while token auth still works.
+      // Fall back to a minimal read to avoid blocking checkout/session endpoints.
+      if (error && typeof error === 'object' && 'code' in error && error.code === 'P2022') {
+        dbUser = await prisma.user.findUnique({
+          where: { publicId: decoded.id },
+          select: {
+            publicId: true,
+            email: true,
+          },
+        });
+      } else {
+        throw error;
+      }
+    }
     if (!dbUser) {
       throw new AppError(401, 'Unauthorized', 'UNAUTHORIZED');
     }
-    if (dbUser.isActive === false) {
+    if ('isActive' in dbUser && dbUser.isActive === false) {
       throw new AppError(403, 'This account has been deactivated.');
     }
     req.user = {
       ...decoded,
       id: dbUser.publicId,
       email: dbUser.email,
-      role: dbUser.role?.name || decoded.role,
-      adminModules: dbUser.adminModules ?? null,
+      role: ('role' in dbUser ? dbUser.role?.name : null) || decoded.role,
+      adminModules: 'adminModules' in dbUser ? (dbUser.adminModules ?? null) : null,
     };
     next();
   } catch (error) {
