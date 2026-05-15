@@ -14,6 +14,7 @@ import contactRoutes from './routes/contact.js';
 import returnsRoutes from './routes/returns.js';
 import walletRoutes from './routes/wallet.js';
 import adminRoutes from './routes/admin.js';
+import { orderService } from './services/order.service.js';
 import shippingRoutes from './routes/shipping.js';
 import { stripeWebhook } from './controllers/payment.controller.js';
 
@@ -131,4 +132,7 @@ app.use(errorHandler);
 const PORT = config.port;
 app.listen(PORT, () => {
   console.log(`Server is running on port ${PORT}`);
+  setInterval(() => {
+    orderService.syncUpsTrackingBatch().catch(() => {});
+  }, 15 * 60 * 1000);
 });

@@ -27,6 +27,18 @@ enum OrderPaymentStatus {
   REFUNDED
 }
 
+// Warehouse / carrier pipeline (orthogonal to OrderStatus; do not remove OrderStatus values).
+enum OrderFulfillmentStatus {
+  NEW_ORDER
+  ACCEPTED
+  PICKUP_READY
+  LABEL_GENERATED
+  SHIPPED
+  IN_TRANSIT
+  OUT_FOR_DELIVERY
+  DELIVERED
+}
+
 enum ReturnType {
   STANDARD
   REFURBISHMENT
@@ -56,6 +68,12 @@ enum CancellationReviewStatus {
   PENDING
   APPROVED
   REJECTED
+}
+
+enum ShippingProviderLogLevel {
+  INFO
+  WARN
+  ERROR
 }
 
 model Role {
@@ -244,6 +262,15 @@ model Order {
   publicId    String      @unique @default(cuid())
   userId      Int
   status      OrderStatus @default(PENDING)
+  /// Fulfillment pipeline; null until order is paid (then usually NEW_ORDER).
+  fulfillmentStatus    OrderFulfillmentStatus?
+  packageDetailsJson   Json?
+  manualShippingNotes  String?  @db.Text
+  deliveredAt          DateTime?
+  fulfillmentAcceptedAt DateTime?
+  pickupReadyAt        DateTime?
+  labelGeneratedAt     DateTime?
+  outboundShippedAt    DateTime?
   totalAmount Float
   shippingCost Float @default(0)
   shippingAddressJson Json?
@@ -282,15 +309,65 @@ model Order {
   user       User        @relation(fields: [userId], references: [id], onDelete: Cascade)
   orderItems OrderItem[]
   returnRequests ReturnRequest[]
+  trackingEvents ShipmentTrackingEvent[]
+  pickupListLines PickupListLine[]
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
   @@index([userId])
   @@index([status])
+  @@index([fulfillmentStatus])
   @@index([publicId])
   @@index([paymentStatus])
   @@index([cancellationReviewStatus])
+}
+
+model ShipmentTrackingEvent {
+  id            Int      @id @default(autoincrement())
+  publicId      String   @unique @default(cuid())
+  orderId       Int
+  order         Order    @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  source        String   @default("ups")
+  statusCode    String?
+  description   String?  @db.Text
+  location      String?
+  raw           Json?
+  eventAt       DateTime?
+  createdAt     DateTime @default(now())
+
+  @@index([orderId, createdAt])
+}
+
+model PickupList {
+  id        Int      @id @default(autoincrement())
+  publicId String   @unique @default(cuid())
+  title     String?
+  createdAt DateTime @default(now())
+  lines     PickupListLine[]
+}
+
+model PickupListLine {
+  id           Int        @id @default(autoincrement())
+  publicId     String     @unique @default(cuid())
+  pickupListId Int
+  orderId      Int
+  sortOrder    Int        @default(0)
+  pickupList   PickupList @relation(fields: [pickupListId], references: [id], onDelete: Cascade)
+  order        Order      @relation(fields: [orderId], references: [id], onDelete: Cascade)
+
+  @@unique([pickupListId, orderId])
+  @@index([orderId])
+}
+
+/// Singleton id=1 — operational shipping defaults (non-secret flags + JSON blobs).
+model ShippingSettings {
+  id                       Int      @id @default(1)
+  pickupAddressJson        Json?
+  defaultPackageJson       Json?
+  autoLabelGeneration      Boolean  @default(false)
+  manualShippingAllowed    Boolean  @default(true)
+  updatedAt                DateTime @updatedAt
 }
 
 model OrderItem {
@@ -358,6 +435,61 @@ model BusinessSettings {
   id                        Int      @id @default(1)
   accessMembershipPriceUsd  Float    @default(49)
   updatedAt                 DateTime @updatedAt
+}
+
+// Configurable shipping carrier integration (UPS, Shippo, future providers).
+model ShippingProvider {
+  id                     Int      @id @default(autoincrement())
+  publicId               String   @unique @default(cuid())
+  slug                   String   @unique
+  displayName            String
+  enabled                Boolean  @default(true)
+  isDefault              Boolean  @default(false)
+  sortOrder              Int      @default(0)
+  // AES-GCM encrypted JSON (base64); optional when env keys are used.
+  credentialsEncrypted   String?  @db.Text
+  metadata               Json?
+  createdAt              DateTime @default(now())
+  updatedAt              DateTime @updatedAt
+
+  services ShippingServiceMethod[]
+
+  @@index([enabled])
+  @@index([sortOrder])
+}
+
+// Admin-toggled methods; Shippo uses code "*" for all marketplace rates.
+model ShippingServiceMethod {
+  id                Int      @id @default(autoincrement())
+  publicId          String   @unique @default(cuid())
+  providerId        Int
+  provider          ShippingProvider @relation(fields: [providerId], references: [id], onDelete: Cascade)
+  code              String
+  displayName       String
+  enabled           Boolean  @default(true)
+  visibleAtCheckout Boolean  @default(true)
+  visibleInAdmin    Boolean  @default(true)
+  sortOrder         Int      @default(0)
+  rules             Json?
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+
+  @@unique([providerId, code])
+  @@index([providerId])
+}
+
+model ShippingProviderLog {
+  id            Int                     @id @default(autoincrement())
+  providerSlug  String
+  level         ShippingProviderLogLevel @default(INFO)
+  action        String
+  orderPublicId String?
+  message       String                  @db.Text
+  details       Json?
+  createdAt     DateTime                @default(now())
+
+  @@index([providerSlug, createdAt])
+  @@index([createdAt])
 }
 
 model StoreCreditWallet {

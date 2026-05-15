@@ -6,16 +6,9 @@ import {
   shippingShipmentSchema,
   shippingLabelSchema,
 } from '../schemas/index.js';
-import { AppError } from '../utils/error-handler.js';
 import { toPublicJson } from '../utils/serialize.js';
 
 const prisma = new PrismaClient();
-
-function parseDateOrNull(value) {
-  if (!value) return null;
-  const date = new Date(value);
-  return Number.isNaN(date.getTime()) ? null : date;
-}
 
 export class ShippingController {
   async debugRateCheck(req, res) {
@@ -57,7 +50,7 @@ export class ShippingController {
     const providerIntersection = [...usProviders].filter((p) => caProviders.has(p));
     const warnings = [];
     if (!us.ok || !ca.ok) {
-      warnings.push('One or more country checks failed; verify Shippo account carrier activation.');
+      warnings.push('One or more country checks failed; verify UPS credentials and account activation.');
     }
     if (us.ok && ca.ok && providerIntersection.length === 0) {
       warnings.push('No shared carriers between US and CA in current account/mode.');
@@ -65,7 +58,7 @@ export class ShippingController {
 
     const checks = [
       'Address fields: city/state/zip/country normalized',
-      'Carrier availability in Shippo account',
+      'UPS account and domestic rating coverage',
       'Test vs live mode parity',
       'Parcel units and values (lb/in or kg/cm)',
       'Origin address completeness',
@@ -75,7 +68,7 @@ export class ShippingController {
     res.status(200).json({
       success: true,
       data: toPublicJson({
-        mode: String(process.env.SHIPPO_API_KEY || '').startsWith('shippo_test_') ? 'test' : 'live',
+        mode: String(process.env.UPS_CLIENT_ID || '').trim() ? 'ups_configured' : 'ups_missing',
         comparison: { us, ca },
         checks,
         warnings,
@@ -121,42 +114,12 @@ export class ShippingController {
   }
 
   async shippoWebhook(req, res) {
-    const signature =
-      req.headers['x-shippo-signature'] ||
-      req.headers['shippo-signature'] ||
-      req.headers['x-shippo-signature-v1'];
-    const rawBody = req.rawBody || Buffer.from(JSON.stringify(req.body || {}));
-    const valid = shippingService.verifyShippoWebhook(rawBody, signature);
-    if (!valid) {
-      throw new AppError(401, 'Invalid Shippo webhook signature', 'SHIPPO_WEBHOOK_SIGNATURE_INVALID');
-    }
-
-    const event = req.body || {};
-    if (event.event === 'track_updated') {
-      const trackingNumber = event?.data?.tracking_number;
-      const carrier = event?.data?.carrier;
-      const status = event?.data?.tracking_status?.status;
-      if (trackingNumber && carrier) {
-        await prisma.order.updateMany({
-          where: {
-            trackingNumber: String(trackingNumber),
-            shippingCarrier: { contains: String(carrier), mode: 'insensitive' },
-          },
-          data: {
-            ...(status === 'DELIVERED' ? { status: 'DELIVERED' } : {}),
-            trackingStatus: status || null,
-            trackingStatusDetails: event?.data?.tracking_status?.status_details || null,
-            trackingStatusDate: parseDateOrNull(event?.data?.tracking_status?.status_date),
-            trackingEta: parseDateOrNull(event?.data?.eta),
-            trackingHistoryJson: Array.isArray(event?.data?.tracking_history)
-              ? event.data.tracking_history
-              : [],
-          },
-        });
-      }
-    }
-
-    res.status(200).json({ success: true, received: true });
+    void req;
+    res.status(410).json({
+      success: false,
+      code: 'SHIPPO_WEBHOOK_RETIRED',
+      message: 'Shippo webhooks are disabled. Use UPS tracking sync and admin order updates.',
+    });
   }
 }
 

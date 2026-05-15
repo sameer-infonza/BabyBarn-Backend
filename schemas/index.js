@@ -205,18 +205,21 @@ export const adminShippingUpdateSchema = z
     trackingNumber: z.string().min(1).optional(),
     shippingCarrier: z.string().min(1).optional(),
     shippingLabelUrl: z.string().max(2000).optional().nullable(),
+    manualShippingNotes: z.string().max(4000).optional().nullable(),
   })
   .refine(
     (d) =>
       Boolean(d.trackingNumber?.trim()) ||
       Boolean(d.shippingCarrier?.trim()) ||
-      d.shippingLabelUrl !== undefined,
-    { message: 'Provide trackingNumber, shippingCarrier, and/or shippingLabelUrl' }
+      d.shippingLabelUrl !== undefined ||
+      d.manualShippingNotes !== undefined,
+    { message: 'Provide at least one shipping field to update' }
   );
 
 export const adminShippingOptionsSchema = z.object({
   carrier: z.string().min(1).optional(),
   parcels: z.array(checkoutParcelSchema).optional(),
+  providerSlug: z.string().min(1).optional(),
 });
 
 const selectedRateSnapshotSchema = z.object({
@@ -234,6 +237,20 @@ export const adminGenerateLabelSchema = z.object({
   labelFileType: z.enum(['PDF_4x6', 'PDF_A4', 'PNG', 'ZPLII']).optional(),
   shipmentId: z.string().min(1).optional(),
   selectedRate: selectedRateSnapshotSchema.optional(),
+});
+
+export const orderFulfillmentActionSchema = z.object({
+  action: z.enum(['accept', 'pickup_ready', 'mark_shipped', 'mark_delivered', 'reject_unpaid']),
+});
+
+export const orderBulkFulfillmentSchema = z.object({
+  orderPublicIds: z.array(z.string().min(1)).min(1).max(100),
+  action: z.enum(['accept', 'pickup_ready', 'mark_shipped']),
+});
+
+export const pickupListCreateSchema = z.object({
+  title: z.string().max(200).optional(),
+  orderPublicIds: z.array(z.string().min(1)).min(1).max(200),
 });
 
 export const returnRequestCreateSchema = z.object({

@@ -5,9 +5,11 @@ import multer from 'multer';
 
 const UPLOAD_ROOT = path.join(process.cwd(), 'uploads');
 const PRODUCTS_DIR = path.join(UPLOAD_ROOT, 'products');
+export const SHIPPING_LABELS_DIR = path.join(UPLOAD_ROOT, 'shipping-labels');
 
 export function ensureUploadDirs() {
   fs.mkdirSync(PRODUCTS_DIR, { recursive: true });
+  fs.mkdirSync(SHIPPING_LABELS_DIR, { recursive: true });
 }
 
 const storage = multer.diskStorage({

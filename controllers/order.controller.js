@@ -10,6 +10,9 @@ import {
   adminGenerateLabelSchema,
   cancelOrderRequestSchema,
   orderCancellationReviewSchema,
+  orderFulfillmentActionSchema,
+  orderBulkFulfillmentSchema,
+  pickupListCreateSchema,
 } from '../schemas/index.js';
 import { toPublicJson } from '../utils/serialize.js';
 
@@ -75,6 +78,8 @@ export class OrderController {
       : undefined;
     const statusGroup = req.query.statusGroup ? String(req.query.statusGroup) : undefined;
 
+    const fulfillmentStatus = req.query.fulfillmentStatus ? String(req.query.fulfillmentStatus) : undefined;
+
     const result = await orderService.getAllOrders(page, limit, {
       search,
       status,
@@ -85,6 +90,7 @@ export class OrderController {
       membershipFilter,
       sortBy,
       sortOrder,
+      fulfillmentStatus,
     });
 
     res.status(200).json({
@@ -192,6 +198,51 @@ export class OrderController {
       message: `Cancellation ${body.decision === 'approve' ? 'approved' : 'rejected'}`,
       data: toPublicJson(order),
     });
+  }
+
+  async patchOrderFulfillment(req, res) {
+    const { id } = req.params;
+    const body = await validate(orderFulfillmentActionSchema, req.body);
+    const order = await orderService.patchOrderFulfillment(id, body, adminActor(req));
+    res.status(200).json({ success: true, data: toPublicJson(order) });
+  }
+
+  async bulkOrderFulfillment(req, res) {
+    const body = await validate(orderBulkFulfillmentSchema, req.body);
+    const data = await orderService.bulkPatchOrderFulfillment(body, adminActor(req));
+    res.status(200).json({ success: true, data: toPublicJson(data) });
+  }
+
+  async createPickupList(req, res) {
+    const body = await validate(pickupListCreateSchema, req.body);
+    const list = await orderService.createPickupList(body, adminActor(req));
+    res.status(201).json({ success: true, data: toPublicJson(list) });
+  }
+
+  async getPickupListPdf(req, res, next) {
+    try {
+      const { publicId } = req.params;
+      const orders = await orderService.getPickupListOrdersForPdf(publicId);
+      const { renderPickupListPdfBuffer } = await import('../services/pdf/order-documents.service.js');
+      const buf = await renderPickupListPdfBuffer({ title: `Pickup ${publicId}`, orders });
+      res.setHeader('Content-Type', 'application/pdf');
+      res.setHeader('Content-Disposition', `attachment; filename="pickup-${publicId}.pdf"`);
+      res.send(buf);
+    } catch (e) {
+      next(e);
+    }
+  }
+
+  async getOrderPdf(req, res, next) {
+    try {
+      const { id, kind } = req.params;
+      const buf = await orderService.getOrderPdfBuffer(id, kind);
+      res.setHeader('Content-Type', 'application/pdf');
+      res.setHeader('Content-Disposition', `attachment; filename="order-${id}-${kind}.pdf"`);
+      res.send(buf);
+    } catch (e) {
+      next(e);
+    }
   }
 }
 

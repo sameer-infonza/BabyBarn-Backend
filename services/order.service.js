@@ -7,6 +7,7 @@ import {
 } from './inventory.service.js';
 import { shippingService } from './shipping.service.js';
 import { writeAdminAudit } from './audit.service.js';
+import * as orderDocuments from './pdf/order-documents.service.js';
 
 const prisma = new PrismaClient();
 let ensureOrderCheckoutColumnsPromise = null;
@@ -175,6 +176,7 @@ export class OrderService {
       shippingAddress: payload?.shippingAddress,
       parcels: payload?.parcels,
       preferProviderOnly: false,
+      surface: 'checkout',
     });
     const selectedRate = resolveSelectedRate(shippingRates.rates, payload?.selectedRateId, payload?.selectedRate);
     const shippingCost = Number(selectedRate?.amount || 0);
@@ -420,6 +422,7 @@ export class OrderService {
         shippingAddress: opts.shippingAddress,
         parcels: opts.parcels,
         preferProviderOnly: false,
+        surface: 'checkout',
       });
       const selectedRate = resolveSelectedRate(shippingRates.rates, opts.selectedRateId, opts.selectedRate);
       const shippingCost = Number(selectedRate?.amount || 0);
@@ -506,7 +509,7 @@ export class OrderService {
 
       return tx.order.update({
         where: { id: order.id },
-        data: { paymentStatus: 'PAID', status: 'PROCESSING' },
+        data: { paymentStatus: 'PAID', status: 'PROCESSING', fulfillmentStatus: 'NEW_ORDER' },
         include: { orderItems: { include: { product: true } } },
       });
     });
@@ -562,6 +565,7 @@ export class OrderService {
       membershipFilter,
       sortBy = 'createdAt',
       sortOrder = 'desc',
+      fulfillmentStatus,
     } = filters;
 
     const STATUS_GROUPS = {
@@ -620,6 +624,10 @@ export class OrderService {
           { user: { lastName: { contains: q, mode: 'insensitive' } } },
         ],
       });
+    }
+    const fs = fulfillmentStatus && String(fulfillmentStatus).trim();
+    if (fs) {
+      and.push({ fulfillmentStatus: fs });
     }
     const where = and.length ? { AND: and } : {};
 
@@ -689,6 +697,7 @@ export class OrderService {
             },
           },
         },
+        trackingEvents: { orderBy: { createdAt: 'desc' }, take: 80 },
       },
     });
     if (!order) {
@@ -735,11 +744,18 @@ export class OrderService {
     if (payload.shippingLabelUrl !== undefined) {
       data.shippingLabelUrl = payload.shippingLabelUrl ? String(payload.shippingLabelUrl).trim() : null;
     }
+    if (payload.manualShippingNotes !== undefined) {
+      data.manualShippingNotes = payload.manualShippingNotes
+        ? String(payload.manualShippingNotes).trim()
+        : null;
+    }
     const shouldShip =
       data.trackingNumber &&
       ['PENDING', 'PROCESSING', 'CONFIRMED'].includes(order.status);
     if (shouldShip) {
       data.status = 'SHIPPED';
+      data.fulfillmentStatus = 'SHIPPED';
+      data.outboundShippedAt = new Date();
     }
     return prisma.order.update({
       where: { id: order.id },
@@ -761,6 +777,8 @@ export class OrderService {
       shippingAddress: order.shippingAddressJson,
       parcels: payload.parcels,
       preferProviderOnly: true,
+      surface: 'admin',
+      providerSlug: payload.providerSlug,
     });
     const carrierFilter = String(payload.carrier || '').trim().toLowerCase();
     const rates = carrierFilter
@@ -791,6 +809,8 @@ export class OrderService {
       toAddress: shippingService.getConfiguredOriginAddress(),
       parcels: payload.parcels,
       preferProviderOnly: true,
+      surface: 'admin',
+      providerSlug: payload.providerSlug,
     });
     const carrierFilter = String(payload.carrier || '').trim().toLowerCase();
     const rates = carrierFilter
@@ -810,7 +830,13 @@ export class OrderService {
   async generateAdminShippingLabel(orderPublicId, payload, actor) {
     const order = await prisma.order.findUnique({ where: { publicId: orderPublicId } });
     if (!order) throw new AppError(404, 'Order not found');
-    const label = await shippingService.generateLabel(payload);
+    const labelPayload = {
+      ...payload,
+      shippingAddress: order.shippingAddressJson || payload.shippingAddress,
+      fromAddress: shippingService.getConfiguredOriginAddress(),
+      parcels: payload.parcels,
+    };
+    const label = await shippingService.generateLabel(labelPayload);
     const updated = await prisma.order.update({
       where: { id: order.id },
       data: {
@@ -821,6 +847,9 @@ export class OrderService {
         ...(payload?.shipmentId ? { shippingShipmentId: String(payload.shipmentId) } : {}),
         ...(payload?.selectedRate ? selectedRateUpdateData(payload.selectedRate, payload?.shipmentId || order.shippingShipmentId) : {}),
         ...(['PENDING', 'PROCESSING', 'CONFIRMED'].includes(order.status) ? { status: 'SHIPPED' } : {}),
+        fulfillmentStatus: 'SHIPPED',
+        labelGeneratedAt: label.shippingLabelUrl ? new Date() : order.labelGeneratedAt,
+        outboundShippedAt: new Date(),
       },
       include: { orderItems: { include: { product: true } }, user: userForOrderList },
     });
@@ -842,7 +871,13 @@ export class OrderService {
   async generateAdminReturnLabel(orderPublicId, payload, actor) {
     const order = await prisma.order.findUnique({ where: { publicId: orderPublicId } });
     if (!order) throw new AppError(404, 'Order not found');
-    const label = await shippingService.generateLabel(payload);
+    const labelPayload = {
+      ...payload,
+      fromAddress: order.shippingAddressJson || payload.fromAddress,
+      toAddress: shippingService.getConfiguredOriginAddress(),
+      parcels: payload.parcels,
+    };
+    const label = await shippingService.generateLabel(labelPayload);
     const updated = await prisma.order.update({
       where: { id: order.id },
       data: {
@@ -967,6 +1002,188 @@ export class OrderService {
       meta: { note: note?.trim() || null },
     });
     return updated;
+  }
+
+  async patchOrderFulfillment(orderPublicId, body, actor) {
+    const order = await prisma.order.findUnique({ where: { publicId: orderPublicId } });
+    if (!order) throw new AppError(404, 'Order not found');
+    const action = String(body.action || '').trim();
+    const data = {};
+    if (action === 'accept') {
+      if (order.paymentStatus !== 'PAID') {
+        throw new AppError(400, 'Only paid orders can be accepted into fulfillment');
+      }
+      if (order.fulfillmentStatus && order.fulfillmentStatus !== 'NEW_ORDER') {
+        throw new AppError(400, 'Order is not awaiting acceptance');
+      }
+      data.fulfillmentStatus = 'ACCEPTED';
+      data.fulfillmentAcceptedAt = new Date();
+    } else if (action === 'pickup_ready') {
+      data.fulfillmentStatus = 'PICKUP_READY';
+      data.pickupReadyAt = new Date();
+    } else if (action === 'mark_shipped') {
+      data.fulfillmentStatus = 'SHIPPED';
+      data.outboundShippedAt = new Date();
+      if (['PENDING', 'PROCESSING', 'CONFIRMED'].includes(order.status)) data.status = 'SHIPPED';
+    } else if (action === 'mark_delivered') {
+      data.fulfillmentStatus = 'DELIVERED';
+      data.deliveredAt = new Date();
+      data.status = 'DELIVERED';
+    } else if (action === 'reject_unpaid') {
+      if (order.paymentStatus !== 'UNPAID') {
+        throw new AppError(400, 'Only unpaid orders can be rejected from this action');
+      }
+      data.status = 'CANCELLED';
+      data.fulfillmentStatus = null;
+    } else {
+      throw new AppError(400, 'Invalid fulfillment action', 'FULFILLMENT_ACTION_INVALID');
+    }
+    const updated = await prisma.order.update({
+      where: { id: order.id },
+      data,
+      include: { orderItems: { include: { product: true } }, user: userForOrderList },
+    });
+    await writeAdminAudit({
+      actorId: actor?.id,
+      actorEmail: actor?.email,
+      action: `FULFILLMENT_${action}`,
+      entityType: 'Order',
+      entityId: orderPublicId,
+      meta: { from: order.fulfillmentStatus, to: updated.fulfillmentStatus },
+    });
+    return updated;
+  }
+
+  async bulkPatchOrderFulfillment({ orderPublicIds, action }, actor) {
+    const results = [];
+    for (const pid of orderPublicIds) {
+      try {
+        const o = await this.patchOrderFulfillment(pid, { action }, actor);
+        results.push({ id: pid, ok: true, order: o });
+      } catch (e) {
+        results.push({ id: pid, ok: false, error: e.message });
+      }
+    }
+    return { results };
+  }
+
+  async createPickupList({ orderPublicIds, title }, actor) {
+    const orders = await prisma.order.findMany({
+      where: { publicId: { in: orderPublicIds } },
+      include: {
+        user: { select: { email: true, firstName: true, lastName: true, phone: true } },
+        orderItems: { include: { product: true } },
+      },
+    });
+    if (!orders.length) throw new AppError(400, 'No matching orders');
+    const list = await prisma.pickupList.create({
+      data: {
+        title: title || `Pickup ${new Date().toISOString().slice(0, 10)}`,
+        lines: {
+          create: orders.map((o, i) => ({ orderId: o.id, sortOrder: i })),
+        },
+      },
+      include: { lines: { include: { order: true } } },
+    });
+    await writeAdminAudit({
+      actorId: actor?.id,
+      actorEmail: actor?.email,
+      action: 'PICKUP_LIST_CREATED',
+      entityType: 'PickupList',
+      entityId: list.publicId,
+      meta: { count: orders.length },
+    });
+    return list;
+  }
+
+  async getPickupListOrdersForPdf(publicId) {
+    const list = await prisma.pickupList.findUnique({
+      where: { publicId },
+      include: {
+        lines: {
+          orderBy: { sortOrder: 'asc' },
+          include: {
+            order: {
+              include: {
+                user: { select: { email: true, firstName: true, lastName: true, phone: true } },
+                orderItems: { include: { product: true } },
+              },
+            },
+          },
+        },
+      },
+    });
+    if (!list) throw new AppError(404, 'Pickup list not found');
+    return list.lines.map((l) => l.order);
+  }
+
+  async getOrderPdfBuffer(orderPublicId, kind) {
+    const order = await prisma.order.findUnique({
+      where: { publicId: orderPublicId },
+      include: { orderItems: { include: { product: true } }, user: true },
+    });
+    if (!order) throw new AppError(404, 'Order not found');
+    if (kind === 'invoice') return orderDocuments.renderInvoicePdfBuffer(order);
+    if (kind === 'packing') return orderDocuments.renderPackingSlipPdfBuffer(order);
+    if (kind === 'summary') return orderDocuments.renderShippingSummaryPdfBuffer(order);
+    throw new AppError(400, 'Unknown PDF kind', 'PDF_KIND_INVALID');
+  }
+
+  async syncUpsTrackingBatch() {
+    const orders = await prisma.order.findMany({
+      where: {
+        trackingNumber: { not: null },
+        status: { notIn: ['DELIVERED', 'CANCELLED', 'RETURNED', 'REFUNDED'] },
+      },
+      take: 40,
+    });
+    let touched = 0;
+    for (const order of orders) {
+      try {
+        const t = await shippingService.trackShipment(order.shippingCarrier || 'UPS', order.trackingNumber);
+        const statusUp = String(t.status || '').toUpperCase();
+        let fulfillment = order.fulfillmentStatus;
+        if (statusUp.includes('DELIVERED')) fulfillment = 'DELIVERED';
+        else if (statusUp.includes('OUT FOR')) fulfillment = 'OUT_FOR_DELIVERY';
+        else if (
+          statusUp.includes('TRANSIT') ||
+          statusUp.includes('DEPART') ||
+          statusUp.includes('ARRIVAL') ||
+          statusUp.includes('SCAN')
+        ) {
+          fulfillment = 'IN_TRANSIT';
+        }
+        const statusChanged = String(t.status || '') !== String(order.trackingStatus || '');
+        if (statusChanged) {
+          await prisma.shipmentTrackingEvent.create({
+            data: {
+              orderId: order.id,
+              source: 'ups',
+              statusCode: String(t.status || '').slice(0, 120),
+              description: t.statusDetails || null,
+              raw: t.raw || t,
+              eventAt: t.statusDate ? new Date(t.statusDate) : new Date(),
+            },
+          });
+        }
+        await prisma.order.update({
+          where: { id: order.id },
+          data: {
+            trackingStatus: t.status || null,
+            trackingStatusDetails: t.statusDetails || null,
+            trackingStatusDate: t.statusDate ? new Date(t.statusDate) : new Date(),
+            trackingEta: t.eta ? new Date(t.eta) : order.trackingEta,
+            trackingHistoryJson: Array.isArray(t.history) ? t.history : [],
+            ...(fulfillment ? { fulfillmentStatus: fulfillment } : {}),
+            ...(fulfillment === 'DELIVERED' ? { status: 'DELIVERED', deliveredAt: new Date() } : {}),
+          },
+        });
+        touched += 1;
+      } catch {
+        /* ignore */
+      }
+    }
+    return { scanned: orders.length, touched };
   }
 }
 

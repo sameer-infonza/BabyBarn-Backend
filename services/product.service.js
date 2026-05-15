@@ -74,7 +74,7 @@ export class ProductService {
 
   /**
    * @param {object} [listFilters]
-   * **Public:** `search`, `sort` (newest | price_asc | price_desc | name_asc | name_desc), `productType`, `minPrice`, `maxPrice`, `sizeAgeGroup`
+   * **Public:** `search`, `sort` (newest | price_asc | price_desc | name_asc | name_desc), `productType`, `minPrice`, `maxPrice`, `sizeAgeGroup` (exact, legacy), `ageGroup` / `fitSize` (substring match on `sizeAgeGroup`, combined with AND when both set)
    * **Admin:** `search`, `sizeAgeGroup`, `status` (active | inactive | draft | low_stock | all)
    */
   async getAllProducts(page = 1, limit = 20, categoryPublicId, { admin = false, listFilters } = {}) {
@@ -98,11 +98,21 @@ export class ProductService {
       where.isDraft = false;
       where.isActiveListing = true;
       if (listFilters) {
-        const { search, productType, minPrice, maxPrice, sizeAgeGroup } = listFilters;
+        const { search, productType, minPrice, maxPrice, sizeAgeGroup, ageGroup, fitSize } = listFilters;
         if (productType === 'NEW' || productType === 'REFURBISHED') {
           where.productType = productType;
         }
-        if (sizeAgeGroup && String(sizeAgeGroup).trim()) {
+        const ageTrim = ageGroup && String(ageGroup).trim() ? String(ageGroup).trim() : null;
+        const fitTrim = fitSize && String(fitSize).trim() ? String(fitSize).trim() : null;
+        if (ageTrim || fitTrim) {
+          where.AND = where.AND ?? [];
+          if (ageTrim) {
+            where.AND.push({ sizeAgeGroup: { contains: ageTrim, mode: 'insensitive' } });
+          }
+          if (fitTrim) {
+            where.AND.push({ sizeAgeGroup: { contains: fitTrim, mode: 'insensitive' } });
+          }
+        } else if (sizeAgeGroup && String(sizeAgeGroup).trim()) {
           where.sizeAgeGroup = String(sizeAgeGroup).trim();
         }
         if (search && String(search).trim()) {

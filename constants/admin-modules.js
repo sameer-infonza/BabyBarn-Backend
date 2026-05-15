@@ -6,6 +6,7 @@ export const ADMIN_CONSOLE_ROUTE_MODULES = [
   'refurbished',
   'inventory',
   'orders',
+  'shipping',
   'returns',
   'inspection',
   'store-credit',
@@ -31,7 +32,7 @@ export const TEAM_PERMISSION_MODULES = [
 export const TEAM_PERMISSION_TO_ROUTE_MODULES = {
   'product-management': ['categories', 'products', 'refurbished'],
   'inventory-management': ['inventory', 'inspection'],
-  'order-management': ['orders'],
+  'order-management': ['orders', 'shipping'],
   'returns-refurbishment': ['returns'],
   'finance-management': ['finance', 'store-credit', 'activity'],
   'membership-management': ['access'],

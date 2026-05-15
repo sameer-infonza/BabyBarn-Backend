@@ -19,6 +19,10 @@ export class ProductController {
       req.query.sizeAgeGroup != null && String(req.query.sizeAgeGroup).trim()
         ? String(req.query.sizeAgeGroup).trim()
         : undefined;
+    const ageGroup =
+      req.query.ageGroup != null && String(req.query.ageGroup).trim() ? String(req.query.ageGroup).trim() : undefined;
+    const fitSize =
+      req.query.fitSize != null && String(req.query.fitSize).trim() ? String(req.query.fitSize).trim() : undefined;
 
     const listFilters = {
       search,
@@ -28,6 +32,8 @@ export class ProductController {
       minPrice: Number.isFinite(minPrice) ? minPrice : undefined,
       maxPrice: Number.isFinite(maxPrice) ? maxPrice : undefined,
       sizeAgeGroup,
+      ageGroup,
+      fitSize,
     };
 
     const result = await productService.getAllProducts(page, limit, categoryId, {

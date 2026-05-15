@@ -24,6 +24,41 @@ router.get(
   (req, res, next) => orderController.getAdminOrderStats(req, res).catch(next)
 );
 router.post(
+  '/admin/bulk/fulfillment',
+  authenticate,
+  authorize('ADMIN', 'ADMIN_TEAM'),
+  requireConsoleModule('orders'),
+  (req, res, next) => orderController.bulkOrderFulfillment(req, res).catch(next)
+);
+router.post(
+  '/admin/pickup-lists',
+  authenticate,
+  authorize('ADMIN', 'ADMIN_TEAM'),
+  requireConsoleModule('orders'),
+  (req, res, next) => orderController.createPickupList(req, res).catch(next)
+);
+router.get(
+  '/admin/pickup-lists/:publicId/pdf',
+  authenticate,
+  authorize('ADMIN', 'ADMIN_TEAM'),
+  requireConsoleModule('orders'),
+  (req, res, next) => orderController.getPickupListPdf(req, res, next)
+);
+router.patch(
+  '/admin/:id/fulfillment',
+  authenticate,
+  authorize('ADMIN', 'ADMIN_TEAM'),
+  requireConsoleModule('orders'),
+  (req, res, next) => orderController.patchOrderFulfillment(req, res).catch(next)
+);
+router.get(
+  '/admin/:id/pdf/:kind',
+  authenticate,
+  authorize('ADMIN', 'ADMIN_TEAM'),
+  requireConsoleModule('orders'),
+  (req, res, next) => orderController.getOrderPdf(req, res, next)
+);
+router.post(
   '/admin/:id/shipping-options',
   authenticate,
   authorize('ADMIN', 'ADMIN_TEAM'),

@@ -44,6 +44,102 @@ function hasValidConnectAccountId(value) {
   return typeof value === 'string' && /^acct_[A-Za-z0-9]+$/.test(value.trim());
 }
 
+function getFlow(metadata) {
+  return metadata && typeof metadata.flow === 'string' ? metadata.flow : null;
+}
+
+function getOrderPublicId(metadata) {
+  return metadata && typeof metadata.orderPublicId === 'string' ? metadata.orderPublicId : null;
+}
+
+async function markOrderFailedIfUnpaid(orderPublicId, source) {
+  if (!orderPublicId) return { handled: true, source, error: 'missing orderPublicId' };
+  await prisma.order.updateMany({
+    where: { publicId: orderPublicId, paymentStatus: 'UNPAID' },
+    data: { paymentStatus: 'FAILED' },
+  });
+  return { handled: true, flow: 'order', source, orderPublicId };
+}
+
+async function markOrderRefundedBySessionId(sessionId, source) {
+  if (!sessionId || typeof sessionId !== 'string') {
+    return { handled: true, source, error: 'missing sessionId' };
+  }
+  await prisma.order.updateMany({
+    where: { stripeCheckoutSessionId: sessionId, paymentStatus: { in: ['PAID', 'REFUNDED'] } },
+    data: { paymentStatus: 'REFUNDED', status: 'REFUNDED' },
+  });
+  return { handled: true, flow: 'order', source, sessionId };
+}
+
+async function getCheckoutSessionIdFromPaymentIntent(stripe, paymentIntentId) {
+  if (!paymentIntentId || typeof paymentIntentId !== 'string') return null;
+  const sessions = await stripe.checkout.sessions.list({
+    payment_intent: paymentIntentId,
+    limit: 1,
+  });
+  return sessions?.data?.[0]?.id ?? null;
+}
+
+async function handleOrderCheckoutCompleted(session) {
+  const orderPublicId = getOrderPublicId(session.metadata);
+  if (!orderPublicId) {
+    return { handled: true, error: 'missing orderPublicId' };
+  }
+  const existingOrder = await prisma.order.findUnique({
+    where: { publicId: orderPublicId },
+    select: { paymentStatus: true },
+  });
+  if (!existingOrder) {
+    return { handled: true, flow: 'order', error: 'missing order' };
+  }
+  const alreadyPaid = existingOrder.paymentStatus === 'PAID';
+
+  let paidOrder = null;
+  try {
+    paidOrder = alreadyPaid
+      ? await prisma.order.findUnique({
+          where: { publicId: orderPublicId },
+          select: { userId: true, publicId: true, totalAmount: true },
+        })
+      : await orderService.fulfillUnpaidOrderAfterPayment(orderPublicId);
+  } catch (err) {
+    console.error('[stripe webhook] fulfill order failed', orderPublicId, err);
+    await prisma.order.updateMany({
+      where: { publicId: orderPublicId, paymentStatus: 'UNPAID' },
+      data: { paymentStatus: 'FAILED' },
+    });
+    return { handled: true, flow: 'order', error: String(err?.message || err) };
+  }
+
+  // Do not send a duplicate confirmation email for replayed events.
+  if (!alreadyPaid && paidOrder?.userId) {
+    try {
+      const user = await prisma.user.findUnique({
+        where: { id: paidOrder.userId },
+        select: { email: true, firstName: true, lastName: true },
+      });
+      if (user?.email) {
+        await emailService.sendTemplate({
+          to: user.email,
+          template: 'order-confirmation',
+          context: {
+            name: [user.firstName, user.lastName].filter(Boolean).join(' '),
+            orderId: paidOrder.publicId,
+            total: `$${Number(paidOrder.totalAmount).toFixed(2)}`,
+            actionUrl: `${config.frontend.customerUrl}/dashboard/orders/${paidOrder.publicId}`,
+          },
+        });
+      }
+    } catch (emailErr) {
+      // Payment/order success must not be reverted due to notification failure.
+      console.error('[stripe webhook] order confirmation email failed', orderPublicId, emailErr);
+    }
+  }
+
+  return { handled: true, flow: 'order', alreadyPaid };
+}
+
 async function createCheckoutSessionWithOptionalTransfer(stripe, basePayload, destinationAccount, flow) {
   const hasDestination = hasValidConnectAccountId(destinationAccount);
   const payload = hasDestination
@@ -371,103 +467,84 @@ export async function processStripeWebhook(rawBody, signatureHeader) {
     config.stripe.webhookSecret
   );
 
-  if (event.type !== 'checkout.session.completed') {
-    return { handled: false, type: event.type };
-  }
-
-  const session = event.data.object;
-  const flow = session.metadata?.flow;
-
-  if (flow === 'membership') {
-    const userPublicId = session.metadata?.userPublicId;
-    if (!userPublicId) {
-      return { handled: true, error: 'missing userPublicId' };
-    }
-    const days = parseInt(process.env.ACCESS_MEMBERSHIP_DAYS || '365', 10);
-    const existingUser = await prisma.user.findUnique({
-      where: { publicId: userPublicId },
-      select: { id: true, accessMemberUntil: true },
-    });
-    if (!existingUser) {
-      return { handled: true, error: 'missing user' };
-    }
-
-    // Preserve remaining active membership days on renewal.
-    const now = new Date();
-    const base = existingUser.accessMemberUntil && existingUser.accessMemberUntil > now
-      ? new Date(existingUser.accessMemberUntil)
-      : now;
-    const until = new Date(base);
-    until.setUTCDate(until.getUTCDate() + days);
-
-    await prisma.user.update({
-      where: { id: existingUser.id },
-      data: {
-        accessMemberUntil: until,
-        ...(typeof session.customer === 'string' ? { stripeCustomerId: session.customer } : {}),
-      },
-    });
-    return { handled: true, flow: 'membership' };
-  }
-
-  if (flow === 'order') {
-    const orderPublicId = session.metadata?.orderPublicId;
-    if (!orderPublicId) {
-      return { handled: true, error: 'missing orderPublicId' };
-    }
-    const existingOrder = await prisma.order.findUnique({
-      where: { publicId: orderPublicId },
-      select: { paymentStatus: true },
-    });
-    if (!existingOrder) {
-      return { handled: true, flow: 'order', error: 'missing order' };
-    }
-    const alreadyPaid = existingOrder.paymentStatus === 'PAID';
-
-    let paidOrder = null;
-    try {
-      paidOrder = alreadyPaid
-        ? await prisma.order.findUnique({
-            where: { publicId: orderPublicId },
-            select: { userId: true, publicId: true, totalAmount: true },
-          })
-        : await orderService.fulfillUnpaidOrderAfterPayment(orderPublicId);
-    } catch (err) {
-      console.error('[stripe webhook] fulfill order failed', orderPublicId, err);
-      await prisma.order.updateMany({
-        where: { publicId: orderPublicId, paymentStatus: 'UNPAID' },
-        data: { paymentStatus: 'FAILED' },
-      });
-      return { handled: true, flow: 'order', error: String(err?.message || err) };
-    }
-
-    // Do not send a duplicate confirmation email for replayed events.
-    if (!alreadyPaid && paidOrder?.userId) {
-      try {
-        const user = await prisma.user.findUnique({
-          where: { id: paidOrder.userId },
-          select: { email: true, firstName: true, lastName: true },
-        });
-        if (user?.email) {
-          await emailService.sendTemplate({
-            to: user.email,
-            template: 'order-confirmation',
-            context: {
-              name: [user.firstName, user.lastName].filter(Boolean).join(' '),
-              orderId: paidOrder.publicId,
-              total: `$${Number(paidOrder.totalAmount).toFixed(2)}`,
-              actionUrl: `${config.frontend.customerUrl}/dashboard/orders/${paidOrder.publicId}`,
-            },
-          });
-        }
-      } catch (emailErr) {
-        // Payment/order success must not be reverted due to notification failure.
-        console.error('[stripe webhook] order confirmation email failed', orderPublicId, emailErr);
+  if (event.type === 'checkout.session.completed' || event.type === 'checkout.session.async_payment_succeeded') {
+    const session = event.data.object;
+    const flow = getFlow(session.metadata);
+    if (flow === 'membership') {
+      const userPublicId = session.metadata?.userPublicId;
+      if (!userPublicId) {
+        return { handled: true, error: 'missing userPublicId' };
       }
-    }
+      const days = parseInt(process.env.ACCESS_MEMBERSHIP_DAYS || '365', 10);
+      const existingUser = await prisma.user.findUnique({
+        where: { publicId: userPublicId },
+        select: { id: true, accessMemberUntil: true },
+      });
+      if (!existingUser) {
+        return { handled: true, error: 'missing user' };
+      }
 
-    return { handled: true, flow: 'order', alreadyPaid };
+      // Preserve remaining active membership days on renewal.
+      const now = new Date();
+      const base = existingUser.accessMemberUntil && existingUser.accessMemberUntil > now
+        ? new Date(existingUser.accessMemberUntil)
+        : now;
+      const until = new Date(base);
+      until.setUTCDate(until.getUTCDate() + days);
+
+      await prisma.user.update({
+        where: { id: existingUser.id },
+        data: {
+          accessMemberUntil: until,
+          ...(typeof session.customer === 'string' ? { stripeCustomerId: session.customer } : {}),
+        },
+      });
+      return { handled: true, flow: 'membership' };
+    }
+    if (flow === 'order') {
+      return handleOrderCheckoutCompleted(session);
+    }
+    return { handled: false, type: event.type, flow };
   }
 
-  return { handled: false };
+  if (event.type === 'checkout.session.expired' || event.type === 'checkout.session.async_payment_failed') {
+    const session = event.data.object;
+    const flow = getFlow(session.metadata);
+    if (flow !== 'order') {
+      return { handled: true, flow: flow || null, type: event.type };
+    }
+    return markOrderFailedIfUnpaid(getOrderPublicId(session.metadata), event.type);
+  }
+
+  if (event.type === 'payment_intent.payment_failed') {
+    const paymentIntent = event.data.object;
+    const paymentIntentId = typeof paymentIntent.id === 'string' ? paymentIntent.id : null;
+    const sessionId = await getCheckoutSessionIdFromPaymentIntent(stripe, paymentIntentId);
+    if (!sessionId) {
+      return { handled: true, type: event.type, error: 'checkout session not found' };
+    }
+    await prisma.order.updateMany({
+      where: { stripeCheckoutSessionId: sessionId, paymentStatus: 'UNPAID' },
+      data: { paymentStatus: 'FAILED' },
+    });
+    return { handled: true, flow: 'order', type: event.type, sessionId };
+  }
+
+  if (event.type === 'charge.refunded') {
+    const charge = event.data.object;
+    const paymentIntentId = typeof charge.payment_intent === 'string' ? charge.payment_intent : null;
+    const sessionId = await getCheckoutSessionIdFromPaymentIntent(stripe, paymentIntentId);
+    return markOrderRefundedBySessionId(sessionId, event.type);
+  }
+
+  return { handled: false, type: event.type };
 }
+
+export const supportedStripeWebhookEvents = [
+  'checkout.session.completed',
+  'checkout.session.async_payment_succeeded',
+  'checkout.session.expired',
+  'checkout.session.async_payment_failed',
+  'payment_intent.payment_failed',
+  'charge.refunded',
+];

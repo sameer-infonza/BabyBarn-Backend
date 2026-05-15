@@ -2,6 +2,7 @@ import { Router } from 'express';
 import { authenticate, authorize } from '../middleware/auth.js';
 import { requireConsoleModule } from '../middleware/admin-console.js';
 import { adminController } from '../controllers/admin.controller.js';
+import { shippingAdminController } from '../controllers/shipping-admin.controller.js';
 
 const router = Router();
 
@@ -60,6 +61,56 @@ router.patch(
   authorize('ADMIN', 'ADMIN_TEAM'),
   requireConsoleModule('access'),
   (req, res, next) => adminController.patchBusinessSettings(req, res).catch(next)
+);
+
+router.get(
+  '/shipping/config',
+  authenticate,
+  authorize('ADMIN', 'ADMIN_TEAM'),
+  requireConsoleModule('shipping'),
+  (req, res, next) => shippingAdminController.getConfig(req, res).catch(next)
+);
+router.put(
+  '/shipping/config',
+  authenticate,
+  authorize('ADMIN', 'ADMIN_TEAM'),
+  requireConsoleModule('shipping'),
+  (req, res, next) => shippingAdminController.putConfig(req, res).catch(next)
+);
+router.post(
+  '/shipping/services',
+  authenticate,
+  authorize('ADMIN', 'ADMIN_TEAM'),
+  requireConsoleModule('shipping'),
+  (req, res, next) => shippingAdminController.createService(req, res).catch(next)
+);
+router.patch(
+  '/shipping/services/:publicId',
+  authenticate,
+  authorize('ADMIN', 'ADMIN_TEAM'),
+  requireConsoleModule('shipping'),
+  (req, res, next) => shippingAdminController.patchService(req, res).catch(next)
+);
+router.delete(
+  '/shipping/services/:publicId',
+  authenticate,
+  authorize('ADMIN', 'ADMIN_TEAM'),
+  requireConsoleModule('shipping'),
+  (req, res, next) => shippingAdminController.deleteService(req, res).catch(next)
+);
+router.get(
+  '/shipping/logs',
+  authenticate,
+  authorize('ADMIN', 'ADMIN_TEAM'),
+  requireConsoleModule('shipping'),
+  (req, res, next) => shippingAdminController.listLogs(req, res).catch(next)
+);
+router.post(
+  '/shipping/test-ups',
+  authenticate,
+  authorize('ADMIN', 'ADMIN_TEAM'),
+  requireConsoleModule('shipping'),
+  (req, res, next) => shippingAdminController.testUps(req, res).catch(next)
 );
 
 router.get('/team', authenticate, authorize('ADMIN'), (req, res, next) =>
