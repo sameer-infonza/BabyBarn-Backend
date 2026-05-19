@@ -34,6 +34,24 @@ export function decodeUpsRateId(rateId) {
   }
 }
 
+export function encodeDemoRateId(payload) {
+  const json = JSON.stringify({ v: 1, ...payload });
+  const b = Buffer.from(json, 'utf8').toString('base64url');
+  return `${PREFIX}demo:${b}`;
+}
+
+export function decodeDemoRateId(rateId) {
+  const raw = String(rateId || '').trim();
+  if (!raw.startsWith(`${PREFIX}demo:`)) return null;
+  const b = raw.slice(`${PREFIX}demo:`.length);
+  try {
+    const json = Buffer.from(b, 'base64url').toString('utf8');
+    return JSON.parse(json);
+  } catch {
+    return null;
+  }
+}
+
 export function parseRateId(rateId) {
   const raw = String(rateId || '').trim();
   if (!raw) return { kind: 'empty' };
@@ -42,6 +60,9 @@ export function parseRateId(rateId) {
   }
   if (raw.startsWith(`${PREFIX}ups:`)) {
     return { kind: 'ups', payload: decodeUpsRateId(raw) };
+  }
+  if (raw.startsWith(`${PREFIX}demo:`)) {
+    return { kind: 'demo', payload: decodeDemoRateId(raw) };
   }
   return { kind: 'legacy_middleware', provider: 'unknown', raw };
 }

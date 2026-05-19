@@ -177,6 +177,7 @@ export class OrderService {
       parcels: payload?.parcels,
       preferProviderOnly: false,
       surface: 'checkout',
+      hasAccess,
     });
     const selectedRate = resolveSelectedRate(shippingRates.rates, payload?.selectedRateId, payload?.selectedRate);
     const shippingCost = Number(selectedRate?.amount || 0);
@@ -208,6 +209,7 @@ export class OrderService {
       shippingEstimate: {
         cost: shippingCost,
         provider: shippingRates.provider,
+        isDemoRates: String(shippingRates.provider || '').toLowerCase() === 'demo',
         shipmentId: shippingRates.shipmentId || null,
         selectedRate,
         rates: shippingRates.rates || [],
@@ -423,6 +425,7 @@ export class OrderService {
         parcels: opts.parcels,
         preferProviderOnly: false,
         surface: 'checkout',
+        hasAccess,
       });
       const selectedRate = resolveSelectedRate(shippingRates.rates, opts.selectedRateId, opts.selectedRate);
       const shippingCost = Number(selectedRate?.amount || 0);
@@ -432,9 +435,11 @@ export class OrderService {
         data: {
           shippingCost,
           shippingCarrier: selectedRate?.provider || null,
+          totalAmount: order.totalAmount + shippingCost,
           ...selectedRateUpdateData(selectedRate, shippingRates.shipmentId || null),
         },
       });
+      order.totalAmount = order.totalAmount + shippingCost;
 
       if (opts.storeCreditToApply && Number(opts.storeCreditToApply) > 0) {
         try {

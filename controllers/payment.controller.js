@@ -4,6 +4,7 @@ import { toPublicJson } from '../utils/serialize.js';
 import {
   createMembershipCheckoutSession,
   createOrderCheckoutSession,
+  createOrderPaymentIntent,
   getCheckoutSessionSummary,
   processStripeWebhook,
 } from '../services/payment.service.js';
@@ -47,6 +48,28 @@ export async function orderCheckout(req, res, next) {
       selectedRateId: body.selectedRateId,
       selectedRate: body.selectedRate,
       storeCreditToApply: body.storeCreditToApply,
+    });
+    res.status(200).json({ success: true, data: toPublicJson(data) });
+  } catch (e) {
+    next(e);
+  }
+}
+
+export async function orderPaymentIntent(req, res, next) {
+  try {
+    const userPublicId = req.user?.id;
+    if (!userPublicId) {
+      return res.status(401).json({ success: false, message: 'Unauthorized' });
+    }
+    const body = await validate(createOrderSchema, req.body);
+    const data = await createOrderPaymentIntent(userPublicId, body.items, {
+      shippingAddress: body.shippingAddress,
+      billingAddress: body.billingAddress,
+      parcels: body.parcels,
+      selectedRateId: body.selectedRateId,
+      selectedRate: body.selectedRate,
+      storeCreditToApply: body.storeCreditToApply,
+      saveCard: body.saveCard,
     });
     res.status(200).json({ success: true, data: toPublicJson(data) });
   } catch (e) {

@@ -154,6 +154,7 @@ export const createOrderSchema = z.object({
   selectedRateId: z.string().min(1).optional(),
   selectedRate: checkoutSelectedRateSchema.optional(),
   storeCreditToApply: z.number().min(0).optional(),
+  saveCard: z.boolean().optional(),
 });
 
 export const checkoutQuoteSchema = z.object({

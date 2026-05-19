@@ -7,6 +7,7 @@ import {
 } from './shipping-config.service.js';
 import * as upsProv from './providers/ups-shipping.provider.js';
 import { parseRateId } from './rate-id.js';
+import { buildDemoCheckoutRates } from './demo-checkout-rates.js';
 
 function fallbackQuote(address) {
   if (!address || !String(address.country || '').trim()) {
@@ -65,6 +66,23 @@ function fallbackRateFromQuote(quote) {
   };
 }
 
+function demoRatesCheckoutPayload(payload, reason) {
+  const hasAccess = Boolean(payload.hasAccess);
+  const rates = buildDemoCheckoutRates({ hasAccess });
+  return {
+    provider: 'demo',
+    shipmentId: null,
+    rates,
+    diagnostics: { mode: 'demo', reason: reason || 'ups_unavailable' },
+  };
+}
+
+function useDemoCheckoutRates(surface, payload) {
+  if (surface !== 'checkout') return false;
+  if (String(process.env.SHIPPING_DEMO_RATES || '').toLowerCase() === 'true') return true;
+  return false;
+}
+
 export async function orchestratorGetRates(payload = {}) {
   const surface = payload.surface === 'checkout' ? 'checkout' : 'admin';
   const { providers } = await loadShippingConfig();
@@ -90,10 +108,16 @@ export async function orchestratorGetRates(payload = {}) {
   const codes = methods.map((m) => String(m.code));
 
   try {
+    if (useDemoCheckoutRates(surface, payload)) {
+      return demoRatesCheckoutPayload(payload, 'forced_demo_env');
+    }
     const envOff = String(process.env.SHIPPING_UPS_ENABLED || '').toLowerCase() === 'false';
     if (envOff) {
       if (payload.preferProviderOnly) {
         throw new AppError(503, 'UPS is disabled by configuration', 'UPS_DISABLED');
+      }
+      if (surface === 'checkout') {
+        return demoRatesCheckoutPayload(payload, 'ups_disabled_env');
       }
       const fb = fallbackQuote(payload.shippingAddress || payload.toAddress || {});
       return { provider: fb.provider, shipmentId: null, rates: [fallbackRateFromQuote(fb)] };
@@ -110,6 +134,9 @@ export async function orchestratorGetRates(payload = {}) {
       if (payload.preferProviderOnly) {
         throw new AppError(503, 'UPS is not configured', 'UPS_NOT_CONFIGURED');
       }
+      if (surface === 'checkout') {
+        return demoRatesCheckoutPayload(payload, 'ups_not_configured');
+      }
       const fb = fallbackQuote(payload.shippingAddress || payload.toAddress || {});
       return { provider: fb.provider, shipmentId: null, rates: [fallbackRateFromQuote(fb)] };
     }
@@ -120,6 +147,9 @@ export async function orchestratorGetRates(payload = {}) {
       message: `UPS rates count=${upsRates.length}`,
       details: res.diagnostics || {},
     });
+    if (upsRates.length === 0 && surface === 'checkout') {
+      return demoRatesCheckoutPayload(payload, 'ups_empty_rates');
+    }
     if (payload.preferProviderOnly && upsRates.length === 0) {
       throw new AppError(422, 'No UPS rates for this route', 'SHIPPING_NO_RATES');
     }
@@ -135,6 +165,9 @@ export async function orchestratorGetRates(payload = {}) {
     if (payload.preferProviderOnly) {
       throw e instanceof AppError ? e : new AppError(e.statusCode || 502, e.message, e.code, e.details);
     }
+    if (surface === 'checkout') {
+      return demoRatesCheckoutPayload(payload, 'ups_rate_error');
+    }
     const fb = fallbackQuote(payload.shippingAddress || payload.toAddress || {});
     return { provider: fb.provider, shipmentId: null, rates: [fallbackRateFromQuote(fb)] };
   }
@@ -142,6 +175,13 @@ export async function orchestratorGetRates(payload = {}) {
 
 export async function orchestratorGenerateLabel(payload = {}) {
   const parsed = parseRateId(payload.rateId);
+  if (parsed.kind === 'demo') {
+    throw new AppError(
+      400,
+      'Demo shipping rates cannot purchase labels. Connect UPS credentials in admin shipping settings.',
+      'DEMO_RATE_LABEL_UNSUPPORTED'
+    );
+  }
   if (parsed.kind === 'ups') {
     const { providers } = await loadShippingConfig();
     const row = providers.find((p) => p.slug === 'ups' && p.enabled);
