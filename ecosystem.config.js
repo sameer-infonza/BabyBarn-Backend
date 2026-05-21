@@ -1,4 +1,6 @@
-/** PM2 process config — install on EC2: npm i -g pm2 */
+/**
+ * PM2 — Baby Barn API (port 5000)
+ */
 module.exports = {
   apps: [
     {
@@ -9,8 +11,9 @@ module.exports = {
       exec_mode: "fork",
       autorestart: true,
       max_memory_restart: "512M",
-      env: {
+      env_production: {
         NODE_ENV: "production",
+        PORT: "5000",
       },
     },
   ],

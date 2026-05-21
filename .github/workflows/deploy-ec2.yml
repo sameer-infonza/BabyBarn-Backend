@@ -14,21 +14,19 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-
       - uses: actions/setup-node@v4
         with:
           node-version: "22"
           cache: npm
-
       - run: npm ci
       - run: npm run build
 
   deploy:
     needs: ci
     runs-on: ubuntu-latest
-    if: github.ref == 'refs/heads/master' && github.event_name != 'pull_request'
+    if: github.ref == 'refs/heads/master'
     steps:
-      - name: Deploy to EC2 via SSH
+      - name: Deploy Backend to EC2
         uses: appleboy/ssh-action@v1.2.2
         with:
           host: ${{ secrets.EC2_HOST }}
@@ -39,6 +37,7 @@ jobs:
           script: |
             set -euo pipefail
             APP_DIR="${{ secrets.EC2_DEPLOY_PATH }}"
-            if [ -z "$APP_DIR" ]; then APP_DIR="$HOME/BabyBarn-Backend"; fi
+            if [ -z "$APP_DIR" ]; then APP_DIR="/var/www/BabyBarn-Backend"; fi
             cd "$APP_DIR"
-            bash scripts/deploy-ec2.sh
+            chmod +x deploy/deploy-backend.sh deploy/rollback.sh 2>/dev/null || true
+            bash deploy/deploy-backend.sh

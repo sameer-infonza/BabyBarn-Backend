@@ -1,10 +1,32 @@
-node_modules
-dist
-uploads
+# Dependencies
+node_modules/
+
+# Build / runtime
+dist/
+uploads/
+
+# Environment (never commit secrets — keep .env only on EC2)
 .env
-.env.*.local
-.DS_Store
+.env.*
+!.env.example
+
+# Logs
 *.log
-.vscode
-.idea
+logs/
+.pm2/
+
+# Deploy markers (server-only)
+.deploy-rollback
+.deploy-last-success
+
+# IDE / OS
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+*.pem
+*.ppk
+
+# Local-only
 config.bat
+coverage/

@@ -1,0 +1,142 @@
+#!/usr/bin/env bash
+# Shared EC2 deploy helpers (Ubuntu). Source from deploy/*.sh — do not run directly.
+set -euo pipefail
+
+: "${DEPLOY_APP_NAME:=app}"
+: "${DEPLOY_PM2_NAME:=app}"
+: "${DEPLOY_PORT:=5000}"
+: "${DEPLOY_TYPE:=backend}"
+: "${DEPLOY_GIT_BRANCH:=master}"
+: "${DEPLOY_ROOT:=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
+
+DEPLOY_ROLLBACK_FILE="${DEPLOY_ROOT}/.deploy-rollback"
+DEPLOY_LAST_SUCCESS_FILE="${DEPLOY_ROOT}/.deploy-last-success"
+
+configure_deploy() {
+  DEPLOY_APP_NAME="$1"
+  DEPLOY_PM2_NAME="$2"
+  DEPLOY_PORT="$3"
+  DEPLOY_TYPE="${4:-backend}"
+  DEPLOY_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+  DEPLOY_ROLLBACK_FILE="${DEPLOY_ROOT}/.deploy-rollback"
+  DEPLOY_LAST_SUCCESS_FILE="${DEPLOY_ROOT}/.deploy-last-success"
+}
+
+log() { echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] $*"; }
+
+require_env_file() {
+  if [[ ! -f "${DEPLOY_ROOT}/.env" ]]; then
+    echo "ERROR: ${DEPLOY_ROOT}/.env is missing."
+    echo "Copy .env.example to .env on the server only (never commit .env)."
+    exit 1
+  fi
+}
+
+git_sync_readonly() {
+  cd "${DEPLOY_ROOT}"
+  log "Git sync (${DEPLOY_GIT_BRANCH}) — fetch + reset (no pull, no merge)"
+  local before
+  before="$(git rev-parse HEAD)"
+  echo "${before}" > "${DEPLOY_ROLLBACK_FILE}"
+
+  git fetch origin "${DEPLOY_GIT_BRANCH}"
+  git reset --hard "origin/${DEPLOY_GIT_BRANCH}"
+  git clean -fd -e .env -e .env.* -e uploads || true
+
+  log "Now at $(git rev-parse --short HEAD) ($(git log -1 --pretty=%s))"
+}
+
+install_dependencies() {
+  cd "${DEPLOY_ROOT}"
+  log "npm ci"
+  npm ci
+}
+
+build_app() {
+  cd "${DEPLOY_ROOT}"
+  case "${DEPLOY_TYPE}" in
+    nextjs)
+      log "next build"
+      npm run build
+      ;;
+    backend)
+      log "prisma generate + migrate deploy"
+      npx prisma generate
+      npx prisma migrate deploy
+      ;;
+    *)
+      echo "Unknown DEPLOY_TYPE: ${DEPLOY_TYPE}"
+      exit 1
+      ;;
+  esac
+}
+
+pm2_reload() {
+  cd "${DEPLOY_ROOT}"
+  if ! command -v pm2 >/dev/null 2>&1; then
+    echo "WARN: pm2 not installed. Install: sudo npm install -g pm2"
+    return 1
+  fi
+  export PORT="${DEPLOY_PORT}"
+  if pm2 describe "${DEPLOY_PM2_NAME}" >/dev/null 2>&1; then
+    log "pm2 restart ${DEPLOY_PM2_NAME}"
+    pm2 restart "${DEPLOY_PM2_NAME}" --update-env
+  else
+    log "pm2 start ecosystem.config.js"
+    pm2 start ecosystem.config.js --env production
+    pm2 save
+  fi
+  pm2 status "${DEPLOY_PM2_NAME}"
+}
+
+health_hint() {
+  case "${DEPLOY_TYPE}" in
+    nextjs) log "Listen: http://127.0.0.1:${DEPLOY_PORT}" ;;
+    backend) log "Health: curl -s http://127.0.0.1:${DEPLOY_PORT}/health" ;;
+  esac
+}
+
+on_deploy_failure() {
+  log "Deploy failed — attempting rollback to ${DEPLOY_ROLLBACK_FILE}"
+  if [[ -f "${DEPLOY_ROLLBACK_FILE}" ]]; then
+    local rev
+    rev="$(cat "${DEPLOY_ROLLBACK_FILE}")"
+    cd "${DEPLOY_ROOT}"
+    git reset --hard "${rev}"
+    build_app || true
+    pm2_reload || true
+    log "Rolled back to ${rev}"
+  fi
+  exit 1
+}
+
+run_deploy() {
+  trap on_deploy_failure ERR
+  cd "${DEPLOY_ROOT}"
+  log "=== Deploy ${DEPLOY_APP_NAME} ==="
+  require_env_file
+  git_sync_readonly
+  install_dependencies
+  build_app
+  pm2_reload
+  git rev-parse HEAD > "${DEPLOY_LAST_SUCCESS_FILE}"
+  health_hint
+  trap - ERR
+  log "=== Deploy complete ==="
+}
+
+run_rollback() {
+  cd "${DEPLOY_ROOT}"
+  if [[ ! -f "${DEPLOY_LAST_SUCCESS_FILE}" ]]; then
+    echo "No ${DEPLOY_LAST_SUCCESS_FILE} — nothing to roll back to."
+    exit 1
+  fi
+  local rev
+  rev="$(cat "${DEPLOY_LAST_SUCCESS_FILE}")"
+  log "Rollback to last successful deploy: ${rev}"
+  git reset --hard "${rev}"
+  install_dependencies
+  build_app
+  pm2_reload
+  log "Rollback complete"
+}
