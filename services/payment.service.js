@@ -152,10 +152,25 @@ export async function createMembershipCheckoutSession(userPublicId, opts = {}) {
 
   const user = await prisma.user.findUnique({
     where: { publicId: userPublicId },
-    select: { email: true, publicId: true },
+    select: {
+      email: true,
+      publicId: true,
+      babyName: true,
+      membershipShippingAddressJson: true,
+    },
   });
   if (!user) {
     throw new AppError(401, 'Unauthorized');
+  }
+
+  if (opts.registration) {
+    const { saveMembershipRegistration } = await import('./membership.service.js');
+    await saveMembershipRegistration(userPublicId, opts.registration);
+  } else if (!user.babyName || !user.membershipShippingAddressJson) {
+    throw new AppError(
+      400,
+      'Complete ACCESS registration (baby name and shipping address) before checkout.'
+    );
   }
 
   const returnPath = normalizeStoreReturnPath(opts.returnTo);
@@ -395,6 +410,9 @@ export async function getCheckoutSessionSummary(userPublicId, sessionId) {
             name: true,
             slug: true,
             imageUrl: true,
+            price: true,
+            compareAtPrice: true,
+            memberPrice: true,
           },
         },
         productVariant: {
@@ -444,15 +462,30 @@ export async function getCheckoutSessionSummary(userPublicId, sessionId) {
 
   const subtotal = order.orderItems.reduce((sum, item) => sum + Number(item.price) * item.quantity, 0);
   let sessionAmountTotal = session && typeof session.amount_total === 'number' ? session.amount_total / 100 : null;
+  let paymentMethodLabel = null;
   if (!sessionAmountTotal && ref.startsWith('pi_')) {
     try {
-      const pi = await stripe.paymentIntents.retrieve(ref);
+      const pi = await stripe.paymentIntents.retrieve(ref, { expand: ['payment_method'] });
       if (typeof pi.amount === 'number') sessionAmountTotal = pi.amount / 100;
+      const pm = pi.payment_method;
+      if (pm && typeof pm === 'object' && pm.card) {
+        const brand = pm.card.brand ? String(pm.card.brand).replace(/^\w/, (c) => c.toUpperCase()) : 'Card';
+        paymentMethodLabel = `${brand} ending ${pm.card.last4 || '····'}`;
+      }
     } catch {
       sessionAmountTotal = null;
     }
   }
   const total = sessionAmountTotal ?? Number(order.totalAmount);
+
+  const savingsToday = order.orderItems.reduce((sum, item) => {
+    const paid = Number(item.price);
+    const retail = Number(item.product?.compareAtPrice || item.product?.price || paid);
+    const member = Number(item.product?.memberPrice || paid);
+    const baseline = Math.max(retail, member);
+    if (baseline > paid) return sum + (baseline - paid) * item.quantity;
+    return sum;
+  }, 0);
 
   return {
     sessionId: ref,
@@ -493,7 +526,9 @@ export async function getCheckoutSessionSummary(userPublicId, sessionId) {
         [order.user?.firstName, order.user?.lastName].filter(Boolean).join(' ') ||
         [user.firstName, user.lastName].filter(Boolean).join(' ') ||
         null,
+      methodLabel: paymentMethodLabel,
     },
+    savingsToday: Math.round(savingsToday * 100) / 100,
     customer: {
       id: user.publicId,
       email: order.user?.email || user.email,
@@ -545,35 +580,8 @@ export async function processStripeWebhook(rawBody, signatureHeader) {
     const session = event.data.object;
     const flow = getFlow(session.metadata);
     if (flow === 'membership') {
-      const userPublicId = session.metadata?.userPublicId;
-      if (!userPublicId) {
-        return { handled: true, error: 'missing userPublicId' };
-      }
-      const days = parseInt(process.env.ACCESS_MEMBERSHIP_DAYS || '365', 10);
-      const existingUser = await prisma.user.findUnique({
-        where: { publicId: userPublicId },
-        select: { id: true, accessMemberUntil: true },
-      });
-      if (!existingUser) {
-        return { handled: true, error: 'missing user' };
-      }
-
-      // Preserve remaining active membership days on renewal.
-      const now = new Date();
-      const base = existingUser.accessMemberUntil && existingUser.accessMemberUntil > now
-        ? new Date(existingUser.accessMemberUntil)
-        : now;
-      const until = new Date(base);
-      until.setUTCDate(until.getUTCDate() + days);
-
-      await prisma.user.update({
-        where: { id: existingUser.id },
-        data: {
-          accessMemberUntil: until,
-          ...(typeof session.customer === 'string' ? { stripeCustomerId: session.customer } : {}),
-        },
-      });
-      return { handled: true, flow: 'membership' };
+      const { completeMembershipPayment } = await import('./membership.service.js');
+      return completeMembershipPayment(session);
     }
     if (flow === 'order') {
       return handleOrderCheckoutCompleted(session);

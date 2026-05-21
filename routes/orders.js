@@ -73,6 +73,27 @@ router.post(
   (req, res, next) => orderController.generateAdminShippingLabel(req, res).catch(next)
 );
 router.post(
+  '/admin/:id/ups-label',
+  authenticate,
+  authorize('ADMIN', 'ADMIN_TEAM'),
+  requireConsoleModule('orders'),
+  (req, res, next) => orderController.generateAdminUpsLabel(req, res).catch(next)
+);
+router.post(
+  '/admin/bulk/ups-labels',
+  authenticate,
+  authorize('ADMIN', 'ADMIN_TEAM'),
+  requireConsoleModule('orders'),
+  (req, res, next) => orderController.bulkGenerateAdminUpsLabels(req, res).catch(next)
+);
+router.get(
+  '/admin/bulk/labels.zip',
+  authenticate,
+  authorize('ADMIN', 'ADMIN_TEAM'),
+  requireConsoleModule('orders'),
+  (req, res, next) => orderController.downloadAdminLabelsZip(req, res).catch(next)
+);
+router.post(
   '/admin/:id/return-options',
   authenticate,
   authorize('ADMIN', 'ADMIN_TEAM'),

@@ -55,16 +55,19 @@ export async function getFinanceStats({ dateFrom, dateTo } = {}) {
     },
   });
 
+  const { getMembershipRevenueStats } = await import('./membership.service.js');
+  const membershipStats = await getMembershipRevenueStats({ dateFrom, dateTo });
+
   return {
     totalRevenue: totalAgg._sum.totalAmount ?? 0,
     paidOrderCount: totalAgg._count,
     refurbishedSales: refurbishedRow,
     refundedTotal: refundedAgg._sum.totalAmount ?? 0,
     refundedOrderCount: refundedAgg._count,
-    /** Membership checkout does not create Order rows; Stripe-only. */
-    membershipRevenueInOrders: 0,
+    membershipRevenueInOrders: membershipStats.membershipRevenue,
+    membershipPaymentCount: membershipStats.membershipPaymentCount,
     membershipNote:
-      'ACCESS membership is paid via Stripe Checkout; revenue is not stored in Order totals. Use Stripe reporting for membership income.',
+      'ACCESS membership revenue is tracked in the membership payment ledger (Stripe Checkout).',
     activeMembersCount: activeMembers,
   };
 }

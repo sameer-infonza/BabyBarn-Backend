@@ -8,6 +8,7 @@ import {
   adminShippingUpdateSchema,
   adminShippingOptionsSchema,
   adminGenerateLabelSchema,
+  adminBulkUpsLabelsSchema,
   cancelOrderRequestSchema,
   orderCancellationReviewSchema,
   orderFulfillmentActionSchema,
@@ -162,6 +163,37 @@ export class OrderController {
     const body = await validate(adminGenerateLabelSchema, req.body ?? {});
     const data = await orderService.generateAdminShippingLabel(id, body, adminActor(req));
     res.status(200).json({ success: true, data: toPublicJson(data) });
+  }
+
+  async generateAdminUpsLabel(req, res) {
+    const { id } = req.params;
+    const data = await orderService.generateAdminUpsLabel(id, adminActor(req));
+    res.status(200).json({
+      success: true,
+      message: 'UPS label generated',
+      data: toPublicJson(data),
+    });
+  }
+
+  async bulkGenerateAdminUpsLabels(req, res) {
+    const body = await validate(adminBulkUpsLabelsSchema, req.body);
+    const data = await orderService.bulkGenerateAdminUpsLabels(body.orderPublicIds, adminActor(req));
+    res.status(200).json({ success: true, data: toPublicJson(data) });
+  }
+
+  async downloadAdminLabelsZip(req, res, next) {
+    try {
+      const ids = String(req.query.ids || '')
+        .split(',')
+        .map((s) => s.trim())
+        .filter(Boolean);
+      if (!ids.length) {
+        return res.status(400).json({ success: false, message: 'ids query required' });
+      }
+      await orderService.streamLabelsZip(res, ids);
+    } catch (e) {
+      next(e);
+    }
   }
 
   async getAdminReturnShippingOptions(req, res) {

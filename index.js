@@ -16,7 +16,10 @@ import walletRoutes from './routes/wallet.js';
 import adminRoutes from './routes/admin.js';
 import { orderService } from './services/order.service.js';
 import shippingRoutes from './routes/shipping.js';
+import publicRoutes from './routes/public.js';
+import membershipRoutes from './routes/membership.js';
 import { stripeWebhook } from './controllers/payment.controller.js';
+import { sendAccessRenewalReminders } from './services/membership.service.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -84,6 +87,8 @@ function mountApi(prefix) {
   app.use(`${prefix}/wallet`, walletRoutes);
   app.use(`${prefix}/admin`, adminRoutes);
   app.use(`${prefix}/shipping`, shippingRoutes);
+  app.use(`${prefix}/public`, publicRoutes);
+  app.use(`${prefix}/membership`, membershipRoutes);
 }
 
 mountApi('/api');
@@ -105,6 +110,8 @@ app.get('/api/v1', (req, res) => {
     version: '1',
     health: '/health',
     routes: {
+      public: ['/business-settings'],
+      membership: ['/registration', '/payments/history', '/savings'],
       auth: [
         '/register',
         '/login',
@@ -119,6 +126,7 @@ app.get('/api/v1', (req, res) => {
       ],
       products: ['/', '/categories', '/:slugOrPublicId'],
       orders: ['/', '/admin/all', '/:id', '/:id/status'],
+      payments: ['/checkout/membership'],
     },
   });
 });
@@ -135,4 +143,14 @@ app.listen(PORT, () => {
   setInterval(() => {
     orderService.syncUpsTrackingBatch().catch(() => {});
   }, 15 * 60 * 1000);
+
+  const renewalReminderMs = 24 * 60 * 60 * 1000;
+  setInterval(() => {
+    sendAccessRenewalReminders().catch((err) => {
+      console.error('[membership] renewal reminder job failed', err);
+    });
+  }, renewalReminderMs);
+  setTimeout(() => {
+    sendAccessRenewalReminders().catch(() => {});
+  }, 60 * 1000);
 });

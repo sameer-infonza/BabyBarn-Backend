@@ -10,7 +10,8 @@
     "start": "node index.js",
     "prisma:generate": "prisma generate",
     "prisma:migrate": "prisma migrate dev",
-    "prisma:seed": "node scripts/seed.js"
+    "prisma:seed": "node scripts/seed.js",
+    "smoke:phase2": "node scripts/phase2-smoke.mjs"
   },
   "prisma": {
     "seed": "node scripts/seed.js"
@@ -20,6 +21,7 @@
   "license": "ISC",
   "dependencies": {
     "@prisma/client": "^5.7.1",
+    "archiver": "^8.0.0",
     "axios": "^1.15.2",
     "bcryptjs": "^2.4.3",
     "cors": "^2.8.5",

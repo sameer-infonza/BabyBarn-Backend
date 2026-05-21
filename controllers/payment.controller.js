@@ -1,5 +1,5 @@
 import { validate } from '../utils/validation.js';
-import { createOrderSchema } from '../schemas/index.js';
+import { createOrderSchema, membershipCheckoutSchema } from '../schemas/index.js';
 import { toPublicJson } from '../utils/serialize.js';
 import {
   createMembershipCheckoutSession,
@@ -26,8 +26,15 @@ export async function membershipCheckout(req, res, next) {
     if (!userPublicId) {
       return res.status(401).json({ success: false, message: 'Unauthorized' });
     }
-    const returnTo = req.body && typeof req.body.returnTo === 'string' ? req.body.returnTo : undefined;
-    const data = await createMembershipCheckoutSession(userPublicId, { returnTo });
+    const body = await validate(membershipCheckoutSchema, req.body ?? {});
+    const registration =
+      body.babyName && body.shippingAddress
+        ? { babyName: body.babyName, shippingAddress: body.shippingAddress }
+        : undefined;
+    const data = await createMembershipCheckoutSession(userPublicId, {
+      returnTo: body.returnTo,
+      registration,
+    });
     res.status(200).json({ success: true, data: toPublicJson(data) });
   } catch (e) {
     next(e);

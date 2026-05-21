@@ -26,9 +26,9 @@ function upsAddressLine(addr) {
   return { AddressLine: lines };
 }
 
-function buildShopPayload({ from, to, parcel, accountNumber }) {
+function buildShopPayload({ from, to, parcel, accountNumber, packageType = '02' }) {
   const pkg = {
-    PackagingType: { Code: '02' },
+    PackagingType: { Code: packageType || '02' },
     Dimensions: {
       UnitOfMeasurement: { Code: parcel.distance_unit === 'cm' ? 'CM' : 'IN' },
       Length: String(parcel.length || '10'),
@@ -99,6 +99,8 @@ export class UpsClient {
     this.accountNumber = opts.accountNumber || process.env.UPS_ACCOUNT_NUMBER || '';
     this.baseUrl = (opts.baseUrl || process.env.UPS_API_BASE_URL || 'https://wwwcie.ups.com').replace(/\/$/, '');
     this.apiVersion = opts.apiVersion || process.env.UPS_RATING_VERSION || 'v2409';
+    this.pickupType = String(opts.pickupType || process.env.UPS_PICKUP_TYPE || '01').trim();
+    this.defaultPackageType = String(opts.defaultPackageType || process.env.UPS_DEFAULT_PACKAGE_TYPE || '02').trim();
     this.token = null;
     this.tokenExpiresAt = 0;
     this.http = axios.create({
@@ -139,7 +141,13 @@ export class UpsClient {
       throw { statusCode: 503, code: 'UPS_NOT_CONFIGURED', message: 'UPS credentials are not configured' };
     }
     const token = await this.getAccessToken();
-    const body = buildShopPayload({ from, to, parcel, accountNumber: this.accountNumber });
+    const body = buildShopPayload({
+      from,
+      to,
+      parcel,
+      accountNumber: this.accountNumber,
+      packageType: this.defaultPackageType,
+    });
     const transId = `bb-${Date.now()}`;
     try {
       const { data } = await this.http.post(`/api/rating/${this.apiVersion}/Shop`, body, {
@@ -210,7 +218,7 @@ export class UpsClient {
       CountryCode: String(a.country || 'US').slice(0, 2).toUpperCase(),
     });
     const pkg = {
-      Packaging: { Code: '02' },
+      Packaging: { Code: this.defaultPackageType || '02' },
       Dimensions: {
         UnitOfMeasurement: { Code: parcel.distance_unit === 'cm' ? 'CM' : 'IN' },
         Length: String(parcel.length || '10'),
@@ -256,6 +264,9 @@ export class UpsClient {
             ShipmentCharge: { Type: '01', BillShipper: { AccountNumber: acct } },
           },
           Service: { Code: String(serviceCode), Description: 'Ship' },
+          ...(this.pickupType
+            ? { ShipmentServiceOptions: { PickupType: { Code: this.pickupType } } }
+            : {}),
           Package: pkg,
         },
         LabelSpecification: {

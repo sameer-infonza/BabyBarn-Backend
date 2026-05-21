@@ -28,6 +28,8 @@ function mergeUpsCredentials(providerRow) {
     clientSecret: String(fromDb?.clientSecret || fromEnv.clientSecret || '').trim(),
     accountNumber: String(fromDb?.accountNumber || fromEnv.accountNumber || '').trim(),
     baseUrl: String(fromDb?.baseUrl || fromEnv.baseUrl || '').trim() || undefined,
+    pickupType: String(fromDb?.pickupType || process.env.UPS_PICKUP_TYPE || '01').trim(),
+    defaultPackageType: String(fromDb?.defaultPackageType || process.env.UPS_DEFAULT_PACKAGE_TYPE || '02').trim(),
   };
   return merged;
 }

@@ -8,6 +8,12 @@ import {
 import { shippingService } from './shipping.service.js';
 import { writeAdminAudit } from './audit.service.js';
 import * as orderDocuments from './pdf/order-documents.service.js';
+import { emailService } from './email.service.js';
+import { config } from '../config/env.js';
+import { buildParcelsForOrder } from './shipping/order-parcels.js';
+import fs from 'fs';
+import path from 'path';
+import { SHIPPING_LABELS_DIR } from '../utils/product-upload.js';
 
 const prisma = new PrismaClient();
 let ensureOrderCheckoutColumnsPromise = null;
@@ -832,16 +838,84 @@ export class OrderService {
     };
   }
 
+  async resolveRateIdForOrder(order, payload = {}) {
+    if (payload.rateId) return String(payload.rateId).trim();
+    if (order.selectedRateId) return String(order.selectedRateId).trim();
+
+    const parcels = payload.parcels || (await buildParcelsForOrder(order));
+    const options = await this.getAdminShippingOptions(order.publicId, { parcels });
+    const rates = options.rates || [];
+    if (!rates.length) {
+      throw new AppError(422, 'No UPS rates available for this order. Check UPS account activation.', 'SHIPPING_NO_RATES');
+    }
+    const matchToken = order.selectedRateServiceToken
+      ? rates.find((r) => r.serviceToken === order.selectedRateServiceToken)
+      : null;
+    const matchLevel = order.selectedRateServiceLevel
+      ? rates.find((r) => String(r.serviceLevel || '').includes(order.selectedRateServiceLevel))
+      : null;
+    return (matchToken || matchLevel || rates[0]).rateId;
+  }
+
+  async sendOrderTrackingEmail(order, trackingNumber) {
+    const user = order.user;
+    if (!user?.email || !trackingNumber) return;
+    const name = [user.firstName, user.lastName].filter(Boolean).join(' ') || 'there';
+    const actionUrl = `${config.frontend.customerUrl}/dashboard/orders/${order.publicId}`;
+    try {
+      await emailService.sendTemplate({
+        to: user.email,
+        template: 'order-tracking',
+        context: {
+          name,
+          orderId: order.publicId,
+          trackingNumber,
+          carrier: order.shippingCarrier || 'UPS',
+          actionUrl,
+        },
+      });
+    } catch (err) {
+      console.error('[order] tracking email failed', user.email, err);
+    }
+  }
+
   async generateAdminShippingLabel(orderPublicId, payload, actor) {
-    const order = await prisma.order.findUnique({ where: { publicId: orderPublicId } });
+    const order = await prisma.order.findUnique({
+      where: { publicId: orderPublicId },
+      include: {
+        orderItems: { include: { product: true, productVariant: true } },
+        user: { select: { email: true, firstName: true, lastName: true } },
+      },
+    });
     if (!order) throw new AppError(404, 'Order not found');
+    if (!order.shippingAddressJson) {
+      throw new AppError(400, 'Order has no shipping address', 'SHIPPING_ADDRESS_MISSING');
+    }
+
+    const parcels = payload.parcels?.length ? payload.parcels : await buildParcelsForOrder(order);
+    const rateId = await this.resolveRateIdForOrder(order, { ...payload, parcels });
+
     const labelPayload = {
       ...payload,
-      shippingAddress: order.shippingAddressJson || payload.shippingAddress,
+      rateId,
+      shippingAddress: order.shippingAddressJson,
       fromAddress: shippingService.getConfiguredOriginAddress(),
-      parcels: payload.parcels,
+      parcels,
     };
     const label = await shippingService.generateLabel(labelPayload);
+
+    const packageDetailsJson = {
+      parcels,
+      ups: {
+        trackingNumber: label.trackingNumber || null,
+        transactionId: label.transactionId || null,
+        shipmentId: payload?.shipmentId || order.shippingShipmentId || null,
+        labelUrl: label.shippingLabelUrl || null,
+        generatedAt: new Date().toISOString(),
+        serviceCode: order.selectedRateServiceToken || null,
+      },
+    };
+
     const updated = await prisma.order.update({
       where: { id: order.id },
       data: {
@@ -851,13 +925,23 @@ export class OrderService {
         ...(label.transactionId ? { shippingTransactionId: label.transactionId } : {}),
         ...(payload?.shipmentId ? { shippingShipmentId: String(payload.shipmentId) } : {}),
         ...(payload?.selectedRate ? selectedRateUpdateData(payload.selectedRate, payload?.shipmentId || order.shippingShipmentId) : {}),
-        ...(['PENDING', 'PROCESSING', 'CONFIRMED'].includes(order.status) ? { status: 'SHIPPED' } : {}),
-        fulfillmentStatus: 'SHIPPED',
-        labelGeneratedAt: label.shippingLabelUrl ? new Date() : order.labelGeneratedAt,
-        outboundShippedAt: new Date(),
+        fulfillmentStatus: 'PICKUP_READY',
+        labelGeneratedAt: new Date(),
+        packageDetailsJson,
+        trackingStatus: 'LABEL_CREATED',
+        trackingStatusDetails: 'UPS shipping label generated',
+        trackingStatusDate: new Date(),
+        ...(order.fulfillmentStatus === 'NEW_ORDER' || !order.fulfillmentAcceptedAt
+          ? { fulfillmentAcceptedAt: new Date() }
+          : {}),
       },
       include: { orderItems: { include: { product: true } }, user: userForOrderList },
     });
+
+    if (label.trackingNumber) {
+      await this.sendOrderTrackingEmail(updated, label.trackingNumber);
+    }
+
     await writeAdminAudit({
       actorId: actor?.id,
       actorEmail: actor?.email,
@@ -865,12 +949,63 @@ export class OrderService {
       entityType: 'Order',
       entityId: orderPublicId,
       meta: {
-        rateId: payload?.rateId,
+        rateId,
         labelFileType: payload?.labelFileType || 'PDF_4x6',
         trackingNumber: label.trackingNumber || null,
       },
     });
     return { order: updated, label };
+  }
+
+  /** One-click UPS label: order address + estimated parcel + checkout rate (or best UPS rate). */
+  async generateAdminUpsLabel(orderPublicId, actor) {
+    return this.generateAdminShippingLabel(orderPublicId, {}, actor);
+  }
+
+  async bulkGenerateAdminUpsLabels(orderPublicIds, actor) {
+    const results = [];
+    for (const pid of orderPublicIds) {
+      try {
+        const { order, label } = await this.generateAdminUpsLabel(pid, actor);
+        results.push({
+          id: pid,
+          ok: true,
+          trackingNumber: label.trackingNumber || order.trackingNumber,
+          shippingLabelUrl: label.shippingLabelUrl || order.shippingLabelUrl,
+        });
+      } catch (e) {
+        results.push({ id: pid, ok: false, error: e.message || String(e) });
+      }
+    }
+    return { results };
+  }
+
+  async streamLabelsZip(res, orderPublicIds) {
+    const orders = await prisma.order.findMany({
+      where: { publicId: { in: orderPublicIds }, shippingLabelUrl: { not: null } },
+      select: { publicId: true, shippingLabelUrl: true },
+    });
+    if (!orders.length) {
+      throw new AppError(404, 'No orders with labels found');
+    }
+
+    const archiver = (await import('archiver')).default;
+    const archive = archiver('zip', { zlib: { level: 9 } });
+    res.setHeader('Content-Type', 'application/zip');
+    res.setHeader(
+      'Content-Disposition',
+      `attachment; filename="shipping-labels-${Date.now()}.zip"`
+    );
+    archive.pipe(res);
+
+    for (const o of orders) {
+      const rel = String(o.shippingLabelUrl || '').replace(/^\/uploads\/shipping-labels\//, '');
+      const abs = path.join(SHIPPING_LABELS_DIR, rel);
+      if (fs.existsSync(abs)) {
+        archive.file(abs, { name: `${o.publicId}-${path.basename(abs)}` });
+      }
+    }
+    await archive.finalize();
   }
 
   async generateAdminReturnLabel(orderPublicId, payload, actor) {

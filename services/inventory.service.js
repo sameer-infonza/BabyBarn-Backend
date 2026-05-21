@@ -335,6 +335,10 @@ export class InventoryService {
   }
 
   async updateProductType(productPublicId, productType) {
+    const { isRefurbishedEnabled } = await import('../config/feature-flags.js');
+    if (productType === 'REFURBISHED' && !isRefurbishedEnabled()) {
+      throw new AppError(400, 'Refurbished products are temporarily disabled', 'REFURBISHED_DISABLED');
+    }
     const product = await prisma.product.findUnique({ where: { publicId: productPublicId } });
     if (!product) {
       throw new AppError(404, 'Product not found');

@@ -58,6 +58,11 @@ enum StoreCreditTxnType {
   ADJUSTED
 }
 
+enum MembershipPaymentType {
+  PURCHASE
+  RENEWAL
+}
+
 enum ProductType {
   NEW
   REFURBISHED
@@ -103,8 +108,13 @@ model User {
   inventoryAdjustments   InventoryAdjustment[]
   returnRequests         ReturnRequest[]
   storeCreditWallet      StoreCreditWallet?
+  membershipPayments     MembershipPayment[]
 
   stripeCustomerId   String?
+  accessNumber       String?   @unique
+  babyName           String?
+  membershipShippingAddressJson Json?
+  accessRenewalReminderSentAt DateTime?
   accessMemberUntil  DateTime?
   emailVerifiedAt    DateTime?
   // When false, customer cannot sign in.
@@ -119,6 +129,24 @@ model User {
   @@index([roleId])
   @@index([publicId])
   @@index([isActive])
+  @@index([accessNumber])
+}
+
+model MembershipPayment {
+  id        Int      @id @default(autoincrement())
+  publicId  String   @unique @default(cuid())
+  userId    Int
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  type      MembershipPaymentType
+  amount    Float
+  currency  String   @default("usd")
+  stripeSessionId String?
+  paidAt    DateTime @default(now())
+  accessValidUntil DateTime?
+
+  @@index([userId])
+  @@index([paidAt])
+  @@index([stripeSessionId])
 }
 
 model EmailVerificationToken {

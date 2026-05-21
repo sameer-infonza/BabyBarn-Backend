@@ -70,6 +70,10 @@ export class ReturnsService {
     if (!orderItem) throw new AppError(404, 'Order item not found');
 
     if (payload.type === 'REFURBISHMENT') {
+      const { isRefurbishedEnabled } = await import('../config/feature-flags.js');
+      if (!isRefurbishedEnabled()) {
+        throw new AppError(403, 'Refurbishment returns are not available yet');
+      }
       const hasAccess = Boolean(user.accessMemberUntil && user.accessMemberUntil > new Date());
       if (!hasAccess) throw new AppError(403, 'ACCESS membership required for refurbishment returns');
     }

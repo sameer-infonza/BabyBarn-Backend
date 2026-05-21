@@ -118,6 +118,19 @@ export function renderEmailTemplate(template, context) {
     return { subject, html, text };
   }
 
+  if (template === 'order-tracking') {
+    const subject = 'Your Baby Barn order has shipped';
+    const bodyHtml = `
+      <p>Hi ${escapeHtml(context.name || 'there')},</p>
+      <p>Your order <strong>${escapeHtml(context.orderId || '')}</strong> is on its way.</p>
+      <p><strong>${escapeHtml(context.carrier || 'UPS')}</strong> tracking: <strong>${escapeHtml(context.trackingNumber || '')}</strong></p>
+      <p>${linkButton(context.actionUrl, 'Track your order')}</p>
+    `;
+    const html = renderLayout({ title: subject, preview: 'Tracking number inside', bodyHtml });
+    const text = `Order ${context.orderId} shipped. ${context.carrier} ${context.trackingNumber}. ${context.actionUrl}`;
+    return { subject, html, text };
+  }
+
   if (template === 'order-confirmation') {
     const subject = 'Your Baby Barn order is confirmed';
     const bodyHtml = `
@@ -152,6 +165,61 @@ export function renderEmailTemplate(template, context) {
     `;
     const html = renderLayout({ title: subject, preview: 'Store credit update', bodyHtml });
     const text = `Store credit updated by ${context.amount}. View: ${context.actionUrl}`;
+    return { subject, html, text };
+  }
+
+  if (template === 'access-purchase') {
+    const subject = 'Your ACCESS membership is active';
+    const bodyHtml = `
+      <p>Hi ${escapeHtml(context.name || 'there')},</p>
+      <p>Thank you for joining Baby Barn ACCESS. Your member number is <strong>${escapeHtml(context.accessNumber || '')}</strong>.</p>
+      <p>Amount paid: <strong>${escapeHtml(context.amount || '')}</strong></p>
+      <p>Valid through: <strong>${escapeHtml(context.validUntil || '')}</strong></p>
+      <p>${linkButton(context.actionUrl, 'View membership')}</p>
+    `;
+    const html = renderLayout({ title: subject, preview: 'ACCESS membership confirmed', bodyHtml });
+    const text = `ACCESS active. Member ${context.accessNumber}. Valid until ${context.validUntil}. ${context.actionUrl}`;
+    return { subject, html, text };
+  }
+
+  if (template === 'access-renewal') {
+    const subject = 'Your ACCESS membership has been renewed';
+    const bodyHtml = `
+      <p>Hi ${escapeHtml(context.name || 'there')},</p>
+      <p>Your ACCESS membership (${escapeHtml(context.accessNumber || '')}) has been renewed.</p>
+      <p>Amount paid: <strong>${escapeHtml(context.amount || '')}</strong></p>
+      <p>New expiry: <strong>${escapeHtml(context.validUntil || '')}</strong></p>
+      <p>${linkButton(context.actionUrl, 'View membership')}</p>
+    `;
+    const html = renderLayout({ title: subject, preview: 'ACCESS renewed', bodyHtml });
+    const text = `ACCESS renewed until ${context.validUntil}. ${context.actionUrl}`;
+    return { subject, html, text };
+  }
+
+  if (template === 'access-renewal-reminder') {
+    const subject = 'Your ACCESS membership renews soon';
+    const bodyHtml = `
+      <p>Hi ${escapeHtml(context.name || 'there')},</p>
+      <p>Your ACCESS membership (${escapeHtml(context.accessNumber || '')}) expires on <strong>${escapeHtml(context.validUntil || '')}</strong>.</p>
+      <p>Renew now to keep member pricing, returns, and refurbished access without interruption.</p>
+      <p>${linkButton(context.actionUrl, 'Renew ACCESS')}</p>
+      <p style="font-size:12px;color:#6b7280;">ACCESS is an annual one-time payment — not a recurring subscription.</p>
+    `;
+    const html = renderLayout({ title: subject, preview: 'Renew ACCESS before it expires', bodyHtml });
+    const text = `ACCESS expires ${context.validUntil}. Renew: ${context.actionUrl}`;
+    return { subject, html, text };
+  }
+
+  if (template === 'access-expired') {
+    const subject = 'Your ACCESS membership has expired';
+    const bodyHtml = `
+      <p>Hi ${escapeHtml(context.name || 'there')},</p>
+      <p>Your ACCESS membership expired on <strong>${escapeHtml(context.validUntil || '')}</strong>.</p>
+      <p>Reactivate anytime to restore member pricing and benefits.</p>
+      <p>${linkButton(context.actionUrl, 'Reactivate ACCESS')}</p>
+    `;
+    const html = renderLayout({ title: subject, preview: 'ACCESS expired', bodyHtml });
+    const text = `ACCESS expired. Reactivate: ${context.actionUrl}`;
     return { subject, html, text };
   }
 

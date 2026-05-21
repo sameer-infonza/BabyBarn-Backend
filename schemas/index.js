@@ -234,10 +234,15 @@ const selectedRateSnapshotSchema = z.object({
 });
 
 export const adminGenerateLabelSchema = z.object({
-  rateId: z.string().min(1),
+  rateId: z.string().min(1).optional(),
   labelFileType: z.enum(['PDF_4x6', 'PDF_A4', 'PNG', 'ZPLII']).optional(),
   shipmentId: z.string().min(1).optional(),
   selectedRate: selectedRateSnapshotSchema.optional(),
+  parcels: z.array(checkoutParcelSchema).optional(),
+});
+
+export const adminBulkUpsLabelsSchema = z.object({
+  orderPublicIds: z.array(z.string().min(1)).min(1).max(50),
 });
 
 export const orderFulfillmentActionSchema = z.object({
@@ -347,4 +352,26 @@ export const shippingLabelSchema = z.object({
   rateId: z.string().min(1),
   labelFileType: z.enum(['PDF_4x6', 'PDF_A4', 'PNG', 'ZPLII']).optional(),
   orderId: z.string().min(1).optional(),
+});
+
+const membershipShippingSchema = z.object({
+  fullName: z.string().min(1).optional(),
+  addressLine1: z.string().min(1),
+  addressLine2: z.string().optional().nullable(),
+  city: z.string().min(1),
+  state: z.string().min(1),
+  zipCode: z.string().min(1),
+  country: z.string().min(1).default('US'),
+  phoneNumber: z.string().min(6).max(30).optional().nullable(),
+});
+
+export const membershipRegistrationSchema = z.object({
+  babyName: z.string().min(1, 'Baby name is required'),
+  shippingAddress: membershipShippingSchema,
+});
+
+export const membershipCheckoutSchema = z.object({
+  returnTo: z.string().max(500).optional(),
+  babyName: z.string().min(1).optional(),
+  shippingAddress: membershipShippingSchema.optional(),
 });

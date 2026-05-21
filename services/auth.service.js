@@ -24,6 +24,9 @@ function toPublicUser(user) {
     role: roleName,
     accessMemberUntil: accessUntil ? accessUntil.toISOString() : null,
     accessMemberActive: Boolean(accessActive),
+    accessNumber: user.accessNumber ?? undefined,
+    babyName: user.babyName ?? undefined,
+    membershipShippingAddressJson: user.membershipShippingAddressJson ?? undefined,
   };
   if (roleName === 'ADMIN' || roleName === 'ADMIN_TEAM') {
     out.adminModules = user.adminModules !== undefined ? user.adminModules : null;
@@ -181,6 +184,9 @@ export class AuthService {
         phone: true,
         createdAt: true,
         accessMemberUntil: true,
+        accessNumber: true,
+        babyName: true,
+        membershipShippingAddressJson: true,
         adminModules: true,
         role: { select: { name: true } },
       },
@@ -201,6 +207,9 @@ export class AuthService {
       accessMemberUntil: user.accessMemberUntil?.toISOString() ?? null,
       accessMemberActive:
         user.accessMemberUntil != null && user.accessMemberUntil > new Date(),
+      accessNumber: user.accessNumber ?? undefined,
+      babyName: user.babyName ?? undefined,
+      membershipShippingAddressJson: user.membershipShippingAddressJson ?? undefined,
     };
     if (user.role.name === 'ADMIN' || user.role.name === 'ADMIN_TEAM') {
       base.adminModules = user.adminModules ?? null;

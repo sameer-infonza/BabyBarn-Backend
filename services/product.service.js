@@ -79,6 +79,18 @@ export class ProductService {
    */
   async getAllProducts(page = 1, limit = 20, categoryPublicId, { admin = false, listFilters } = {}) {
     const skip = (page - 1) * limit;
+    const { isRefurbishedEnabled } = await import('../config/feature-flags.js');
+    const refurbishedEnabled = isRefurbishedEnabled();
+    if (
+      !admin &&
+      listFilters?.productType === 'REFURBISHED' &&
+      !refurbishedEnabled
+    ) {
+      return {
+        products: [],
+        pagination: { total: 0, page, limit, pages: 1 },
+      };
+    }
 
     let categoryId;
     if (categoryPublicId) {
@@ -101,6 +113,8 @@ export class ProductService {
         const { search, productType, minPrice, maxPrice, sizeAgeGroup, ageGroup, fitSize } = listFilters;
         if (productType === 'NEW' || productType === 'REFURBISHED') {
           where.productType = productType;
+        } else if (!refurbishedEnabled) {
+          where.productType = { not: 'REFURBISHED' };
         }
         const ageTrim = ageGroup && String(ageGroup).trim() ? String(ageGroup).trim() : null;
         const fitTrim = fitSize && String(fitSize).trim() ? String(fitSize).trim() : null;
@@ -251,10 +265,16 @@ export class ProductService {
       throw new AppError(404, 'Product not found');
     }
 
+    const { isRefurbishedEnabled } = await import('../config/feature-flags.js');
+    if (!admin && product.productType === 'REFURBISHED' && !isRefurbishedEnabled()) {
+      throw new AppError(404, 'Product not found');
+    }
+
     return product;
   }
 
   async createProduct(data) {
+    const { isRefurbishedEnabled } = await import('../config/feature-flags.js');
     const {
       categoryId: categoryPublicId,
       variants = [],
@@ -281,6 +301,10 @@ export class ProductService {
       isActiveListing = true,
       productType = 'NEW',
     } = data;
+
+    if (productType === 'REFURBISHED' && !isRefurbishedEnabled()) {
+      throw new AppError(400, 'Refurbished products are temporarily disabled', 'REFURBISHED_DISABLED');
+    }
 
     const category = await prisma.category.findUnique({
       where: { publicId: categoryPublicId },
@@ -403,6 +427,11 @@ export class ProductService {
 
     if (!product) {
       throw new AppError(404, 'Product not found');
+    }
+
+    const { isRefurbishedEnabled } = await import('../config/feature-flags.js');
+    if (data.productType === 'REFURBISHED' && !isRefurbishedEnabled()) {
+      throw new AppError(400, 'Refurbished products are temporarily disabled', 'REFURBISHED_DISABLED');
     }
 
     const {
