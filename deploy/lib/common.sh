@@ -34,6 +34,26 @@ require_env_file() {
   fi
 }
 
+validate_production_env() {
+  case "${DEPLOY_TYPE}" in
+    nextjs)
+      local api_url
+      api_url="$(grep -E '^NEXT_PUBLIC_API_URL=' "${DEPLOY_ROOT}/.env" 2>/dev/null | head -1 | cut -d= -f2- | tr -d '"' | tr -d "'" | xargs || true)"
+      if [[ -n "$api_url" ]] && echo "$api_url" | grep -qiE 'localhost|127\.0\.0\.1'; then
+        log "WARN: NEXT_PUBLIC_API_URL is localhost — client will use /api proxy; set http://YOUR_HOST:5000/api for clarity"
+      fi
+      ;;
+    backend)
+      local cors_blob
+      cors_blob="$(grep -E '^(CORS_ORIGIN|FRONTEND_USER_URLS|FRONTEND_ADMIN_URLS)=' "${DEPLOY_ROOT}/.env" 2>/dev/null || true)"
+      if [[ -z "$cors_blob" ]] || ! echo "$cors_blob" | grep -qvE 'localhost|127\.0\.0\.1'; then
+        echo "ERROR: Backend .env must allow production frontends in CORS_ORIGIN (e.g. http://YOUR_IP:3000,http://YOUR_IP:3001)"
+        exit 1
+      fi
+      ;;
+  esac
+}
+
 git_sync_readonly() {
   cd "${DEPLOY_ROOT}"
   log "Git sync (${DEPLOY_GIT_BRANCH}) — fetch + reset (no pull, no merge)"
@@ -128,6 +148,7 @@ run_deploy() {
   cd "${DEPLOY_ROOT}"
   log "=== Deploy ${DEPLOY_APP_NAME} ==="
   require_env_file
+  validate_production_env
   git_sync_readonly
   install_dependencies
   build_app
