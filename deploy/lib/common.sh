@@ -62,6 +62,7 @@ git_sync_readonly() {
   echo "${before}" > "${DEPLOY_ROLLBACK_FILE}"
 
   git fetch origin "${DEPLOY_GIT_BRANCH}"
+  git checkout -B "${DEPLOY_GIT_BRANCH}" "origin/${DEPLOY_GIT_BRANCH}"
   git reset --hard "origin/${DEPLOY_GIT_BRANCH}"
   git clean -fd -e .env -e .env.* -e uploads || true
 
