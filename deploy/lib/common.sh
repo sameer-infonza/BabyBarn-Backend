@@ -82,8 +82,8 @@ pm2_reload() {
     log "pm2 restart ${DEPLOY_PM2_NAME}"
     pm2 restart "${DEPLOY_PM2_NAME}" --update-env
   else
-    log "pm2 start ecosystem.config.js"
-    pm2 start ecosystem.config.js --env production
+    log "pm2 start ecosystem.config.cjs"
+    pm2 start ecosystem.config.cjs --env production
     pm2 save
   fi
   pm2 status "${DEPLOY_PM2_NAME}"

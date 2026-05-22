@@ -42,7 +42,7 @@ Workflow [`.github/workflows/deploy-ec2.yml`](../.github/workflows/deploy-ec2.ym
 
 1. **CI** — `npm ci` + `prisma generate`
 2. **Deploy** — SSH to EC2, run [`scripts/deploy-ec2.sh`](../scripts/deploy-ec2.sh):
-   - `git pull` (reset to `origin/master`)
+   - `git fetch` + `git reset --hard origin/master` (no pull)
    - `npm ci`, `prisma migrate deploy`
    - `pm2 restart babybarn-api`
 

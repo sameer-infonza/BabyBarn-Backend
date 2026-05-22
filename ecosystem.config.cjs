@@ -1,5 +1,6 @@
 /**
  * PM2 — Baby Barn API (port 5000)
+ * Use .cjs because package.json has "type": "module" (PM2 requires CommonJS config).
  */
 module.exports = {
   apps: [
