@@ -6,6 +6,7 @@ set -euo pipefail
 : "${DEPLOY_PM2_NAME:=app}"
 : "${DEPLOY_PORT:=5000}"
 : "${DEPLOY_TYPE:=backend}"
+: "${DEPLOY_LEGACY_PM2_NAME:=}"
 : "${DEPLOY_GIT_BRANCH:=master}"
 : "${DEPLOY_ROOT:=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
 
@@ -17,6 +18,7 @@ configure_deploy() {
   DEPLOY_PM2_NAME="$2"
   DEPLOY_PORT="$3"
   DEPLOY_TYPE="${4:-backend}"
+  DEPLOY_LEGACY_PM2_NAME="${5:-}"
   DEPLOY_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
   DEPLOY_ROLLBACK_FILE="${DEPLOY_ROOT}/.deploy-rollback"
   DEPLOY_LAST_SUCCESS_FILE="${DEPLOY_ROOT}/.deploy-last-success"
@@ -71,6 +73,17 @@ build_app() {
   esac
 }
 
+pm2_remove_legacy() {
+  local legacy="${DEPLOY_LEGACY_PM2_NAME:-}"
+  if [[ -z "$legacy" ]] || ! command -v pm2 >/dev/null 2>&1; then
+    return 0
+  fi
+  if pm2 describe "$legacy" >/dev/null 2>&1; then
+    log "Removing legacy PM2 app '${legacy}' (frees port ${DEPLOY_PORT})"
+    pm2 delete "$legacy" || true
+  fi
+}
+
 pm2_reload() {
   cd "${DEPLOY_ROOT}"
   if ! command -v pm2 >/dev/null 2>&1; then
@@ -118,6 +131,7 @@ run_deploy() {
   git_sync_readonly
   install_dependencies
   build_app
+  pm2_remove_legacy
   pm2_reload
   git rev-parse HEAD > "${DEPLOY_LAST_SUCCESS_FILE}"
   health_hint
