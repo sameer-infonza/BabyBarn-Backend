@@ -40,6 +40,24 @@ export function encodeDemoRateId(payload) {
   return `${PREFIX}demo:${b}`;
 }
 
+export function encodeFallbackRateId(payload) {
+  const json = JSON.stringify({ v: 1, ...payload });
+  const b = Buffer.from(json, 'utf8').toString('base64url');
+  return `${PREFIX}fallback:${b}`;
+}
+
+export function decodeFallbackRateId(rateId) {
+  const raw = String(rateId || '').trim();
+  if (!raw.startsWith(`${PREFIX}fallback:`)) return null;
+  const b = raw.slice(`${PREFIX}fallback:`.length);
+  try {
+    const json = Buffer.from(b, 'base64url').toString('utf8');
+    return JSON.parse(json);
+  } catch {
+    return null;
+  }
+}
+
 export function decodeDemoRateId(rateId) {
   const raw = String(rateId || '').trim();
   if (!raw.startsWith(`${PREFIX}demo:`)) return null;
@@ -63,6 +81,9 @@ export function parseRateId(rateId) {
   }
   if (raw.startsWith(`${PREFIX}demo:`)) {
     return { kind: 'demo', payload: decodeDemoRateId(raw) };
+  }
+  if (raw.startsWith(`${PREFIX}fallback:`)) {
+    return { kind: 'fallback', payload: decodeFallbackRateId(raw) };
   }
   return { kind: 'legacy_middleware', provider: 'unknown', raw };
 }

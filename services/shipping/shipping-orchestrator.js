@@ -6,7 +6,7 @@ import {
   appendShippingLog,
 } from './shipping-config.service.js';
 import * as upsProv from './providers/ups-shipping.provider.js';
-import { parseRateId } from './rate-id.js';
+import { encodeFallbackRateId, parseRateId } from './rate-id.js';
 import { buildDemoCheckoutRates } from './demo-checkout-rates.js';
 
 function fallbackQuote(address) {
@@ -53,16 +53,19 @@ function fallbackQuote(address) {
 }
 
 function fallbackRateFromQuote(quote) {
+  const zone = String(quote.zone || 'unknown');
+  const amount = Number(quote.cost || 0);
   return {
-    rateId: null,
+    rateId: encodeFallbackRateId({ zone, a: amount }),
     provider: quote.provider || 'fallback',
     serviceLevel: 'Standard',
-    serviceToken: null,
+    serviceToken: zone,
     currency: 'USD',
-    amount: Number(quote.cost || 0),
-    estimatedDays: null,
+    amount,
+    estimatedDays: zone === 'us_domestic' ? 5 : zone === 'international' ? 10 : null,
     attributes: [],
     durationTerms: quote.description || null,
+    providerSlug: 'fallback',
   };
 }
 
@@ -126,6 +129,9 @@ export async function orchestratorGetRates(payload = {}) {
     if (res.error === 'incomplete_address') {
       if (payload.preferProviderOnly) {
         throw new AppError(400, 'Incomplete shipping address', 'SHIPPING_ADDRESS_INVALID');
+      }
+      if (surface === 'checkout') {
+        return demoRatesCheckoutPayload(payload, 'incomplete_address');
       }
       const fb = fallbackQuote(payload.shippingAddress || payload.toAddress || {});
       return { provider: fb.provider, shipmentId: null, rates: [fallbackRateFromQuote(fb)] };

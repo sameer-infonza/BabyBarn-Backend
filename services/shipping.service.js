@@ -9,6 +9,7 @@ import {
   orchestratorTrackShipment,
   orchestratorCreateShipment,
 } from './shipping/shipping-orchestrator.js';
+import { encodeFallbackRateId } from './shipping/rate-id.js';
 
 function fallbackQuote(address) {
   if (!address || !String(address.country || '').trim()) {
@@ -54,16 +55,19 @@ function fallbackQuote(address) {
 }
 
 function fallbackRateFromQuote(quote) {
+  const zone = String(quote.zone || 'unknown');
+  const amount = Number(quote.cost || 0);
   return {
-    rateId: null,
+    rateId: encodeFallbackRateId({ zone, a: amount }),
     provider: quote.provider || 'fallback',
     serviceLevel: 'Standard',
-    serviceToken: null,
+    serviceToken: zone,
     currency: 'USD',
-    amount: Number(quote.cost || 0),
-    estimatedDays: null,
+    amount,
+    estimatedDays: zone === 'us_domestic' ? 5 : null,
     attributes: [],
     durationTerms: quote.description || null,
+    providerSlug: 'fallback',
   };
 }
 
