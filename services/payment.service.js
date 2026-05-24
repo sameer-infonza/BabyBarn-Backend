@@ -10,11 +10,11 @@ const prisma = new PrismaClient();
 async function getMembershipUnitAmountCents() {
   try {
     const row = await prisma.businessSettings.findUnique({ where: { id: 1 } });
-    const usd = row?.accessMembershipPriceUsd ?? 49;
+    const usd = row?.accessMembershipPriceUsd ?? 50;
     return Math.round(Number(usd) * 100);
   } catch (e) {
     if (e && typeof e === 'object' && 'code' in e && (e.code === 'P2021' || e.code === 'P2022')) {
-      return Math.round(49 * 100);
+      return Math.round(50 * 100);
     }
     throw e;
   }
@@ -85,17 +85,23 @@ async function handleOrderCheckoutCompleted(session) {
   return handleOrderPaymentCompleted(getOrderPublicId(session.metadata));
 }
 
+/** Card-only — excludes Klarna, Affirm, and other Pay Later methods on Checkout. */
+function cardOnlyCheckoutOptions() {
+  return { payment_method_types: ['card'] };
+}
+
 async function createCheckoutSessionWithOptionalTransfer(stripe, basePayload, destinationAccount, flow) {
   const hasDestination = hasValidConnectAccountId(destinationAccount);
   const payload = hasDestination
     ? {
         ...basePayload,
+        ...cardOnlyCheckoutOptions(),
         payment_intent_data: {
           ...(basePayload.payment_intent_data || {}),
           transfer_data: { destination: destinationAccount.trim() },
         },
       }
-    : basePayload;
+    : { ...basePayload, ...cardOnlyCheckoutOptions() };
 
   try {
     return await stripe.checkout.sessions.create(payload);
@@ -362,7 +368,7 @@ export async function createOrderPaymentIntent(userPublicId, items, opts = {}) {
   const paymentIntent = await stripe.paymentIntents.create({
     amount: amountCents,
     currency: 'usd',
-    automatic_payment_methods: { enabled: true },
+    payment_method_types: ['card'],
     receipt_email: user.email || undefined,
     metadata: {
       flow: 'order',

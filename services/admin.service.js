@@ -259,7 +259,7 @@ export async function getBusinessSettings() {
   const row =
     (await prisma.businessSettings.findUnique({ where: { id: 1 } })) ||
     (await prisma.businessSettings.create({
-      data: { id: 1, accessMembershipPriceUsd: 49 },
+      data: { id: 1, accessMembershipPriceUsd: 50 },
     }));
   return {
     accessMembershipPriceUsd: row.accessMembershipPriceUsd,

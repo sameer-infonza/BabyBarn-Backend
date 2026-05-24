@@ -461,7 +461,7 @@ model AdminAuditLog {
 // Singleton row (id = 1) for editable business defaults (e.g. ACCESS price).
 model BusinessSettings {
   id                        Int      @id @default(1)
-  accessMembershipPriceUsd  Float    @default(49)
+  accessMembershipPriceUsd  Float    @default(50)
   updatedAt                 DateTime @updatedAt
 }
 

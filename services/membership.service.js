@@ -161,7 +161,7 @@ export async function completeMembershipPayment(session) {
       context: {
         name,
         accessNumber,
-        amount: `$${Number(amountUsd ?? 49).toFixed(2)}`,
+        amount: `$${Number(amountUsd ?? 50).toFixed(2)}`,
         validUntil: until.toLocaleDateString('en-US', {
           month: 'long',
           day: 'numeric',
