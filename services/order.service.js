@@ -18,9 +18,19 @@ import { SHIPPING_LABELS_DIR } from '../utils/product-upload.js';
 const prisma = new PrismaClient();
 let ensureOrderCheckoutColumnsPromise = null;
 
+function isSchemaBootstrapSkippableError(error) {
+  const code = error && typeof error === 'object' && 'code' in error ? String(error.code) : '';
+  const msg = String(error?.message || '');
+  return (
+    code === '42501' ||
+    /must be owner of table|permission denied|insufficient privilege/i.test(msg)
+  );
+}
+
 async function ensureOrderCheckoutColumns() {
   if (!ensureOrderCheckoutColumnsPromise) {
-    ensureOrderCheckoutColumnsPromise = prisma.$executeRawUnsafe(`
+    ensureOrderCheckoutColumnsPromise = prisma
+      .$executeRawUnsafe(`
       ALTER TABLE "Order"
         ADD COLUMN IF NOT EXISTS "shippingCost" DOUBLE PRECISION NOT NULL DEFAULT 0,
         ADD COLUMN IF NOT EXISTS "shippingAddressJson" JSONB,
@@ -35,11 +45,17 @@ async function ensureOrderCheckoutColumns() {
         ADD COLUMN IF NOT EXISTS "selectedRateEstimatedDays" INTEGER,
         ADD COLUMN IF NOT EXISTS "shippingShipmentId" TEXT,
         ADD COLUMN IF NOT EXISTS "stripeCheckoutSessionId" TEXT;
-    `).catch((error) => {
-      // Allow retry on next request if DB role cannot alter schema.
-      ensureOrderCheckoutColumnsPromise = null;
-      throw error;
-    });
+    `)
+      .catch((error) => {
+        ensureOrderCheckoutColumnsPromise = null;
+        if (isSchemaBootstrapSkippableError(error)) {
+          console.warn(
+            '[order] checkout column bootstrap skipped (run prisma migrate deploy as DB owner)'
+          );
+          return;
+        }
+        throw error;
+      });
   }
   await ensureOrderCheckoutColumnsPromise;
 }
@@ -474,11 +490,10 @@ export class OrderService {
     const now = new Date();
     const hasAccess = Boolean(user.accessMemberUntil && user.accessMemberUntil > now);
 
-    let totalAmount = 0;
+    let subtotal = 0;
+    const lineCreates = [];
 
-    return prisma.$transaction(async (tx) => {
-      const products = [];
-      const lineCreates = [];
+    const order = await prisma.$transaction(async (tx) => {
       for (let index = 0; index < items.length; index += 1) {
         const item = items[index];
         const product = await tx.product.findUnique({
@@ -510,22 +525,19 @@ export class OrderService {
         }
 
         const { unitApplied } = computeAppliedUnitPrice(product, variant, hasAccess);
-        const unitPrice = unitApplied;
-
-        totalAmount += unitPrice * item.quantity;
-        products.push(product);
+        subtotal += unitApplied * item.quantity;
         lineCreates.push({
           productId: product.id,
           productVariantId: variantDbId,
           quantity: item.quantity,
-          price: unitPrice,
+          price: unitApplied,
         });
       }
 
-      const order = await tx.order.create({
+      return tx.order.create({
         data: {
           userId: user.id,
-          totalAmount,
+          totalAmount: subtotal,
           paymentStatus: 'UNPAID',
           status: 'PENDING',
           shippingCost: 0,
@@ -538,7 +550,12 @@ export class OrderService {
         },
         include: { orderItems: { include: { product: true } } },
       });
+    });
 
+    let shippingCost = 0;
+    let selectedRate = null;
+    let shipmentId = null;
+    try {
       const shippingRates = await shippingService.getRates({
         shippingAddress: opts.shippingAddress,
         parcels: opts.parcels,
@@ -546,54 +563,66 @@ export class OrderService {
         surface: 'checkout',
         hasAccess,
       });
-      const selectedRate = resolveSelectedRate(shippingRates.rates, opts.selectedRateId, opts.selectedRate);
-      const shippingCost = Number(selectedRate?.amount || 0);
+      selectedRate = resolveSelectedRate(shippingRates.rates, opts.selectedRateId, opts.selectedRate);
+      shippingCost = Number(selectedRate?.amount || 0);
+      shipmentId = shippingRates.shipmentId || null;
+    } catch (error) {
+      console.error('[order] checkout shipping rates failed', order.publicId, error?.message || error);
+      if (!(error instanceof AppError)) {
+        throw new AppError(502, 'Unable to calculate shipping for checkout', 'SHIPPING_RATE_FAILED');
+      }
+      throw error;
+    }
 
-      await tx.order.update({
-        where: { id: order.id },
-        data: {
-          shippingCost,
-          shippingCarrier: selectedRate?.provider || null,
-          totalAmount: order.totalAmount + shippingCost,
-          ...selectedRateUpdateData(selectedRate, shippingRates.shipmentId || null),
-        },
-      });
-      order.totalAmount = order.totalAmount + shippingCost;
+    let totalAmount = subtotal + shippingCost;
+    await prisma.order.update({
+      where: { id: order.id },
+      data: {
+        shippingCost,
+        shippingCarrier: selectedRate?.provider || null,
+        totalAmount,
+        ...selectedRateUpdateData(selectedRate, shipmentId),
+      },
+    });
+    order.shippingCost = shippingCost;
+    order.totalAmount = totalAmount;
 
-      if (opts.storeCreditToApply && Number(opts.storeCreditToApply) > 0) {
-        try {
+    if (opts.storeCreditToApply && Number(opts.storeCreditToApply) > 0) {
+      try {
+        await prisma.$transaction(async (tx) => {
           const wallet = await tx.storeCreditWallet.findUnique({ where: { userId: user.id } });
-          if (wallet && wallet.balance > 0) {
-            const capped = Math.min(Number(opts.storeCreditToApply), wallet.balance, order.totalAmount + shippingCost);
-            if (capped > 0) {
-              await tx.storeCreditWallet.update({
-                where: { id: wallet.id },
-                data: { balance: wallet.balance - capped },
-              });
-              await tx.storeCreditTransaction.create({
-                data: {
-                  walletId: wallet.id,
-                  type: 'REDEEMED',
-                  amount: -capped,
-                  note: `Applied on checkout for order ${order.publicId}`,
-                },
-              });
-              await tx.order.update({
-                where: { id: order.id },
-                data: { totalAmount: Math.max(0, order.totalAmount + shippingCost - capped) },
-              });
-            }
-          }
-        } catch (error) {
-          if (!isMissingWalletTableError(error)) {
-            throw error;
-          }
-          // Keep checkout available even if wallet schema isn't migrated.
+          if (!wallet || wallet.balance <= 0) return;
+
+          const capped = Math.min(Number(opts.storeCreditToApply), wallet.balance, totalAmount);
+          if (capped <= 0) return;
+
+          await tx.storeCreditWallet.update({
+            where: { id: wallet.id },
+            data: { balance: wallet.balance - capped },
+          });
+          await tx.storeCreditTransaction.create({
+            data: {
+              walletId: wallet.id,
+              type: 'REDEEMED',
+              amount: -capped,
+              note: `Applied on checkout for order ${order.publicId}`,
+            },
+          });
+          totalAmount = Math.max(0, totalAmount - capped);
+          await tx.order.update({
+            where: { id: order.id },
+            data: { totalAmount },
+          });
+        });
+        order.totalAmount = totalAmount;
+      } catch (error) {
+        if (!isMissingWalletTableError(error)) {
+          throw error;
         }
       }
+    }
 
-      return order;
-    });
+    return order;
   }
 
   async fulfillUnpaidOrderAfterPayment(orderPublicId) {

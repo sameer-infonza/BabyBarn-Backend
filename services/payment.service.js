@@ -44,6 +44,53 @@ function hasValidConnectAccountId(value) {
   return typeof value === 'string' && /^acct_[A-Za-z0-9]+$/.test(value.trim());
 }
 
+function toStripeAppError(error, code, flow = 'order') {
+  if (error instanceof AppError) return error;
+  const stripeCode = error?.code ? String(error.code) : '';
+  const stripeType = error?.type ? String(error.type) : '';
+  const message = error?.message ? String(error.message) : 'Stripe request failed';
+  console.error(`[payments] ${flow} stripe error`, { stripeCode, stripeType, message });
+  return new AppError(502, message, code, {
+    stripeCode: stripeCode || null,
+    stripeType: stripeType || null,
+    flow,
+  });
+}
+
+async function createPaymentIntentWithOptionalTransfer(stripe, basePayload, destinationAccount) {
+  const hasDestination = hasValidConnectAccountId(destinationAccount);
+  const payload = hasDestination
+    ? {
+        ...basePayload,
+        transfer_data: { destination: destinationAccount.trim() },
+      }
+    : basePayload;
+
+  try {
+    return await stripe.paymentIntents.create(payload);
+  } catch (error) {
+    const stripeCode = error?.code ? String(error.code) : '';
+    const rawMessage = error?.message ? String(error.message) : '';
+    const lower = rawMessage.toLowerCase();
+    const connectDestinationProblem =
+      hasDestination &&
+      (stripeCode === 'resource_missing' ||
+        stripeCode === 'account_invalid' ||
+        lower.includes('transfer_data[destination]') ||
+        lower.includes('no such destination') ||
+        lower.includes('connected account'));
+
+    if (connectDestinationProblem) {
+      console.warn('[payments] order payment intent fallback without transfer_data', {
+        destinationAccount,
+        stripeCode,
+      });
+      return stripe.paymentIntents.create(basePayload);
+    }
+    throw error;
+  }
+}
+
 function getFlow(metadata) {
   return metadata && typeof metadata.flow === 'string' ? metadata.flow : null;
 }
@@ -373,22 +420,35 @@ export async function createOrderPaymentIntent(userPublicId, items, opts = {}) {
     throw new AppError(400, 'Order total is below the minimum charge amount', 'ORDER_TOTAL_TOO_LOW');
   }
 
-  const paymentIntent = await stripe.paymentIntents.create({
-    amount: amountCents,
-    currency: 'usd',
-    payment_method_types: ['card'],
-    receipt_email: user.email || undefined,
-    metadata: {
-      flow: 'order',
-      orderPublicId: order.publicId,
-    },
-    ...(opts.saveCard ? { setup_future_usage: 'off_session' } : {}),
-  });
+  let paymentIntent;
+  try {
+    paymentIntent = await createPaymentIntentWithOptionalTransfer(
+      stripe,
+      {
+        amount: amountCents,
+        currency: 'usd',
+        payment_method_types: ['card'],
+        receipt_email: user.email || undefined,
+        metadata: {
+          flow: 'order',
+          orderPublicId: order.publicId,
+        },
+        ...(opts.saveCard ? { setup_future_usage: 'off_session' } : {}),
+      },
+      config.stripe.connectStore
+    );
+  } catch (error) {
+    throw toStripeAppError(error, 'STRIPE_PAYMENT_INTENT_FAILED', 'order');
+  }
 
   await prisma.order.update({
     where: { id: order.id },
     data: { stripeCheckoutSessionId: paymentIntent.id },
   });
+
+  if (!paymentIntent.client_secret) {
+    throw new AppError(502, 'Stripe did not return a payment client secret', 'STRIPE_PAYMENT_INTENT_FAILED');
+  }
 
   return {
     clientSecret: paymentIntent.client_secret,

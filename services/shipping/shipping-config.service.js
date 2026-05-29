@@ -5,6 +5,17 @@ const prisma = new PrismaClient();
 let cache = { at: 0, providers: null, methodsByProviderId: null };
 const TTL_MS = 45_000;
 
+function isMissingShippingSchemaError(error) {
+  return Boolean(
+    error &&
+      typeof error === 'object' &&
+      'code' in error &&
+      (error.code === 'P2021' || error.code === 'P2022')
+  );
+}
+
+const EMPTY_SHIPPING_CONFIG = { providers: [], methodsByProviderId: new Map() };
+
 export function invalidateShippingConfigCache() {
   cache = { at: 0, providers: null, methodsByProviderId: null };
 }
@@ -14,16 +25,25 @@ export async function loadShippingConfig() {
   if (cache.providers && now - cache.at < TTL_MS) {
     return { providers: cache.providers, methodsByProviderId: cache.methodsByProviderId };
   }
-  const providers = await prisma.shippingProvider.findMany({
-    orderBy: [{ sortOrder: 'asc' }, { id: 'asc' }],
-    include: { services: { orderBy: [{ sortOrder: 'asc' }, { id: 'asc' }] } },
-  });
-  const methodsByProviderId = new Map();
-  for (const p of providers) {
-    methodsByProviderId.set(p.id, p.services);
+  try {
+    const providers = await prisma.shippingProvider.findMany({
+      orderBy: [{ sortOrder: 'asc' }, { id: 'asc' }],
+      include: { services: { orderBy: [{ sortOrder: 'asc' }, { id: 'asc' }] } },
+    });
+    const methodsByProviderId = new Map();
+    for (const p of providers) {
+      methodsByProviderId.set(p.id, p.services);
+    }
+    cache = { at: now, providers, methodsByProviderId };
+    return { providers, methodsByProviderId };
+  } catch (error) {
+    if (isMissingShippingSchemaError(error)) {
+      console.warn('[shipping] provider tables missing — using fallback rates (run prisma migrate deploy)');
+      cache = { at: now, ...EMPTY_SHIPPING_CONFIG };
+      return EMPTY_SHIPPING_CONFIG;
+    }
+    throw error;
   }
-  cache = { at: now, providers, methodsByProviderId };
-  return { providers, methodsByProviderId };
 }
 
 export async function getDefaultProviderSlug() {
