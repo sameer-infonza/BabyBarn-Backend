@@ -44,6 +44,17 @@ async function ensureOrderCheckoutColumns() {
         ADD COLUMN IF NOT EXISTS "selectedRateCurrency" TEXT,
         ADD COLUMN IF NOT EXISTS "selectedRateEstimatedDays" INTEGER,
         ADD COLUMN IF NOT EXISTS "shippingShipmentId" TEXT,
+        ADD COLUMN IF NOT EXISTS "shippingTransactionId" TEXT,
+        ADD COLUMN IF NOT EXISTS "returnShipmentId" TEXT,
+        ADD COLUMN IF NOT EXISTS "returnLabelUrl" TEXT,
+        ADD COLUMN IF NOT EXISTS "returnTrackingNumber" TEXT,
+        ADD COLUMN IF NOT EXISTS "returnShippingCarrier" TEXT,
+        ADD COLUMN IF NOT EXISTS "returnTransactionId" TEXT,
+        ADD COLUMN IF NOT EXISTS "trackingStatus" TEXT,
+        ADD COLUMN IF NOT EXISTS "trackingStatusDetails" TEXT,
+        ADD COLUMN IF NOT EXISTS "trackingStatusDate" TIMESTAMP(3),
+        ADD COLUMN IF NOT EXISTS "trackingEta" TIMESTAMP(3),
+        ADD COLUMN IF NOT EXISTS "trackingHistoryJson" JSONB,
         ADD COLUMN IF NOT EXISTS "stripeCheckoutSessionId" TEXT;
     `)
       .catch((error) => {
