@@ -24,14 +24,27 @@ function adminActor(req) {
 export class OrderController {
   async getUserOrders(req, res) {
     const page = parseInt(String(req.query.page), 10) || 1;
-    const limit = parseInt(String(req.query.limit), 10) || 10;
+    const limit = Math.min(parseInt(String(req.query.limit), 10) || 10, 100);
+    const tab = req.query.tab ? String(req.query.tab) : undefined;
+    const search = req.query.search ? String(req.query.search) : undefined;
+    const periodMonths = req.query.periodMonths ? String(req.query.periodMonths) : undefined;
 
-    const result = await orderService.getUserOrders(req.user.id, page, limit);
+    const result = await orderService.getUserOrders(req.user.id, page, limit, {
+      tab,
+      search,
+      periodMonths,
+    });
 
     res.status(200).json({
       success: true,
       data: toPublicJson(result),
     });
+  }
+
+  async getUserOrderStats(req, res) {
+    const periodMonths = req.query.periodMonths ? String(req.query.periodMonths) : '12';
+    const data = await orderService.getUserOrderStats(req.user.id, { periodMonths });
+    res.status(200).json({ success: true, data: toPublicJson(data) });
   }
 
   async getCheckoutQuote(req, res) {

@@ -1,6 +1,7 @@
 import { Router } from 'express';
 import { authenticate } from '../middleware/auth.js';
 import {
+  getEligibility,
   getPaymentHistory,
   getSavings,
   saveRegistration,
@@ -9,6 +10,7 @@ import {
 const router = Router();
 
 router.post('/registration', authenticate, saveRegistration);
+router.get('/eligibility', authenticate, getEligibility);
 router.get('/payments/history', authenticate, getPaymentHistory);
 router.get('/savings', authenticate, getSavings);
 

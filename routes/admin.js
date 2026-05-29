@@ -14,6 +14,13 @@ router.get(
   (req, res, next) => adminController.getFinanceStats(req, res).catch(next)
 );
 router.get(
+  '/audit-logs/export',
+  authenticate,
+  authorize('ADMIN', 'ADMIN_TEAM'),
+  requireConsoleModule('activity'),
+  (req, res, next) => adminController.exportAuditLogs(req, res).catch(next)
+);
+router.get(
   '/audit-logs',
   authenticate,
   authorize('ADMIN', 'ADMIN_TEAM'),

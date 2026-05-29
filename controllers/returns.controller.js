@@ -14,6 +14,14 @@ export class ReturnsController {
     res.status(200).json({ success: true, data: toPublicJson(data) });
   }
 
+  async getById(req, res) {
+    const isAdmin = req.user?.role === 'ADMIN' || req.user?.role === 'ADMIN_TEAM';
+    const data = isAdmin
+      ? await returnsService.getById(req.params.id)
+      : await returnsService.getForUser(req.user.id, req.params.id);
+    res.status(200).json({ success: true, data: toPublicJson(data) });
+  }
+
   async create(req, res) {
     const body = await validate(returnRequestCreateSchema, req.body);
     const data = await returnsService.createForUser(req.user.id, body);

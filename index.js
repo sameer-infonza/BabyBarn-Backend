@@ -71,6 +71,23 @@ app.use(
   })
 );
 
+/** Log every API request + response status to the terminal (dev-friendly). */
+app.use((req, res, next) => {
+  const started = Date.now();
+  const path = req.originalUrl || req.url;
+  if (!path.startsWith('/api') && path !== '/health') {
+    next();
+    return;
+  }
+  res.on('finish', () => {
+    const ms = Date.now() - started;
+    const level = res.statusCode >= 500 ? 'error' : res.statusCode >= 400 ? 'warn' : 'log';
+    const tag = res.statusCode >= 500 ? 'ERR' : res.statusCode >= 400 ? 'WARN' : 'OK';
+    console[level](`[${tag}] ${req.method} ${path} → ${res.statusCode} (${ms}ms)`);
+  });
+  next();
+});
+
 app.get('/health', (req, res) => {
   res.json({ status: 'OK' });
 });
@@ -139,7 +156,14 @@ app.use(errorHandler);
 
 const PORT = config.port;
 app.listen(PORT, () => {
-  console.log(`Server is running on port ${PORT}`);
+  console.log('');
+  console.log('══════════════════════════════════════════════');
+  console.log(`  Baby Barn API listening on http://localhost:${PORT}`);
+  console.log(`  Health check: http://localhost:${PORT}/health`);
+  console.log(`  API base:     http://localhost:${PORT}/api`);
+  console.log(`  Environment:  ${config.nodeEnv}`);
+  console.log('══════════════════════════════════════════════');
+  console.log('');
   setInterval(() => {
     orderService.syncUpsTrackingBatch().catch(() => {});
   }, 15 * 60 * 1000);
@@ -153,4 +177,13 @@ app.listen(PORT, () => {
   setTimeout(() => {
     sendAccessRenewalReminders().catch(() => {});
   }, 60 * 1000);
+});
+
+process.on('unhandledRejection', (reason) => {
+  console.error('[unhandledRejection]', reason);
+});
+
+process.on('uncaughtException', (err) => {
+  console.error('[uncaughtException]', err);
+  process.exit(1);
 });

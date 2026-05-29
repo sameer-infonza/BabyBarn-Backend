@@ -1,4 +1,4 @@
-import { listAuditLogs } from '../services/audit.service.js';
+import { listAuditLogs, exportAuditLogs, auditLogsToCsv } from '../services/audit.service.js';
 import {
   getFinanceStats,
   listCustomers,
@@ -50,8 +50,32 @@ export class AdminController {
   async listAuditLogs(req, res) {
     const page = parseInt(String(req.query.page), 10) || 1;
     const limit = Math.min(parseInt(String(req.query.limit), 10) || 50, 100);
-    const data = await listAuditLogs(page, limit);
+    const filters = {
+      search: req.query.search ? String(req.query.search) : undefined,
+      action: req.query.action ? String(req.query.action) : undefined,
+      entityType: req.query.entityType ? String(req.query.entityType) : undefined,
+      actorEmail: req.query.actorEmail ? String(req.query.actorEmail) : undefined,
+      dateFrom: req.query.dateFrom ? String(req.query.dateFrom) : undefined,
+      dateTo: req.query.dateTo ? String(req.query.dateTo) : undefined,
+    };
+    const data = await listAuditLogs(page, limit, filters);
     res.status(200).json({ success: true, data: toPublicJson(data) });
+  }
+
+  async exportAuditLogs(req, res) {
+    const filters = {
+      search: req.query.search ? String(req.query.search) : undefined,
+      action: req.query.action ? String(req.query.action) : undefined,
+      entityType: req.query.entityType ? String(req.query.entityType) : undefined,
+      actorEmail: req.query.actorEmail ? String(req.query.actorEmail) : undefined,
+      dateFrom: req.query.dateFrom ? String(req.query.dateFrom) : undefined,
+      dateTo: req.query.dateTo ? String(req.query.dateTo) : undefined,
+    };
+    const rows = await exportAuditLogs(filters);
+    const csv = auditLogsToCsv(rows);
+    res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+    res.setHeader('Content-Disposition', `attachment; filename="audit-logs-${new Date().toISOString().slice(0, 10)}.csv"`);
+    res.status(200).send(`\uFEFF${csv}`);
   }
 
   async listCustomers(req, res) {

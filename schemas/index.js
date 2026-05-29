@@ -259,12 +259,18 @@ export const pickupListCreateSchema = z.object({
   orderPublicIds: z.array(z.string().min(1)).min(1).max(200),
 });
 
-export const returnRequestCreateSchema = z.object({
-  orderId: z.string().min(1),
-  orderItemId: z.string().min(1).optional(),
-  type: z.enum(['STANDARD', 'REFURBISHMENT']).optional().default('STANDARD'),
-  reason: z.string().min(3).max(1000),
-});
+export const returnRequestCreateSchema = z
+  .object({
+    orderId: z.string().min(1),
+    orderItemId: z.string().min(1).optional(),
+    orderItemIds: z.array(z.string().min(1)).min(1).max(50).optional(),
+    type: z.enum(['STANDARD', 'REFURBISHMENT']).optional().default('STANDARD'),
+    reason: z.string().min(3).max(1000),
+  })
+  .refine((body) => Boolean(body.orderItemId) || (body.orderItemIds?.length ?? 0) > 0, {
+    message: 'At least one order item is required',
+    path: ['orderItemIds'],
+  });
 
 export const returnStatusUpdateSchema = z.object({
   status: z.enum(['REQUESTED', 'RECEIVED', 'UNDER_INSPECTION', 'APPROVED', 'REJECTED']),
@@ -372,6 +378,7 @@ export const membershipRegistrationSchema = z.object({
 
 export const membershipCheckoutSchema = z.object({
   returnTo: z.string().max(500).optional(),
+  intent: z.enum(['purchase', 'renew']).optional(),
   babyName: z.string().min(1).optional(),
   shippingAddress: membershipShippingSchema.optional(),
 });

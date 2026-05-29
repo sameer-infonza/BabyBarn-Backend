@@ -13,6 +13,7 @@ router.get(
   (req, res, next) => returnsController.listAll(req, res).catch(next)
 );
 router.get('/', authenticate, (req, res, next) => returnsController.listMine(req, res).catch(next));
+router.get('/:id', authenticate, (req, res, next) => returnsController.getById(req, res).catch(next));
 router.post('/', authenticate, (req, res, next) => returnsController.create(req, res).catch(next));
 router.patch(
   '/:id/status',

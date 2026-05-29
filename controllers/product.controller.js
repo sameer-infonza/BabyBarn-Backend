@@ -4,39 +4,47 @@ import { validate } from '../utils/validation.js';
 import { createProductSchema, updateProductSchema } from '../schemas/index.js';
 import { toPublicJson } from '../utils/serialize.js';
 
+/** Parse comma-separated query values (multi-select filters). */
+function parseCsvQuery(value) {
+  if (value == null || value === '') return [];
+  return String(value)
+    .split(',')
+    .map((s) => s.trim())
+    .filter(Boolean);
+}
+
 export class ProductController {
   async getAllProducts(req, res) {
     const page = parseInt(String(req.query.page), 10) || 1;
     const rawLimit = parseInt(String(req.query.limit), 10) || 20;
     const limit = Math.min(Math.max(rawLimit, 1), 48);
-    const categoryId = req.query.categoryId ? String(req.query.categoryId) : undefined;
+    const categoryIds = parseCsvQuery(req.query.categoryId);
     const search = req.query.search ? String(req.query.search) : undefined;
     const sort = req.query.sort ? String(req.query.sort) : undefined;
-    const productType = req.query.productType ? String(req.query.productType) : undefined;
+    const productTypesRaw = parseCsvQuery(req.query.productType);
+    const productTypes = productTypesRaw.filter((t) => t === 'NEW' || t === 'REFURBISHED');
     const minPrice = req.query.minPrice != null && req.query.minPrice !== '' ? Number(req.query.minPrice) : undefined;
     const maxPrice = req.query.maxPrice != null && req.query.maxPrice !== '' ? Number(req.query.maxPrice) : undefined;
     const sizeAgeGroup =
       req.query.sizeAgeGroup != null && String(req.query.sizeAgeGroup).trim()
         ? String(req.query.sizeAgeGroup).trim()
         : undefined;
-    const ageGroup =
-      req.query.ageGroup != null && String(req.query.ageGroup).trim() ? String(req.query.ageGroup).trim() : undefined;
-    const fitSize =
-      req.query.fitSize != null && String(req.query.fitSize).trim() ? String(req.query.fitSize).trim() : undefined;
+    const ageGroups = parseCsvQuery(req.query.ageGroup);
+    const fitSizes = parseCsvQuery(req.query.fitSize);
 
     const listFilters = {
       search,
       sort,
-      productType:
-        productType === 'NEW' || productType === 'REFURBISHED' ? productType : undefined,
+      categoryIds,
+      productTypes,
       minPrice: Number.isFinite(minPrice) ? minPrice : undefined,
       maxPrice: Number.isFinite(maxPrice) ? maxPrice : undefined,
       sizeAgeGroup,
-      ageGroup,
-      fitSize,
+      ageGroups,
+      fitSizes,
     };
 
-    const result = await productService.getAllProducts(page, limit, categoryId, {
+    const result = await productService.getAllProducts(page, limit, undefined, {
       admin: false,
       listFilters,
     });

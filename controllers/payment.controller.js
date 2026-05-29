@@ -6,6 +6,7 @@ import {
   createOrderCheckoutSession,
   createOrderPaymentIntent,
   getCheckoutSessionSummary,
+  getMembershipCheckoutSummary,
   processStripeWebhook,
 } from '../services/payment.service.js';
 
@@ -33,6 +34,7 @@ export async function membershipCheckout(req, res, next) {
         : undefined;
     const data = await createMembershipCheckoutSession(userPublicId, {
       returnTo: body.returnTo,
+      intent: body.intent,
       registration,
     });
     res.status(200).json({ success: true, data: toPublicJson(data) });
@@ -92,6 +94,20 @@ export async function checkoutSessionSummary(req, res, next) {
     }
     const sessionId = String(req.query.session_id || '').trim();
     const data = await getCheckoutSessionSummary(userPublicId, sessionId);
+    res.status(200).json({ success: true, data: toPublicJson(data) });
+  } catch (e) {
+    next(e);
+  }
+}
+
+export async function membershipCheckoutSummary(req, res, next) {
+  try {
+    const userPublicId = req.user?.id;
+    if (!userPublicId) {
+      return res.status(401).json({ success: false, message: 'Unauthorized' });
+    }
+    const sessionId = String(req.query.session_id || '').trim();
+    const data = await getMembershipCheckoutSummary(userPublicId, sessionId);
     res.status(200).json({ success: true, data: toPublicJson(data) });
   } catch (e) {
     next(e);

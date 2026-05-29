@@ -6,6 +6,7 @@ import { requireConsoleModule } from '../middleware/admin-console.js';
 const router = Router();
 
 router.get('/', authenticate, (req, res, next) => orderController.getUserOrders(req, res).catch(next));
+router.get('/stats', authenticate, (req, res, next) => orderController.getUserOrderStats(req, res).catch(next));
 router.post('/', authenticate, (req, res, next) => orderController.createOrder(req, res).catch(next));
 router.post('/quote', authenticate, (req, res, next) => orderController.getCheckoutQuote(req, res).catch(next));
 

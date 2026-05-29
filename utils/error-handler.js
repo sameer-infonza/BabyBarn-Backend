@@ -44,8 +44,27 @@ export const errorHandler = (err, req, res, next) => {
     err = prismaMappedError;
   }
 
-  if (process.env.NODE_ENV === 'development' && !(err instanceof AppError)) {
-    console.error('[unhandled]', err);
+  if (err instanceof AppError) {
+    if (err.statusCode >= 500) {
+      console.error('[api]', {
+        status: err.statusCode,
+        message: err.message,
+        code: err.code,
+        path: req?.method && req?.originalUrl ? `${req.method} ${req.originalUrl}` : undefined,
+      });
+    } else if (process.env.NODE_ENV === 'development') {
+      console.warn('[api]', {
+        status: err.statusCode,
+        message: err.message,
+        path: req?.method && req?.originalUrl ? `${req.method} ${req.originalUrl}` : undefined,
+      });
+    }
+  } else {
+    console.error('[unhandled]', {
+      message: err?.message,
+      path: req?.method && req?.originalUrl ? `${req.method} ${req.originalUrl}` : undefined,
+      stack: err?.stack,
+    });
   }
 
   if (err?.name === 'MulterError') {

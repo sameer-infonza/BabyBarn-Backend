@@ -3,6 +3,7 @@ import { AppError } from '../utils/error-handler.js';
 import { emailService } from './email.service.js';
 import { config } from '../config/env.js';
 import { writeAdminAudit } from './audit.service.js';
+import { getBusinessSettings } from './admin.service.js';
 
 const prisma = new PrismaClient();
 
@@ -51,6 +52,40 @@ export class ReturnsService {
     });
   }
 
+  async getForUser(userPublicId, returnPublicId) {
+    const user = await prisma.user.findUnique({ where: { publicId: userPublicId }, select: { id: true } });
+    if (!user) throw new AppError(401, 'Unauthorized');
+    const row = await prisma.returnRequest.findUnique({
+      where: { publicId: returnPublicId },
+      include: {
+        order: { select: { publicId: true, status: true, createdAt: true } },
+        orderItem: { include: { product: { select: { name: true, productType: true } } } },
+      },
+    });
+    if (!row || row.userId !== user.id) throw new AppError(404, 'Return request not found');
+    return row;
+  }
+
+  async getById(returnPublicId) {
+    const row = await prisma.returnRequest.findUnique({
+      where: { publicId: returnPublicId },
+      include: {
+        user: { select: { publicId: true, email: true, firstName: true, lastName: true } },
+        order: { select: { publicId: true, status: true, createdAt: true } },
+        orderItem: { include: { product: { select: { name: true, productType: true } } } },
+      },
+    });
+    if (!row) throw new AppError(404, 'Return request not found');
+    return row;
+  }
+
+  resolveOrderItemIds(payload, order) {
+    if (payload.orderItemIds?.length) return payload.orderItemIds;
+    if (payload.orderItemId) return [payload.orderItemId];
+    const first = order.orderItems[0]?.publicId;
+    return first ? [first] : [];
+  }
+
   async createForUser(userPublicId, payload) {
     const user = await prisma.user.findUnique({
       where: { publicId: userPublicId },
@@ -64,10 +99,8 @@ export class ReturnsService {
     });
     if (!order || order.userId !== user.id) throw new AppError(404, 'Order not found');
 
-    const orderItem = payload.orderItemId
-      ? order.orderItems.find((i) => i.publicId === payload.orderItemId)
-      : order.orderItems[0];
-    if (!orderItem) throw new AppError(404, 'Order item not found');
+    const itemPublicIds = this.resolveOrderItemIds(payload, order);
+    if (itemPublicIds.length === 0) throw new AppError(404, 'Order item not found');
 
     if (payload.type === 'REFURBISHMENT') {
       const { isRefurbishedEnabled } = await import('../config/feature-flags.js');
@@ -83,16 +116,42 @@ export class ReturnsService {
       if (ageDays > 14) throw new AppError(400, 'Standard return window (14 days) has passed');
     }
 
-    return prisma.returnRequest.create({
-      data: {
-        userId: user.id,
+    const existing = await prisma.returnRequest.findMany({
+      where: {
         orderId: order.id,
-        orderItemId: orderItem.id,
-        type: payload.type,
-        reason: payload.reason,
-        status: 'REQUESTED',
+        orderItem: { publicId: { in: itemPublicIds } },
+        status: { notIn: ['REJECTED'] },
       },
+      select: { orderItem: { select: { publicId: true } } },
     });
+    const blocked = new Set(existing.map((r) => r.orderItem?.publicId).filter(Boolean));
+    const pendingIds = itemPublicIds.filter((id) => !blocked.has(id));
+    if (pendingIds.length === 0) {
+      throw new AppError(400, 'Selected items already have an open return request');
+    }
+
+    const created = await prisma.$transaction(
+      pendingIds.map((publicId) => {
+        const orderItem = order.orderItems.find((i) => i.publicId === publicId);
+        if (!orderItem) throw new AppError(404, 'Order item not found');
+        return prisma.returnRequest.create({
+          data: {
+            userId: user.id,
+            orderId: order.id,
+            orderItemId: orderItem.id,
+            type: payload.type,
+            reason: payload.reason,
+            status: 'REQUESTED',
+          },
+          include: {
+            order: { select: { publicId: true, status: true, createdAt: true } },
+            orderItem: { include: { product: { select: { name: true, productType: true } } } },
+          },
+        });
+      })
+    );
+
+    return created.length === 1 ? created[0] : created;
   }
 
   async updateStatus(returnPublicId, { status, notes }, actor) {
@@ -154,7 +213,8 @@ export class ReturnsService {
           update: {},
           create: { userId: rr.userId, balance: 0 },
         });
-        const amount = 10; // 20% of $50 ACCESS membership.
+        const settings = await getBusinessSettings();
+        const amount = Math.round(settings.accessMembershipPriceUsd * 0.2 * 100) / 100;
         await prisma.storeCreditWallet.update({
           where: { id: wallet.id },
           data: { balance: wallet.balance + amount },

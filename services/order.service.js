@@ -236,7 +236,63 @@ export class OrderService {
     };
   }
 
-  async getUserOrders(userPublicId, page = 1, limit = 10) {
+  buildUserOrderListWhere(userId, filters = {}) {
+    const and = [{ userId }];
+    const periodMonths = filters.periodMonths != null ? String(filters.periodMonths) : '';
+    if (periodMonths && periodMonths !== 'all') {
+      const months = Number(periodMonths);
+      if (!Number.isNaN(months) && months > 0) {
+        const cutoff = new Date();
+        cutoff.setMonth(cutoff.getMonth() - months);
+        and.push({ createdAt: { gte: cutoff } });
+      }
+    }
+
+    const tab = filters.tab ? String(filters.tab) : 'all';
+    if (tab === 'delivered') {
+      and.push({
+        OR: [
+          { status: { contains: 'DELIVER', mode: 'insensitive' } },
+          { deliveredAt: { not: null } },
+        ],
+      });
+    } else if (tab === 'active') {
+      and.push({
+        AND: [
+          { deliveredAt: null },
+          {
+            NOT: {
+              OR: [
+                { status: { contains: 'DELIVER', mode: 'insensitive' } },
+                { status: { contains: 'CANCEL', mode: 'insensitive' } },
+                { status: { contains: 'REFUND', mode: 'insensitive' } },
+              ],
+            },
+          },
+        ],
+      });
+    } else if (tab === 'returns') {
+      and.push({ returnRequests: { some: {} } });
+    }
+
+    const search = filters.search ? String(filters.search).trim() : '';
+    if (search) {
+      and.push({
+        OR: [
+          { publicId: { contains: search, mode: 'insensitive' } },
+          {
+            orderItems: {
+              some: { product: { name: { contains: search, mode: 'insensitive' } } },
+            },
+          },
+        ],
+      });
+    }
+
+    return { AND: and };
+  }
+
+  async getUserOrders(userPublicId, page = 1, limit = 10, filters = {}) {
     const user = await prisma.user.findUnique({
       where: { publicId: userPublicId },
       select: { id: true },
@@ -246,16 +302,17 @@ export class OrderService {
     }
 
     const skip = (page - 1) * limit;
+    const where = this.buildUserOrderListWhere(user.id, filters);
 
     const [orders, total] = await Promise.all([
       prisma.order.findMany({
-        where: { userId: user.id },
+        where,
         skip,
         take: limit,
         include: { orderItems: { include: { product: true } } },
         orderBy: { createdAt: 'desc' },
       }),
-      prisma.order.count({ where: { userId: user.id } }),
+      prisma.order.count({ where }),
     ]);
 
     return {
@@ -264,8 +321,64 @@ export class OrderService {
         total,
         page,
         limit,
-        pages: Math.ceil(total / limit),
+        pages: Math.max(1, Math.ceil(total / limit) || 1),
       },
+    };
+  }
+
+  async getUserOrderStats(userPublicId, { periodMonths = '12' } = {}) {
+    const user = await prisma.user.findUnique({
+      where: { publicId: userPublicId },
+      select: { id: true },
+    });
+    if (!user) throw new AppError(401, 'Unauthorized');
+
+    const where = this.buildUserOrderListWhere(user.id, { periodMonths, tab: 'all' });
+    const orders = await prisma.order.findMany({
+      where,
+      select: {
+        publicId: true,
+        status: true,
+        deliveredAt: true,
+        trackingNumber: true,
+        createdAt: true,
+        returnRequests: { select: { id: true } },
+      },
+      orderBy: { createdAt: 'desc' },
+    });
+
+    const returnOrderIds = new Set(
+      orders.filter((o) => o.returnRequests.length > 0).map((o) => o.publicId)
+    );
+    const isDelivered = (o) =>
+      o.status.toUpperCase().includes('DELIVER') || Boolean(o.deliveredAt);
+    const isCancelled = (o) => {
+      const s = o.status.toUpperCase();
+      return s.includes('CANCEL') || s.includes('REFUND');
+    };
+    const isInTransit = (o) => {
+      if (isDelivered(o) || isCancelled(o)) return false;
+      const s = o.status.toUpperCase();
+      return Boolean(o.trackingNumber) || s.includes('SHIP') || s.includes('TRANSIT');
+    };
+    const isActive = (o) => !isDelivered(o) && !isCancelled(o) && !isInTransit(o);
+
+    const year = new Date().getFullYear();
+    const deliveredThisYear = orders.filter((o) => {
+      if (!isDelivered(o)) return false;
+      const d = o.deliveredAt ? new Date(o.deliveredAt) : new Date(o.createdAt);
+      return d.getFullYear() === year;
+    }).length;
+
+    return {
+      counts: {
+        all: orders.length,
+        active: orders.filter((o) => isActive(o) || isInTransit(o)).length,
+        delivered: orders.filter(isDelivered).length,
+        returns: returnOrderIds.size,
+      },
+      inTransit: orders.filter(isInTransit).length,
+      deliveredThisYear,
     };
   }
 

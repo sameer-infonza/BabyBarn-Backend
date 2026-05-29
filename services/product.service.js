@@ -74,60 +74,101 @@ export class ProductService {
 
   /**
    * @param {object} [listFilters]
-   * **Public:** `search`, `sort` (newest | price_asc | price_desc | name_asc | name_desc), `productType`, `minPrice`, `maxPrice`, `sizeAgeGroup` (exact, legacy), `ageGroup` / `fitSize` (substring match on `sizeAgeGroup`, combined with AND when both set)
+   * **Public:** `search`, `sort` (newest | price_asc | price_desc | name_asc | name_desc), `productType` / `productTypes` (comma-separated NEW,REFURBISHED), `minPrice`, `maxPrice`, `sizeAgeGroup` (exact, legacy), `ageGroup` / `ageGroups` and `fitSize` / `fitSizes` (comma-separated substring match on `sizeAgeGroup`, OR within group, AND between groups), `categoryId` (comma-separated public ids)
    * **Admin:** `search`, `sizeAgeGroup`, `status` (active | inactive | draft | low_stock | all)
    */
   async getAllProducts(page = 1, limit = 20, categoryPublicId, { admin = false, listFilters } = {}) {
     const skip = (page - 1) * limit;
     const { isRefurbishedEnabled } = await import('../config/feature-flags.js');
     const refurbishedEnabled = isRefurbishedEnabled();
-    if (
-      !admin &&
-      listFilters?.productType === 'REFURBISHED' &&
-      !refurbishedEnabled
-    ) {
+
+    const parseCsv = (value) => {
+      if (value == null || value === '') return [];
+      if (Array.isArray(value)) return value.map(String).filter(Boolean);
+      return String(value)
+        .split(',')
+        .map((s) => s.trim())
+        .filter(Boolean);
+    };
+
+    const categoryPublicIds = [
+      ...parseCsv(listFilters?.categoryIds),
+      ...(categoryPublicId ? [String(categoryPublicId)] : []),
+    ].filter((id, idx, arr) => arr.indexOf(id) === idx);
+
+    const productTypesRaw = [
+      ...parseCsv(listFilters?.productTypes),
+      ...(listFilters?.productType ? [listFilters.productType] : []),
+    ].filter((t) => t === 'NEW' || t === 'REFURBISHED');
+    const productTypes = [...new Set(productTypesRaw)];
+
+    if (!admin && productTypes.includes('REFURBISHED') && !refurbishedEnabled) {
       return {
         products: [],
         pagination: { total: 0, page, limit, pages: 1 },
       };
     }
 
-    let categoryId;
-    if (categoryPublicId) {
-      const category = await prisma.category.findUnique({
-        where: { publicId: categoryPublicId },
-        select: { id: true },
+    let categoryIds = [];
+    if (categoryPublicIds.length > 0) {
+      const categories = await prisma.category.findMany({
+        where: { publicId: { in: categoryPublicIds } },
+        select: { id: true, publicId: true },
       });
-      if (!category) {
+      if (categories.length === 0) {
         throw new AppError(404, 'Category not found');
       }
-      categoryId = category.id;
+      const found = new Set(categories.map((c) => c.publicId));
+      const missing = categoryPublicIds.filter((id) => !found.has(id));
+      if (missing.length > 0) {
+        throw new AppError(404, 'Category not found');
+      }
+      categoryIds = categories.map((c) => c.id);
     }
 
     const where = {};
-    if (categoryId) where.categoryId = categoryId;
+    if (categoryIds.length === 1) where.categoryId = categoryIds[0];
+    else if (categoryIds.length > 1) where.categoryId = { in: categoryIds };
     if (!admin) {
       where.isDraft = false;
       where.isActiveListing = true;
       if (listFilters) {
-        const { search, productType, minPrice, maxPrice, sizeAgeGroup, ageGroup, fitSize } = listFilters;
-        if (productType === 'NEW' || productType === 'REFURBISHED') {
-          where.productType = productType;
+        const { search, minPrice, maxPrice, sizeAgeGroup } = listFilters;
+        if (productTypes.length === 1) {
+          where.productType = productTypes[0];
+        } else if (productTypes.length > 1) {
+          where.productType = { in: productTypes };
         } else if (!refurbishedEnabled) {
           where.productType = { not: 'REFURBISHED' };
         }
-        const ageTrim = ageGroup && String(ageGroup).trim() ? String(ageGroup).trim() : null;
-        const fitTrim = fitSize && String(fitSize).trim() ? String(fitSize).trim() : null;
-        if (ageTrim || fitTrim) {
+
+        const ageGroups = [
+          ...parseCsv(listFilters.ageGroups),
+          ...(listFilters.ageGroup ? [listFilters.ageGroup] : []),
+        ].filter(Boolean);
+        const fitSizes = [
+          ...parseCsv(listFilters.fitSizes),
+          ...(listFilters.fitSize ? [listFilters.fitSize] : []),
+        ].filter(Boolean);
+
+        if (ageGroups.length > 0) {
           where.AND = where.AND ?? [];
-          if (ageTrim) {
-            where.AND.push({ sizeAgeGroup: { contains: ageTrim, mode: 'insensitive' } });
-          }
-          if (fitTrim) {
-            where.AND.push({ sizeAgeGroup: { contains: fitTrim, mode: 'insensitive' } });
-          }
-        } else if (sizeAgeGroup && String(sizeAgeGroup).trim()) {
+          where.AND.push({
+            OR: ageGroups.map((age) => ({
+              sizeAgeGroup: { contains: age, mode: 'insensitive' },
+            })),
+          });
+        } else if (fitSizes.length === 0 && sizeAgeGroup && String(sizeAgeGroup).trim()) {
           where.sizeAgeGroup = String(sizeAgeGroup).trim();
+        }
+
+        if (fitSizes.length > 0) {
+          where.AND = where.AND ?? [];
+          where.AND.push({
+            OR: fitSizes.map((fit) => ({
+              sizeAgeGroup: { contains: fit, mode: 'insensitive' },
+            })),
+          });
         }
         if (search && String(search).trim()) {
           const q = String(search).trim();

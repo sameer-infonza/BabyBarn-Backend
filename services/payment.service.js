@@ -156,6 +156,12 @@ function assertConnectAccountsForMembership() {
 export async function createMembershipCheckoutSession(userPublicId, opts = {}) {
   const stripe = assertConnectAccountsForMembership();
 
+  const { assertMembershipCheckoutAllowed } = await import('./membership-eligibility.service.js');
+  const checkoutEligibility = await assertMembershipCheckoutAllowed(userPublicId, {
+    intent: opts.intent,
+    returnTo: opts.returnTo,
+  });
+
   const user = await prisma.user.findUnique({
     where: { publicId: userPublicId },
     select: {
@@ -180,9 +186,10 @@ export async function createMembershipCheckoutSession(userPublicId, opts = {}) {
   }
 
   const returnPath = normalizeStoreReturnPath(opts.returnTo);
+  const successBase = `${config.storeUrl}/access/success?session_id={CHECKOUT_SESSION_ID}`;
   const successUrl = returnPath
-    ? `${config.storeUrl}${returnPath}?access_success=1&session_id={CHECKOUT_SESSION_ID}`
-    : `${config.storeUrl}/access?success=1&session_id={CHECKOUT_SESSION_ID}`;
+    ? `${successBase}&returnTo=${encodeURIComponent(returnPath)}`
+    : successBase;
   const cancelUrl = returnPath
     ? `${config.storeUrl}${returnPath}?access_cancelled=1`
     : `${config.storeUrl}/access?cancelled=1`;
@@ -210,6 +217,7 @@ export async function createMembershipCheckoutSession(userPublicId, opts = {}) {
     metadata: {
       flow: 'membership',
       userPublicId: user.publicId,
+      checkoutIntent: checkoutEligibility.checkoutIntent || 'purchase',
     },
     success_url: successUrl,
     cancel_url: cancelUrl,
@@ -566,6 +574,80 @@ export async function getCheckoutSessionSummary(userPublicId, sessionId) {
         eta: order.trackingEta || null,
         history: order.trackingHistoryJson || [],
       },
+    },
+  };
+}
+
+/** Thank-you page: confirm Stripe session and return ACCESS membership details. */
+export async function getMembershipCheckoutSummary(userPublicId, sessionId) {
+  const stripe = getStripe();
+  if (!stripe) {
+    throw new AppError(503, 'Payments are not configured (missing STRIPE_SECRET_KEY)');
+  }
+  const ref = String(sessionId || '').trim();
+  if (!ref) {
+    throw new AppError(400, 'session_id is required');
+  }
+
+  let session;
+  try {
+    session = await stripe.checkout.sessions.retrieve(ref);
+  } catch {
+    throw new AppError(404, 'Checkout session not found');
+  }
+
+  if (getFlow(session.metadata) !== 'membership') {
+    throw new AppError(400, 'Not an ACCESS membership checkout session');
+  }
+  if (session.metadata?.userPublicId !== userPublicId) {
+    throw new AppError(403, 'Unauthorized to access this checkout session');
+  }
+
+  const paid =
+    session.payment_status === 'paid' || session.payment_status === 'no_payment_required';
+  if (!paid) {
+    throw new AppError(402, 'Payment is not complete yet. Please wait a moment and refresh.');
+  }
+
+  const { completeMembershipPayment } = await import('./membership.service.js');
+  await completeMembershipPayment(session);
+
+  const user = await prisma.user.findUnique({
+    where: { publicId: userPublicId },
+    select: {
+      email: true,
+      firstName: true,
+      lastName: true,
+      babyName: true,
+      accessNumber: true,
+      accessMemberUntil: true,
+    },
+  });
+  if (!user) {
+    throw new AppError(401, 'Unauthorized');
+  }
+
+  const payment = await prisma.membershipPayment.findFirst({
+    where: { stripeSessionId: ref },
+    orderBy: { createdAt: 'desc' },
+    select: { type: true, amount: true, accessValidUntil: true, createdAt: true },
+  });
+
+  const amountUsd =
+    payment?.amount ??
+    (typeof session.amount_total === 'number' ? session.amount_total / 100 : null);
+
+  return {
+    sessionId: ref,
+    paymentType: payment?.type || 'PURCHASE',
+    amount: amountUsd,
+    accessNumber: user.accessNumber,
+    validUntil: payment?.accessValidUntil || user.accessMemberUntil,
+    customer: {
+      email: session.customer_details?.email || user.email,
+      firstName: user.firstName,
+      lastName: user.lastName,
+      babyName: user.babyName,
     },
   };
 }
