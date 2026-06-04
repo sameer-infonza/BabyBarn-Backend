@@ -19,6 +19,10 @@ export const loginSchema = z.object({
   password: z.string(),
 });
 
+export const refreshTokenSchema = z.object({
+  refreshToken: z.string().min(1, 'Refresh token is required'),
+});
+
 export const resetPasswordSchema = z.object({
   email: z.string().email('Invalid email address'),
 });
@@ -155,6 +159,8 @@ export const createOrderSchema = z.object({
   selectedRate: checkoutSelectedRateSchema.optional(),
   storeCreditToApply: z.number().min(0).optional(),
   saveCard: z.boolean().optional(),
+  /** Reuse in-progress checkout (CheckoutIntent publicId; legacy clients may still send orderId). */
+  orderId: z.string().min(1).optional(),
 });
 
 export const checkoutQuoteSchema = z.object({

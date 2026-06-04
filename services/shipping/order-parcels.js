@@ -1,7 +1,5 @@
-import { PrismaClient } from '@prisma/client';
+import { prisma } from '../../lib/prisma.js';
 import { defaultParcel, sanitizeParcel } from './shipping-address.js';
-
-const prisma = new PrismaClient();
 
 const LB_PER_ITEM = 0.5;
 

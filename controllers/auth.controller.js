@@ -3,6 +3,7 @@ import { validate } from '../utils/validation.js';
 import {
   registerSchema,
   loginSchema,
+  refreshTokenSchema,
   resetPasswordSchema,
   confirmPasswordSchema,
   verifyEmailSchema,
@@ -36,6 +37,16 @@ export class AuthController {
     res.status(200).json({
       success: true,
       message: 'Login successful',
+      data: result,
+    });
+  }
+
+  async refreshToken(req, res) {
+    const data = await validate(refreshTokenSchema, req.body);
+    const result = await authService.refreshAccessToken(data.refreshToken);
+    res.status(200).json({
+      success: true,
+      message: 'Token refreshed',
       data: result,
     });
   }

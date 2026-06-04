@@ -1,11 +1,4 @@
-import { PrismaClient } from '@prisma/client';
-import { AppError } from '../utils/error-handler.js';
-import { emailService } from './email.service.js';
-import { config } from '../config/env.js';
-import { writeAdminAudit } from './audit.service.js';
-import { getBusinessSettings } from './admin.service.js';
-
-const prisma = new PrismaClient();
+import { prisma } from '../lib/prisma.js';
 
 function isMissingWalletTableError(error) {
   return Boolean(
@@ -32,7 +25,7 @@ export class ReturnsService {
     return prisma.returnRequest.findMany({
       include: {
         user: { select: { publicId: true, email: true, firstName: true, lastName: true } },
-        order: { select: { publicId: true, status: true, createdAt: true } },
+        order: { select: { publicId: true, orderNumber: true, status: true, createdAt: true } },
         orderItem: { include: { product: { select: { name: true, productType: true } } } },
       },
       orderBy: { createdAt: 'desc' },
@@ -45,7 +38,7 @@ export class ReturnsService {
     return prisma.returnRequest.findMany({
       where: { userId: user.id },
       include: {
-        order: { select: { publicId: true, status: true, createdAt: true } },
+        order: { select: { publicId: true, orderNumber: true, status: true, createdAt: true } },
         orderItem: { include: { product: { select: { name: true, productType: true } } } },
       },
       orderBy: { createdAt: 'desc' },
@@ -58,7 +51,7 @@ export class ReturnsService {
     const row = await prisma.returnRequest.findUnique({
       where: { publicId: returnPublicId },
       include: {
-        order: { select: { publicId: true, status: true, createdAt: true } },
+        order: { select: { publicId: true, orderNumber: true, status: true, createdAt: true } },
         orderItem: { include: { product: { select: { name: true, productType: true } } } },
       },
     });
@@ -71,7 +64,7 @@ export class ReturnsService {
       where: { publicId: returnPublicId },
       include: {
         user: { select: { publicId: true, email: true, firstName: true, lastName: true } },
-        order: { select: { publicId: true, status: true, createdAt: true } },
+        order: { select: { publicId: true, orderNumber: true, status: true, createdAt: true } },
         orderItem: { include: { product: { select: { name: true, productType: true } } } },
       },
     });
@@ -144,7 +137,7 @@ export class ReturnsService {
             status: 'REQUESTED',
           },
           include: {
-            order: { select: { publicId: true, status: true, createdAt: true } },
+            order: { select: { publicId: true, orderNumber: true, status: true, createdAt: true } },
             orderItem: { include: { product: { select: { name: true, productType: true } } } },
           },
         });
@@ -211,10 +204,21 @@ export class ReturnsService {
         const wallet = await prisma.storeCreditWallet.upsert({
           where: { userId: rr.userId },
           update: {},
-          create: { userId: rr.userId, balance: 0 },
+          create: { userId: rr.userId, balance: 0, heldBalance: 0 },
         });
-        const settings = await getBusinessSettings();
-        const amount = Math.round(settings.accessMembershipPriceUsd * 0.2 * 100) / 100;
+        let itemAccessPrice = 0;
+        if (rr.orderItemId) {
+          const line = await prisma.orderItem.findUnique({
+            where: { id: rr.orderItemId },
+            select: { price: true },
+          });
+          itemAccessPrice = Number(line?.price ?? 0);
+        }
+        if (itemAccessPrice <= 0) {
+          const settings = await getBusinessSettings();
+          itemAccessPrice = Number(settings.accessMembershipPriceUsd ?? 50);
+        }
+        const amount = Math.round(itemAccessPrice * 0.2 * 100) / 100;
         await prisma.storeCreditWallet.update({
           where: { id: wallet.id },
           data: { balance: wallet.balance + amount },

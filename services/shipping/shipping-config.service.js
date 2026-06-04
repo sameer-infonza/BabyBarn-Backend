@@ -1,6 +1,4 @@
-import { PrismaClient } from '@prisma/client';
-
-const prisma = new PrismaClient();
+import { prisma } from '../../lib/prisma.js';
 
 let cache = { at: 0, providers: null, methodsByProviderId: null };
 const TTL_MS = 45_000;

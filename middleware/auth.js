@@ -1,8 +1,6 @@
 import { verifyToken } from '../utils/jwt.js';
 import { AppError } from '../utils/error-handler.js';
-import { PrismaClient } from '@prisma/client';
-
-const prisma = new PrismaClient();
+import { prisma } from '../lib/prisma.js';
 
 export const authenticate = async (req, res, next) => {
   try {

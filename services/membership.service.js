@@ -1,10 +1,8 @@
-import { PrismaClient } from '@prisma/client';
+import { prisma } from '../lib/prisma.js';
 import { AppError } from '../utils/error-handler.js';
 import { getBusinessSettings } from './admin.service.js';
 import { emailService } from './email.service.js';
 import { config } from '../config/env.js';
-
-const prisma = new PrismaClient();
 
 const membershipAddressSchema = {
   fullName: (v) => typeof v === 'string' && v.trim().length >= 1,
@@ -341,6 +339,58 @@ export async function sendAccessRenewalReminders() {
       sent += 1;
     } catch (err) {
       console.error('[membership] renewal reminder failed', user.email, err);
+    }
+  }
+
+  return { sent, checked: users.length };
+}
+
+/** Notify members whose ACCESS expired in the last 24h (once). */
+export async function sendAccessExpiredNotices() {
+  const now = new Date();
+  const dayAgo = new Date(now);
+  dayAgo.setUTCDate(dayAgo.getUTCDate() - 1);
+
+  const users = await prisma.user.findMany({
+    where: {
+      accessMemberUntil: { lte: now, gte: dayAgo },
+      accessNumber: { not: null },
+      accessExpiredNoticeSentAt: null,
+    },
+    select: {
+      id: true,
+      email: true,
+      firstName: true,
+      lastName: true,
+      accessMemberUntil: true,
+    },
+    take: 100,
+  });
+
+  let sent = 0;
+  for (const user of users) {
+    const name = [user.firstName, user.lastName].filter(Boolean).join(' ') || 'there';
+    try {
+      await emailService.sendTemplate({
+        to: user.email,
+        template: 'access-expired',
+        context: {
+          name,
+          validUntil: user.accessMemberUntil.toLocaleDateString('en-US', {
+            month: 'long',
+            day: 'numeric',
+            year: 'numeric',
+          }),
+          actionUrl: `${config.frontend.customerUrl}/access`,
+        },
+      });
+      await prisma.user.update({
+        where: { id: user.id },
+        data: { accessExpiredNoticeSentAt: now },
+      });
+      sent += 1;
+    } catch (err) {
+      console.error('[membership] access expired notice failed', user.email, err);
     }
   }
 

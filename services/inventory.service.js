@@ -1,9 +1,8 @@
-import { PrismaClient } from '@prisma/client';
+import { prisma } from '../lib/prisma.js';
 import { AppError } from '../utils/error-handler.js';
+import { productAvailableStock, variantAvailableStock } from './inventory-reservation.js';
 
-const prisma = new PrismaClient();
-
-export const LOW_STOCK_THRESHOLD = 10;
+export const LOW_STOCK_THRESHOLD = parseInt(process.env.LOW_STOCK_THRESHOLD || '10', 10);
 
 export function computeTotalStock(product) {
   const variants = product.variants ?? [];
@@ -13,9 +12,13 @@ export function computeTotalStock(product) {
   return product.stock;
 }
 
-/** Validates aggregate stock without mutating (for unpaid checkout orders). */
+export function computeAvailableStock(product) {
+  return productAvailableStock(product);
+}
+
+/** Validates aggregate available stock without mutating (for unpaid checkout orders). */
 export function assertStockAvailable(product, quantity) {
-  const total = computeTotalStock(product);
+  const total = computeAvailableStock(product);
   if (total < quantity) {
     throw new AppError(400, `Insufficient stock for "${product.name}"`);
   }

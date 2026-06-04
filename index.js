@@ -1,8 +1,11 @@
 import express from 'express';
 import cors from 'cors';
+import helmet from 'helmet';
+import rateLimit from 'express-rate-limit';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { config } from './config/env.js';
+import { prisma, refreshPrismaClientIfNeeded } from './lib/prisma.js';
 import { errorHandler, AppError } from './utils/error-handler.js';
 import { ensureUploadDirs } from './utils/product-upload.js';
 import authRoutes from './routes/auth.js';
@@ -19,13 +22,20 @@ import shippingRoutes from './routes/shipping.js';
 import publicRoutes from './routes/public.js';
 import membershipRoutes from './routes/membership.js';
 import { stripeWebhook } from './controllers/payment.controller.js';
-import { sendAccessRenewalReminders } from './services/membership.service.js';
+import { sendAccessRenewalReminders, sendAccessExpiredNotices } from './services/membership.service.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 const app = express();
 
 ensureUploadDirs();
+
+app.use(
+  helmet({
+    crossOriginResourcePolicy: { policy: 'cross-origin' },
+  })
+);
+
 app.use(
   '/uploads',
   express.static(path.join(__dirname, 'uploads'), {
@@ -40,7 +50,6 @@ if (config.trustProxy) {
 app.use(
   cors({
     origin(origin, callback) {
-      // Allow non-browser or same-origin server requests with no Origin header.
       if (!origin) {
         callback(null, true);
         return;
@@ -58,6 +67,22 @@ app.use(
   })
 );
 
+const authLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 300,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { success: false, message: 'Too many auth attempts. Try again later.' },
+});
+
+const apiLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 300,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { success: false, message: 'Too many requests. Try again later.' },
+});
+
 app.post('/api/stripe/webhook', express.raw({ type: 'application/json' }), (req, res, next) =>
   stripeWebhook(req, res).catch(next)
 );
@@ -71,11 +96,21 @@ app.use(
   })
 );
 
+app.use('/api/auth', authLimiter);
+app.use('/api/v1/auth', authLimiter);
+app.use('/api', apiLimiter);
+app.use('/api/v1', apiLimiter);
+
 /** Log every API request + response status to the terminal (dev-friendly). */
 app.use((req, res, next) => {
   const started = Date.now();
   const path = req.originalUrl || req.url;
-  if (!path.startsWith('/api') && path !== '/health') {
+  if (!path.startsWith('/api') && !path.startsWith('/health')) {
+    next();
+    return;
+  }
+  // Ignore unrelated browser/extension probes (e.g. socket.io from other tabs).
+  if (path.startsWith('/socket.io')) {
     next();
     return;
   }
@@ -88,8 +123,35 @@ app.use((req, res, next) => {
   next();
 });
 
-app.get('/health', (req, res) => {
+app.get('/health/live', (req, res) => {
   res.json({ status: 'OK' });
+});
+
+app.get('/health/ready', async (req, res, next) => {
+  try {
+    const db = refreshPrismaClientIfNeeded();
+    await db.$queryRaw`SELECT 1`;
+    await db.$queryRaw`SELECT 1 FROM "CheckoutIntent" LIMIT 1`;
+    res.json({ status: 'OK', db: 'connected', checkoutIntent: true });
+  } catch (error) {
+    if (error?.code === 'PRISMA_CHECKOUT_INTENT_MISSING') {
+      return next(error);
+    }
+    if (error?.code === 'P2021' || /CheckoutIntent/i.test(String(error?.message || ''))) {
+      return next(
+        new AppError(
+          503,
+          'Database migration required: run `npx prisma migrate deploy` in backend/',
+          'CHECKOUT_INTENT_TABLE_MISSING'
+        )
+      );
+    }
+    next(new AppError(503, 'Database unavailable', 'DB_UNAVAILABLE'));
+  }
+});
+
+app.get('/health', (req, res) => {
+  res.redirect(307, '/health/live');
 });
 
 /** Same JSON API for web and mobile; v1 is the stable surface for native apps. */
@@ -117,7 +179,7 @@ app.get('/api', (req, res) => {
     version: '1',
     docs: 'Use /api/v1/* for mobile clients; /api/* is an alias.',
     prefixes: ['/api', '/api/v1'],
-    health: '/health',
+    health: '/health/live',
   });
 });
 
@@ -125,13 +187,14 @@ app.get('/api/v1', (req, res) => {
   res.json({
     name: 'Baby Barn API',
     version: '1',
-    health: '/health',
+    health: '/health/live',
     routes: {
       public: ['/business-settings'],
       membership: ['/registration', '/payments/history', '/savings'],
       auth: [
         '/register',
         '/login',
+        '/refresh-token',
         '/forgot-password',
         '/reset-password',
         '/verify-email',
@@ -155,28 +218,61 @@ app.use((req, res, next) => {
 app.use(errorHandler);
 
 const PORT = config.port;
+
+try {
+  refreshPrismaClientIfNeeded();
+} catch (err) {
+  console.error('[startup] Prisma client is missing CheckoutIntent support:', err?.message || err);
+  console.error('  Run: cd backend && npx prisma migrate deploy && npx prisma generate');
+  console.error('  Then restart this server.');
+  process.exit(1);
+}
+
 app.listen(PORT, () => {
   console.log('');
   console.log('══════════════════════════════════════════════');
   console.log(`  Baby Barn API listening on http://localhost:${PORT}`);
-  console.log(`  Health check: http://localhost:${PORT}/health`);
+  console.log(`  Health check: http://localhost:${PORT}/health/live`);
   console.log(`  API base:     http://localhost:${PORT}/api`);
   console.log(`  Environment:  ${config.nodeEnv}`);
   console.log('══════════════════════════════════════════════');
   console.log('');
+
   setInterval(() => {
-    orderService.syncUpsTrackingBatch().catch(() => {});
+    orderService.syncUpsTrackingBatch().catch((err) => {
+      console.error('[jobs] UPS tracking sync failed', err);
+    });
   }, 15 * 60 * 1000);
 
   const renewalReminderMs = 24 * 60 * 60 * 1000;
   setInterval(() => {
     sendAccessRenewalReminders().catch((err) => {
-      console.error('[membership] renewal reminder job failed', err);
+      console.error('[jobs] ACCESS renewal reminder failed', err);
+    });
+    sendAccessExpiredNotices().catch((err) => {
+      console.error('[jobs] ACCESS expired notice failed', err);
     });
   }, renewalReminderMs);
   setTimeout(() => {
-    sendAccessRenewalReminders().catch(() => {});
+    sendAccessRenewalReminders().catch((err) => {
+      console.error('[jobs] ACCESS renewal reminder (initial) failed', err);
+    });
+    sendAccessExpiredNotices().catch((err) => {
+      console.error('[jobs] ACCESS expired notice (initial) failed', err);
+    });
   }, 60 * 1000);
+
+  const pendingOrderCleanupMs = 15 * 60 * 1000;
+  setInterval(() => {
+    orderService.expireStalePendingOrders().catch((err) => {
+      console.error('[jobs] pending order cleanup failed', err);
+    });
+    import('./services/checkout-intent.service.js').then(({ checkoutIntentService }) =>
+      checkoutIntentService.expireStaleCheckoutIntents().catch((err) => {
+        console.error('[jobs] checkout intent cleanup failed', err);
+      })
+    );
+  }, pendingOrderCleanupMs);
 });
 
 process.on('unhandledRejection', (reason) => {

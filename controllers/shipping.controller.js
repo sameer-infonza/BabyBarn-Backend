@@ -1,4 +1,4 @@
-import { PrismaClient } from '@prisma/client';
+import { prisma } from '../lib/prisma.js';
 import { shippingService } from '../services/shipping.service.js';
 import { validate } from '../utils/validation.js';
 import {
@@ -7,8 +7,6 @@ import {
   shippingLabelSchema,
 } from '../schemas/index.js';
 import { toPublicJson } from '../utils/serialize.js';
-
-const prisma = new PrismaClient();
 
 export class ShippingController {
   async debugRateCheck(req, res) {

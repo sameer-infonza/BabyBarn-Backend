@@ -64,6 +64,15 @@ export class OrderController {
   }
 
   async createOrder(req, res) {
+    const { config } = await import('../config/env.js');
+    if (config.nodeEnv === 'production') {
+      const { AppError } = await import('../utils/error-handler.js');
+      throw new AppError(
+        410,
+        'Direct order creation is disabled. Use checkout and payment.',
+        'USE_CHECKOUT'
+      );
+    }
     const data = await validate(createOrderSchema, req.body);
     const order = await orderService.createOrder(req.user.id, data.items);
 
@@ -267,9 +276,9 @@ export class OrderController {
   async getPickupListPdf(req, res, next) {
     try {
       const { publicId } = req.params;
-      const orders = await orderService.getPickupListOrdersForPdf(publicId);
+      const { title, orders } = await orderService.getPickupListForPdf(publicId);
       const { renderPickupListPdfBuffer } = await import('../services/pdf/order-documents.service.js');
-      const buf = await renderPickupListPdfBuffer({ title: `Pickup ${publicId}`, orders });
+      const buf = await renderPickupListPdfBuffer({ title, orders });
       res.setHeader('Content-Type', 'application/pdf');
       res.setHeader('Content-Disposition', `attachment; filename="pickup-${publicId}.pdf"`);
       res.send(buf);

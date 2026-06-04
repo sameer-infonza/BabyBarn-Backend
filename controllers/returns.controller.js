@@ -14,11 +14,13 @@ export class ReturnsController {
     res.status(200).json({ success: true, data: toPublicJson(data) });
   }
 
-  async getById(req, res) {
-    const isAdmin = req.user?.role === 'ADMIN' || req.user?.role === 'ADMIN_TEAM';
-    const data = isAdmin
-      ? await returnsService.getById(req.params.id)
-      : await returnsService.getForUser(req.user.id, req.params.id);
+  async getMineById(req, res) {
+    const data = await returnsService.getForUser(req.user.id, req.params.id);
+    res.status(200).json({ success: true, data: toPublicJson(data) });
+  }
+
+  async getAdminById(req, res) {
+    const data = await returnsService.getById(req.params.id);
     res.status(200).json({ success: true, data: toPublicJson(data) });
   }
 

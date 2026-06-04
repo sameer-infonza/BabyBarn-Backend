@@ -1,16 +1,37 @@
 import bcrypt from 'bcryptjs';
 import crypto from 'crypto';
-import { PrismaClient } from '@prisma/client';
+import { prisma } from '../lib/prisma.js';
 import { generateToken } from '../utils/jwt.js';
 import { AppError } from '../utils/error-handler.js';
 import { emailService } from './email.service.js';
 import { config } from '../config/env.js';
 
-const prisma = new PrismaClient();
-
 const RESET_TOKEN_BYTES = 32;
 const RESET_TOKEN_TTL_MS = 60 * 60 * 1000;
 const VERIFY_TOKEN_TTL_MS = 24 * 60 * 60 * 1000;
+const REFRESH_TOKEN_BYTES = 48;
+const REFRESH_TOKEN_TTL_MS = 30 * 24 * 60 * 60 * 1000;
+
+function hashRefreshToken(token) {
+  return crypto.createHash('sha256').update(token).digest('hex');
+}
+
+async function issueRefreshToken(userId) {
+  const token = crypto.randomBytes(REFRESH_TOKEN_BYTES).toString('hex');
+  const tokenHash = hashRefreshToken(token);
+  const expiresAt = new Date(Date.now() + REFRESH_TOKEN_TTL_MS);
+  try {
+    await prisma.refreshToken.create({
+      data: { userId, tokenHash, expiresAt },
+    });
+    return token;
+  } catch (error) {
+    if (error && typeof error === 'object' && (error.code === 'P2021' || error.code === 'P2022')) {
+      return null;
+    }
+    throw error;
+  }
+}
 
 function toPublicUser(user) {
   const accessUntil = user.accessMemberUntil ?? null;
@@ -166,10 +187,43 @@ export class AuthService {
     }
 
     const token = generateToken(payload);
+    const refreshToken = await issueRefreshToken(user.id);
 
     return {
       user: toPublicUser(user),
       token,
+      ...(refreshToken ? { refreshToken } : {}),
+    };
+  }
+
+  async refreshAccessToken(refreshTokenRaw) {
+    if (!refreshTokenRaw || typeof refreshTokenRaw !== 'string') {
+      throw new AppError(401, 'Refresh token required', 'REFRESH_TOKEN_REQUIRED');
+    }
+    const tokenHash = hashRefreshToken(refreshTokenRaw.trim());
+    const row = await prisma.refreshToken.findUnique({
+      where: { tokenHash },
+      include: { user: { include: { role: true } } },
+    });
+    if (!row || row.revokedAt || row.expiresAt <= new Date()) {
+      throw new AppError(401, 'Invalid or expired refresh token', 'INVALID_REFRESH_TOKEN');
+    }
+    if (row.user.isActive === false) {
+      throw new AppError(403, 'This account has been deactivated.');
+    }
+
+    const payload = {
+      id: row.user.publicId,
+      email: row.user.email,
+      role: row.user.role.name,
+    };
+    if (row.user.role.name === 'ADMIN_TEAM') {
+      payload.adminModules = row.user.adminModules ?? null;
+    }
+
+    return {
+      user: toPublicUser(row.user),
+      token: generateToken(payload),
     };
   }
 

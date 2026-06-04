@@ -1,11 +1,10 @@
 import Stripe from 'stripe';
-import { PrismaClient } from '@prisma/client';
+import { prisma, refreshPrismaClientIfNeeded } from '../lib/prisma.js';
 import { config } from '../config/env.js';
 import { AppError } from '../utils/error-handler.js';
 import { orderService } from './order.service.js';
+import { checkoutIntentService } from './checkout-intent.service.js';
 import { emailService } from './email.service.js';
-
-const prisma = new PrismaClient();
 
 async function getMembershipUnitAmountCents() {
   try {
@@ -32,7 +31,7 @@ function normalizeStoreReturnPath(returnTo) {
 
 let stripeClient = null;
 
-function getStripe() {
+export function getStripe() {
   if (!config.stripe.secretKey) return null;
   if (!stripeClient) {
     stripeClient = new Stripe(config.stripe.secretKey);
@@ -55,6 +54,99 @@ function toStripeAppError(error, code, flow = 'order') {
     stripeType: stripeType || null,
     flow,
   });
+}
+
+async function ensureCheckoutPaymentIntent(stripe, checkoutIntent, user, opts = {}) {
+  const refreshed = await prisma.checkoutIntent.findUnique({
+    where: { id: checkoutIntent.id },
+    select: { totalAmount: true, publicId: true, stripePaymentIntentId: true },
+  });
+  const payable = Number(refreshed?.totalAmount ?? checkoutIntent.totalAmount);
+  const amountCents = Math.round(payable * 100);
+  if (amountCents < 50) {
+    throw new AppError(400, 'Order total is below the minimum charge amount', 'ORDER_TOTAL_TOO_LOW');
+  }
+
+  const checkoutIntentPublicId = refreshed?.publicId ?? checkoutIntent.publicId;
+  const basePayload = {
+    amount: amountCents,
+    currency: 'usd',
+    payment_method_types: ['card'],
+    receipt_email: user.email || undefined,
+    metadata: {
+      flow: 'order',
+      checkoutIntentPublicId,
+    },
+    ...(opts.saveCard ? { setup_future_usage: 'off_session' } : {}),
+  };
+
+  const reusableStatuses = new Set([
+    'requires_payment_method',
+    'requires_confirmation',
+    'requires_action',
+  ]);
+
+  const existingId = refreshed?.stripePaymentIntentId;
+  if (existingId) {
+    let paymentIntent;
+    try {
+      paymentIntent = await stripe.paymentIntents.retrieve(existingId);
+    } catch (retrieveErr) {
+      console.warn('[payments] could not retrieve existing payment intent', existingId, retrieveErr?.message);
+      paymentIntent = null;
+    }
+
+    if (paymentIntent?.status === 'succeeded') {
+      throw new AppError(409, 'This checkout was already paid', 'ORDER_ALREADY_PAID');
+    }
+
+    if (
+      paymentIntent &&
+      paymentIntent.status !== 'canceled' &&
+      reusableStatuses.has(paymentIntent.status)
+    ) {
+      if (paymentIntent.amount !== amountCents) {
+        try {
+          paymentIntent = await stripe.paymentIntents.update(existingId, { amount: amountCents });
+        } catch (updateErr) {
+          throw toStripeAppError(updateErr, 'STRIPE_PAYMENT_INTENT_FAILED', 'order');
+        }
+      }
+      if (paymentIntent.client_secret) {
+        return {
+          clientSecret: paymentIntent.client_secret,
+          checkoutIntentId: checkoutIntentPublicId,
+          paymentIntentId: paymentIntent.id,
+        };
+      }
+    }
+  }
+
+  let paymentIntent;
+  try {
+    paymentIntent = await createPaymentIntentWithOptionalTransfer(
+      stripe,
+      basePayload,
+      config.stripe.connectStore
+    );
+  } catch (error) {
+    throw toStripeAppError(error, 'STRIPE_PAYMENT_INTENT_FAILED', 'order');
+  }
+
+  await prisma.checkoutIntent.update({
+    where: { id: checkoutIntent.id },
+    data: { stripePaymentIntentId: paymentIntent.id },
+  });
+
+  if (!paymentIntent.client_secret) {
+    throw new AppError(502, 'Stripe did not return a payment client secret', 'STRIPE_PAYMENT_INTENT_FAILED');
+  }
+
+  return {
+    clientSecret: paymentIntent.client_secret,
+    checkoutIntentId: checkoutIntentPublicId,
+    paymentIntentId: paymentIntent.id,
+  };
 }
 
 async function createPaymentIntentWithOptionalTransfer(stripe, basePayload, destinationAccount) {
@@ -99,8 +191,17 @@ function getOrderPublicId(metadata) {
   return metadata && typeof metadata.orderPublicId === 'string' ? metadata.orderPublicId : null;
 }
 
+function getCheckoutIntentPublicId(metadata) {
+  return metadata && typeof metadata.checkoutIntentPublicId === 'string'
+    ? metadata.checkoutIntentPublicId
+    : null;
+}
+
 async function markOrderFailedIfUnpaid(orderPublicId, source) {
   if (!orderPublicId) return { handled: true, source, error: 'missing orderPublicId' };
+  await orderService.releasePendingOrderResources(orderPublicId).catch((err) => {
+    console.error('[payments] release pending resources failed', orderPublicId, err);
+  });
   await prisma.order.updateMany({
     where: { publicId: orderPublicId, paymentStatus: 'UNPAID' },
     data: { paymentStatus: 'FAILED' },
@@ -128,8 +229,72 @@ async function getCheckoutSessionIdFromPaymentIntent(stripe, paymentIntentId) {
   return sessions?.data?.[0]?.id ?? null;
 }
 
+async function persistOrderPaymentIntent(orderPublicId, paymentIntentId) {
+  if (!orderPublicId || !paymentIntentId) return;
+  await prisma.order.updateMany({
+    where: { publicId: orderPublicId },
+    data: { stripePaymentIntentId: paymentIntentId },
+  });
+}
+
+async function markCheckoutIntentFailed(checkoutIntentPublicId, source) {
+  if (!checkoutIntentPublicId) {
+    return { handled: true, source, error: 'missing checkoutIntentPublicId' };
+  }
+  await checkoutIntentService.releaseIntentResources(checkoutIntentPublicId).catch((err) => {
+    console.error('[payments] release checkout intent failed', checkoutIntentPublicId, err);
+  });
+  await prisma.checkoutIntent.updateMany({
+    where: { publicId: checkoutIntentPublicId, status: 'PENDING' },
+    data: { status: 'FAILED' },
+  });
+  return { handled: true, flow: 'order', source, checkoutIntentPublicId };
+}
+
+async function markOrderFlowPaymentFailed(metadata, source) {
+  const checkoutIntentPublicId = getCheckoutIntentPublicId(metadata);
+  if (checkoutIntentPublicId) {
+    return markCheckoutIntentFailed(checkoutIntentPublicId, source);
+  }
+  return markOrderFailedIfUnpaid(getOrderPublicId(metadata), source);
+}
+
 async function handleOrderCheckoutCompleted(session) {
-  return handleOrderPaymentCompleted(getOrderPublicId(session.metadata));
+  const checkoutIntentPublicId = getCheckoutIntentPublicId(session.metadata);
+  const paymentIntentId =
+    typeof session.payment_intent === 'string' ? session.payment_intent : session.payment_intent?.id;
+
+  if (checkoutIntentPublicId) {
+    if (paymentIntentId) {
+      await prisma.checkoutIntent.updateMany({
+        where: { publicId: checkoutIntentPublicId },
+        data: { stripePaymentIntentId: paymentIntentId },
+      });
+    }
+    return handleCheckoutIntentPaymentCompleted(checkoutIntentPublicId);
+  }
+
+  const orderPublicId = getOrderPublicId(session.metadata);
+  if (paymentIntentId) {
+    await persistOrderPaymentIntent(orderPublicId, paymentIntentId);
+  }
+  return handleOrderPaymentCompleted(orderPublicId);
+}
+
+async function handleOrderPaymentIntentSucceeded(paymentIntent) {
+  const flow = getFlow(paymentIntent.metadata);
+  if (flow !== 'order') {
+    return { handled: false, type: 'payment_intent.succeeded', flow };
+  }
+  const checkoutIntentPublicId = getCheckoutIntentPublicId(paymentIntent.metadata);
+  if (checkoutIntentPublicId) {
+    await prisma.checkoutIntent.updateMany({
+      where: { publicId: checkoutIntentPublicId },
+      data: { stripePaymentIntentId: paymentIntent.id },
+    });
+    return handleCheckoutIntentPaymentCompleted(checkoutIntentPublicId);
+  }
+  return handleOrderPaymentCompleted(getOrderPublicId(paymentIntent.metadata));
 }
 
 /** Card-only — excludes Klarna, Affirm, and other Pay Later methods on Checkout. */
@@ -287,13 +452,14 @@ export async function createOrderCheckoutSession(userPublicId, items, opts = {})
     throw new AppError(401, 'Unauthorized');
   }
 
-  const order = await orderService.createPendingOrderForStripe(userPublicId, items, {
+  const checkoutIntent = await checkoutIntentService.resolveCheckoutIntent(userPublicId, items, {
     shippingAddress: opts.shippingAddress,
     billingAddress: opts.billingAddress,
     parcels: opts.parcels,
     selectedRateId: opts.selectedRateId,
     selectedRate: opts.selectedRate,
     storeCreditToApply: opts.storeCreditToApply,
+    checkoutIntentPublicId: opts.orderId,
   });
 
   const successUrl = `${config.storeUrl}/checkout/success?session_id={CHECKOUT_SESSION_ID}`;
@@ -305,19 +471,19 @@ export async function createOrderCheckoutSession(userPublicId, items, opts = {})
     mode: 'payment',
     customer_email: user.email,
     customer_creation: 'always',
-    line_items: order.orderItems.map((oi) => ({
-      quantity: oi.quantity,
+    line_items: checkoutIntent.lines.map((line) => ({
+      quantity: line.quantity,
       price_data: {
         currency: 'usd',
-        unit_amount: Math.round(Number(oi.price) * 100),
+        unit_amount: Math.round(Number(line.price) * 100),
         product_data: {
-          name: oi.product.name,
+          name: line.product.name,
         },
       },
     })),
     metadata: {
       flow: 'order',
-      orderPublicId: order.publicId,
+      checkoutIntentPublicId: checkoutIntent.publicId,
     },
     success_url: successUrl,
     cancel_url: cancelUrl,
@@ -326,12 +492,85 @@ export async function createOrderCheckoutSession(userPublicId, items, opts = {})
     'order'
   );
 
-  await prisma.order.update({
-    where: { id: order.id },
-    data: { stripeCheckoutSessionId: session.id },
+  await prisma.checkoutIntent.update({
+    where: { id: checkoutIntent.id },
+    data: { stripePaymentIntentId: session.id },
   });
 
-  return { url: session.url, sessionId: session.id, orderId: order.publicId };
+  return { url: session.url, sessionId: session.id, checkoutIntentId: checkoutIntent.publicId };
+}
+
+async function sendOrderConfirmationEmail(orderPublicId) {
+  const orderDetail = await prisma.order.findUnique({
+    where: { publicId: orderPublicId },
+    include: {
+      orderItems: { include: { product: { select: { name: true } } } },
+      user: { select: { email: true, firstName: true, lastName: true } },
+    },
+  });
+  if (!orderDetail?.user?.email) return;
+
+  const subtotal = orderDetail.orderItems.reduce(
+    (sum, li) => sum + Number(li.price) * li.quantity,
+    0
+  );
+  await emailService.sendTemplate({
+    to: orderDetail.user.email,
+    template: 'order-confirmation',
+    context: {
+      name: [orderDetail.user.firstName, orderDetail.user.lastName].filter(Boolean).join(' '),
+      orderId: orderDetail.orderNumber || orderDetail.publicId,
+      lines: orderDetail.orderItems.map((li) => ({
+        name: li.product?.name || 'Item',
+        qty: li.quantity,
+        total: `$${(Number(li.price) * li.quantity).toFixed(2)}`,
+      })),
+      subtotal: `$${subtotal.toFixed(2)}`,
+      shipping: `$${Number(orderDetail.shippingCost || 0).toFixed(2)}`,
+      total: `$${Number(orderDetail.totalAmount).toFixed(2)}`,
+      actionUrl: `${config.frontend.customerUrl}/dashboard/orders/${orderDetail.publicId}`,
+    },
+  });
+}
+
+async function handleCheckoutIntentPaymentCompleted(checkoutIntentPublicId) {
+  if (!checkoutIntentPublicId) {
+    return { handled: true, error: 'missing checkoutIntentPublicId' };
+  }
+
+  const intentBefore = await prisma.checkoutIntent.findUnique({
+    where: { publicId: checkoutIntentPublicId },
+    select: { status: true, orderPublicId: true },
+  });
+  if (!intentBefore) {
+    return { handled: true, flow: 'order', error: 'missing checkout intent' };
+  }
+  const alreadyConsumed = intentBefore.status === 'CONSUMED' && intentBefore.orderPublicId;
+
+  let paidOrder = null;
+  try {
+    paidOrder = await checkoutIntentService.createPaidOrderFromCheckoutIntent(checkoutIntentPublicId);
+  } catch (err) {
+    console.error('[stripe webhook] create order from checkout intent failed', checkoutIntentPublicId, err);
+    await checkoutIntentService.releaseIntentResources(checkoutIntentPublicId).catch((releaseErr) => {
+      console.error('[stripe webhook] release checkout intent failed', checkoutIntentPublicId, releaseErr);
+    });
+    await prisma.checkoutIntent.updateMany({
+      where: { publicId: checkoutIntentPublicId, status: 'PENDING' },
+      data: { status: 'FAILED' },
+    });
+    return { handled: true, flow: 'order', error: String(err?.message || err) };
+  }
+
+  if (!alreadyConsumed && paidOrder?.publicId) {
+    try {
+      await sendOrderConfirmationEmail(paidOrder.publicId);
+    } catch (emailErr) {
+      console.error('[stripe webhook] order confirmation email failed', paidOrder.publicId, emailErr);
+    }
+  }
+
+  return { handled: true, flow: 'order', alreadyPaid: Boolean(alreadyConsumed) };
 }
 
 async function handleOrderPaymentCompleted(orderPublicId) {
@@ -352,11 +591,14 @@ async function handleOrderPaymentCompleted(orderPublicId) {
     paidOrder = alreadyPaid
       ? await prisma.order.findUnique({
           where: { publicId: orderPublicId },
-          select: { userId: true, publicId: true, totalAmount: true },
+          select: { userId: true, publicId: true, orderNumber: true, totalAmount: true },
         })
       : await orderService.fulfillUnpaidOrderAfterPayment(orderPublicId);
   } catch (err) {
     console.error('[stripe webhook] fulfill order failed', orderPublicId, err);
+    await orderService.releasePendingOrderResources(orderPublicId).catch((releaseErr) => {
+      console.error('[stripe webhook] release pending resources failed', orderPublicId, releaseErr);
+    });
     await prisma.order.updateMany({
       where: { publicId: orderPublicId, paymentStatus: 'UNPAID' },
       data: { paymentStatus: 'FAILED' },
@@ -364,24 +606,9 @@ async function handleOrderPaymentCompleted(orderPublicId) {
     return { handled: true, flow: 'order', error: String(err?.message || err) };
   }
 
-  if (!alreadyPaid && paidOrder?.userId) {
+  if (!alreadyPaid && paidOrder?.publicId) {
     try {
-      const user = await prisma.user.findUnique({
-        where: { id: paidOrder.userId },
-        select: { email: true, firstName: true, lastName: true },
-      });
-      if (user?.email) {
-        await emailService.sendTemplate({
-          to: user.email,
-          template: 'order-confirmation',
-          context: {
-            name: [user.firstName, user.lastName].filter(Boolean).join(' '),
-            orderId: paidOrder.publicId,
-            total: `$${Number(paidOrder.totalAmount).toFixed(2)}`,
-            actionUrl: `${config.frontend.customerUrl}/dashboard/orders/${paidOrder.publicId}`,
-          },
-        });
-      }
+      await sendOrderConfirmationEmail(orderPublicId);
     } catch (emailErr) {
       console.error('[stripe webhook] order confirmation email failed', orderPublicId, emailErr);
     }
@@ -391,6 +618,7 @@ async function handleOrderPaymentCompleted(orderPublicId) {
 }
 
 export async function createOrderPaymentIntent(userPublicId, items, opts = {}) {
+  refreshPrismaClientIfNeeded();
   const stripe = assertConnectAccountsForOrder();
 
   const user = await prisma.user.findUnique({
@@ -401,60 +629,17 @@ export async function createOrderPaymentIntent(userPublicId, items, opts = {}) {
     throw new AppError(401, 'Unauthorized');
   }
 
-  const order = await orderService.createPendingOrderForStripe(userPublicId, items, {
+  const checkoutIntent = await checkoutIntentService.resolveCheckoutIntent(userPublicId, items, {
     shippingAddress: opts.shippingAddress,
     billingAddress: opts.billingAddress,
     parcels: opts.parcels,
     selectedRateId: opts.selectedRateId,
     selectedRate: opts.selectedRate,
     storeCreditToApply: opts.storeCreditToApply,
+    checkoutIntentPublicId: opts.orderId,
   });
 
-  const refreshed = await prisma.order.findUnique({
-    where: { id: order.id },
-    select: { totalAmount: true, shippingCost: true },
-  });
-  const payable = Number(refreshed?.totalAmount ?? order.totalAmount);
-  const amountCents = Math.round(payable * 100);
-  if (amountCents < 50) {
-    throw new AppError(400, 'Order total is below the minimum charge amount', 'ORDER_TOTAL_TOO_LOW');
-  }
-
-  let paymentIntent;
-  try {
-    paymentIntent = await createPaymentIntentWithOptionalTransfer(
-      stripe,
-      {
-        amount: amountCents,
-        currency: 'usd',
-        payment_method_types: ['card'],
-        receipt_email: user.email || undefined,
-        metadata: {
-          flow: 'order',
-          orderPublicId: order.publicId,
-        },
-        ...(opts.saveCard ? { setup_future_usage: 'off_session' } : {}),
-      },
-      config.stripe.connectStore
-    );
-  } catch (error) {
-    throw toStripeAppError(error, 'STRIPE_PAYMENT_INTENT_FAILED', 'order');
-  }
-
-  await prisma.order.update({
-    where: { id: order.id },
-    data: { stripeCheckoutSessionId: paymentIntent.id },
-  });
-
-  if (!paymentIntent.client_secret) {
-    throw new AppError(502, 'Stripe did not return a payment client secret', 'STRIPE_PAYMENT_INTENT_FAILED');
-  }
-
-  return {
-    clientSecret: paymentIntent.client_secret,
-    orderId: order.publicId,
-    paymentIntentId: paymentIntent.id,
-  };
+  return ensureCheckoutPaymentIntent(stripe, checkoutIntent, user, opts);
 }
 
 export async function getCheckoutSessionSummary(userPublicId, sessionId) {
@@ -510,7 +695,10 @@ export async function getCheckoutSessionSummary(userPublicId, sessionId) {
   };
 
   let order = await prisma.order.findFirst({
-    where: { stripeCheckoutSessionId: ref, userId: user.id },
+    where: {
+      userId: user.id,
+      OR: [{ stripeCheckoutSessionId: ref }, { stripePaymentIntentId: ref }],
+    },
     include: orderInclude,
   });
 
@@ -521,12 +709,69 @@ export async function getCheckoutSessionSummary(userPublicId, sessionId) {
     } catch {
       session = null;
     }
+
+    const sessionIntentId = getCheckoutIntentPublicId(session?.metadata);
+    if (sessionIntentId && (session?.payment_status === 'paid' || session?.status === 'complete')) {
+      await handleCheckoutIntentPaymentCompleted(sessionIntentId);
+      order = await prisma.order.findFirst({
+        where: { userId: user.id, stripePaymentIntentId: ref },
+        include: orderInclude,
+      });
+      if (!order) {
+        const intent = await prisma.checkoutIntent.findUnique({
+          where: { publicId: sessionIntentId },
+          select: { orderPublicId: true },
+        });
+        if (intent?.orderPublicId) {
+          order = await prisma.order.findUnique({
+            where: { publicId: intent.orderPublicId, userId: user.id },
+            include: orderInclude,
+          });
+        }
+      }
+    }
+
     const orderPublicId = session?.metadata?.orderPublicId;
-    if (orderPublicId) {
+    if (!order && orderPublicId) {
       order = await prisma.order.findUnique({
         where: { publicId: orderPublicId },
         include: orderInclude,
       });
+      if (order?.paymentStatus === 'UNPAID') {
+        await orderService.fulfillUnpaidOrderAfterPayment(orderPublicId);
+        order = await prisma.order.findUnique({
+          where: { publicId: orderPublicId },
+          include: orderInclude,
+        });
+      }
+    }
+  }
+
+  if (!order && ref.startsWith('pi_')) {
+    try {
+      const pi = await stripe.paymentIntents.retrieve(ref);
+      const intentId = getCheckoutIntentPublicId(pi.metadata);
+      if (intentId && pi.status === 'succeeded') {
+        await handleCheckoutIntentPaymentCompleted(intentId);
+        order = await prisma.order.findFirst({
+          where: { userId: user.id, stripePaymentIntentId: ref },
+          include: orderInclude,
+        });
+        if (!order) {
+          const intent = await prisma.checkoutIntent.findUnique({
+            where: { publicId: intentId },
+            select: { orderPublicId: true },
+          });
+          if (intent?.orderPublicId) {
+            order = await prisma.order.findUnique({
+              where: { publicId: intent.orderPublicId, userId: user.id },
+              include: orderInclude,
+            });
+          }
+        }
+      }
+    } catch {
+      /* fall through */
     }
   }
 
@@ -565,6 +810,7 @@ export async function getCheckoutSessionSummary(userPublicId, sessionId) {
     sessionId: ref,
     order: {
       id: order.publicId,
+      orderNumber: order.orderNumber,
       status: order.status,
       paymentStatus: order.paymentStatus,
       createdAt: order.createdAt,
@@ -689,8 +935,8 @@ export async function getMembershipCheckoutSummary(userPublicId, sessionId) {
 
   const payment = await prisma.membershipPayment.findFirst({
     where: { stripeSessionId: ref },
-    orderBy: { createdAt: 'desc' },
-    select: { type: true, amount: true, accessValidUntil: true, createdAt: true },
+    orderBy: { paidAt: 'desc' },
+    select: { type: true, amount: true, accessValidUntil: true, paidAt: true },
   });
 
   const amountUsd =
@@ -724,6 +970,21 @@ export async function processStripeWebhook(rawBody, signatureHeader) {
     config.stripe.webhookSecret
   );
 
+  try {
+    await prisma.stripeWebhookEvent.create({
+      data: { eventId: event.id, type: event.type },
+    });
+  } catch (error) {
+    if (error && typeof error === 'object' && error.code === 'P2002') {
+      return { handled: true, duplicate: true, type: event.type };
+    }
+    if (error && typeof error === 'object' && (error.code === 'P2021' || error.code === 'P2022')) {
+      console.warn('[stripe webhook] idempotency table missing — run prisma migrate deploy');
+    } else {
+      throw error;
+    }
+  }
+
   if (event.type === 'checkout.session.completed' || event.type === 'checkout.session.async_payment_succeeded') {
     const session = event.data.object;
     const flow = getFlow(session.metadata);
@@ -743,23 +1004,19 @@ export async function processStripeWebhook(rawBody, signatureHeader) {
     if (flow !== 'order') {
       return { handled: true, flow: flow || null, type: event.type };
     }
-    return markOrderFailedIfUnpaid(getOrderPublicId(session.metadata), event.type);
+    return markOrderFlowPaymentFailed(session.metadata, event.type);
   }
 
   if (event.type === 'payment_intent.succeeded') {
     const paymentIntent = event.data.object;
-    const flow = getFlow(paymentIntent.metadata);
-    if (flow === 'order') {
-      return handleOrderPaymentCompleted(getOrderPublicId(paymentIntent.metadata));
-    }
-    return { handled: false, type: event.type, flow };
+    return handleOrderPaymentIntentSucceeded(paymentIntent);
   }
 
   if (event.type === 'payment_intent.payment_failed') {
     const paymentIntent = event.data.object;
     const flow = getFlow(paymentIntent.metadata);
     if (flow === 'order') {
-      return markOrderFailedIfUnpaid(getOrderPublicId(paymentIntent.metadata), event.type);
+      return markOrderFlowPaymentFailed(paymentIntent.metadata, event.type);
     }
     const paymentIntentId = typeof paymentIntent.id === 'string' ? paymentIntent.id : null;
     const sessionId = await getCheckoutSessionIdFromPaymentIntent(stripe, paymentIntentId);

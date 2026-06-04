@@ -3,6 +3,7 @@ import dotenv from 'dotenv';
 dotenv.config();
 
 const port = parseInt(process.env.PORT || '5000', 10);
+const nodeEnv = process.env.NODE_ENV || 'development';
 
 function splitCsv(value) {
   return (value || '')
@@ -15,6 +16,10 @@ function toUnique(items) {
   return [...new Set(items)];
 }
 
+if (nodeEnv === 'production' && !process.env.JWT_SECRET) {
+  throw new Error('JWT_SECRET is required in production');
+}
+
 export const config = {
   database: {
     url: process.env.DATABASE_URL || 'postgresql://localhost/ecommerce',
@@ -22,9 +27,11 @@ export const config = {
   jwt: {
     secret: process.env.JWT_SECRET || 'your-secret-key-change-in-production',
     expiryTime: process.env.JWT_EXPIRY || '7d',
+    refreshSecret: process.env.JWT_REFRESH_SECRET || process.env.JWT_SECRET || 'your-refresh-secret-change-in-production',
+    refreshExpiryTime: process.env.JWT_REFRESH_EXPIRY || '30d',
   },
   port,
-  nodeEnv: process.env.NODE_ENV || 'development',
+  nodeEnv,
   /**
    * CORS:
    * - CORS_ORIGIN can hold a full comma-separated allowlist.
@@ -35,7 +42,7 @@ export const config = {
     ...splitCsv(process.env.CORS_ORIGIN),
     ...splitCsv(process.env.FRONTEND_USER_URLS),
     ...splitCsv(process.env.FRONTEND_ADMIN_URLS),
-    ...(process.env.NODE_ENV === 'production'
+    ...(nodeEnv === 'production'
       ? []
       : ['http://localhost:3000', 'http://localhost:3001']),
   ]),
@@ -47,6 +54,12 @@ export const config = {
   },
   mail: {
     from: process.env.MAIL_FROM || 'Baby Barn <no-reply@babyburn.local>',
+    /** `smtp` | `sendgrid` | `auto` (default: sendgrid if key set, else smtp; dev prefers smtp when both set). */
+    provider: (process.env.EMAIL_PROVIDER || 'auto').trim().toLowerCase(),
+    /** SendGrid REST API — verified sender must match MAIL_FROM domain. */
+    sendgridApiKey: (process.env.SENDGRID_API_KEY || '').trim(),
+    /** Optional override for SMTP From (defaults to SMTP_USER display name). */
+    smtpFrom: (process.env.MAIL_SMTP_FROM || '').trim(),
     host: process.env.SMTP_HOST || '',
     port: parseInt(process.env.SMTP_PORT || '587', 10),
     user: process.env.SMTP_USER || '',
@@ -68,4 +81,11 @@ export const config = {
   publicBaseUrl: (process.env.PUBLIC_URL || '').replace(/\/$/, ''),
   /** Inbound contact form notifications (falls back to SMTP user if unset). */
   contactAdminEmail: (process.env.CONTACT_ADMIN_EMAIL || process.env.ADMIN_EMAIL || '').trim(),
+  /** Branding overrides for emails/PDFs (defaults align with packages/brand/brand.tokens.json). */
+  brand: {
+    supportEmail: (process.env.BRAND_SUPPORT_EMAIL || 'hello@babybarn.co').trim(),
+    logoPath: (process.env.BRAND_LOGO_PATH || '/brand/logo-mark.svg').trim(),
+  },
+  /** Unpaid checkout orders older than this are expired and resources released (minutes). */
+  pendingOrderTtlMinutes: parseInt(process.env.PENDING_ORDER_TTL_MINUTES || '60', 10),
 };

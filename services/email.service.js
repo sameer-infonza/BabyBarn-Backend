@@ -1,9 +1,29 @@
+import sgMail from '@sendgrid/mail';
 import nodemailer from 'nodemailer';
 import { config } from '../config/env.js';
-import { renderEmailTemplate } from '../utils/email-templates.js';
+import { renderBrandedEmailTemplate } from '../../packages/brand/index.js';
+import { getBrandContext } from '../lib/brand-context.js';
 import { AppError } from '../utils/error-handler.js';
 
-function createTransport() {
+/** @typedef {'sendgrid' | 'smtp'} MailProvider */
+
+/**
+ * Parse "Name <email@domain.com>" or plain email into SendGrid / nodemailer shape.
+ * @param {string} value
+ * @returns {{ email: string; name?: string }}
+ */
+export function parseMailAddress(value) {
+  const raw = String(value || '').trim();
+  if (!raw) return { email: '' };
+
+  const named = raw.match(/^(.+?)\s*<([^>]+)>$/);
+  if (named) {
+    return { name: named[1].trim(), email: named[2].trim() };
+  }
+  return { email: raw };
+}
+
+function createSmtpTransport() {
   if (!config.mail.host || !config.mail.user || !config.mail.pass) {
     return null;
   }
@@ -19,32 +39,102 @@ function createTransport() {
   });
 }
 
+/** @returns {MailProvider | null} */
+function resolveMailProvider() {
+  const hasSendgrid = Boolean(config.mail.sendgridApiKey);
+  const hasSmtp = Boolean(config.mail.host && config.mail.user && config.mail.pass);
+  const mode = config.mail.provider || 'auto';
+
+  if (mode === 'smtp') return hasSmtp ? 'smtp' : null;
+  if (mode === 'sendgrid') return hasSendgrid ? 'sendgrid' : null;
+
+  // auto: in development prefer SMTP when both are configured (avoids stale SendGrid keys locally)
+  if (config.nodeEnv !== 'production' && hasSmtp && hasSendgrid) return 'smtp';
+  if (hasSendgrid) return 'sendgrid';
+  if (hasSmtp) return 'smtp';
+  return null;
+}
+
 class EmailService {
   constructor() {
-    this.transport = createTransport();
+    this.provider = resolveMailProvider();
+    this.smtpTransport = this.provider === 'smtp' ? createSmtpTransport() : null;
+
+    if (this.provider === 'sendgrid') {
+      sgMail.setApiKey(config.mail.sendgridApiKey);
+      console.info('[email] Provider: SendGrid');
+    } else if (this.provider === 'smtp') {
+      console.info(`[email] Provider: SMTP (${config.mail.host}:${config.mail.port})`);
+    } else {
+      console.warn('[email] No mail provider configured (set SENDGRID_API_KEY or SMTP_*)');
+    }
   }
 
   assertConfigured() {
-    if (this.transport) return;
+    if (this.provider) return;
     throw new AppError(
       503,
-      'Email service is not configured. Please set SMTP credentials in backend environment variables.',
+      'Email service is not configured. Set SENDGRID_API_KEY or SMTP credentials in backend environment variables.',
       'EMAIL_NOT_CONFIGURED'
     );
   }
 
-  async sendTemplate({ to, template, context }) {
-    const { subject, html, text } = renderEmailTemplate(template, context);
+  /**
+   * @param {{ to: string; subject: string; html: string; text: string; replyTo?: string }} payload
+   */
+  async sendMessage({ to, subject, html, text, replyTo }) {
     this.assertConfigured();
 
-    await this.transport.sendMail({
-      from: config.mail.from,
-      to,
-      subject,
-      html,
-      text,
-    });
+    const from = parseMailAddress(config.mail.from);
+    if (!from.email) {
+      throw new AppError(503, 'MAIL_FROM is not configured.', 'EMAIL_NOT_CONFIGURED');
+    }
 
+    try {
+      if (this.provider === 'sendgrid') {
+        /** @type {import('@sendgrid/mail').MailDataRequired} */
+        const msg = {
+          to,
+          from,
+          subject,
+          html,
+          text,
+        };
+        if (replyTo) {
+          msg.replyTo = parseMailAddress(replyTo);
+        }
+        await sgMail.send(msg);
+        return { sent: true, provider: 'sendgrid' };
+      }
+
+      // Gmail SMTP: From must match the authenticated mailbox (or an allowed alias).
+      const smtpFrom =
+        config.mail.smtpFrom ||
+        (config.mail.user.includes('@') ? `Baby Barn <${config.mail.user}>` : config.mail.from);
+
+      await this.smtpTransport.sendMail({
+        from: smtpFrom,
+        to,
+        subject,
+        html,
+        text,
+        ...(replyTo ? { replyTo } : {}),
+      });
+      return { sent: true, provider: 'smtp' };
+    } catch (err) {
+      const detail =
+        err?.response?.body?.errors?.map((e) => e.message).join('; ') ||
+        err?.message ||
+        'Unknown email error';
+      console.error(`[email] send failed (${this.provider})`, detail);
+      throw new AppError(502, 'Unable to send email right now. Please try again later.', 'EMAIL_DELIVERY_FAILED');
+    }
+  }
+
+  async sendTemplate({ to, template, context }) {
+    const brand = getBrandContext();
+    const { subject, html, text } = renderBrandedEmailTemplate(template, context, brand);
+    await this.sendMessage({ to, subject, html, text });
     return { queued: true };
   }
 
@@ -53,8 +143,10 @@ class EmailService {
    * @param {{ fromName: string; fromEmail: string; subjectLine: string; message: string }} p
    */
   async sendContactInquiry({ fromName, fromEmail, subjectLine, message }) {
-    this.assertConfigured();
-    const to = config.contactAdminEmail || config.mail.user;
+    const to =
+      config.contactAdminEmail ||
+      config.mail.user ||
+      (this.provider === 'sendgrid' ? parseMailAddress(config.mail.from).email : '');
     if (!to) {
       throw new AppError(
         503,
@@ -63,26 +155,24 @@ class EmailService {
       );
     }
 
-    const esc = (s) =>
-      String(s)
-        .replace(/&/g, '&amp;')
-        .replace(/</g, '&lt;')
-        .replace(/>/g, '&gt;')
-        .replace(/"/g, '&quot;');
-
     const text = `From: ${fromName} <${fromEmail}>\nSubject: ${subjectLine}\n\n${message}`;
-    const html = `<div style="font-family:system-ui,sans-serif;font-size:14px;line-height:1.5">
-<p><strong>From:</strong> ${esc(fromName)} &lt;${esc(fromEmail)}&gt;</p>
-<p><strong>Subject:</strong> ${esc(subjectLine)}</p>
-<hr style="border:none;border-top:1px solid #e5e5e5;margin:16px 0" />
-<pre style="white-space:pre-wrap;font-family:inherit;margin:0">${esc(message)}</pre>
-</div>`;
+    const brand = getBrandContext();
+    const { subject, html } = renderBrandedEmailTemplate(
+      'contact-inquiry-admin',
+      {
+        fromName,
+        fromEmail,
+        subjectLine,
+        message,
+        plainText: text,
+      },
+      brand
+    );
 
-    await this.transport.sendMail({
-      from: config.mail.from,
+    await this.sendMessage({
       to,
       replyTo: `${fromName} <${fromEmail}>`,
-      subject: `[Baby Barn Contact] ${subjectLine}`,
+      subject,
       text,
       html,
     });

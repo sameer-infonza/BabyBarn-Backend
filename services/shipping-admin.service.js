@@ -1,9 +1,7 @@
-import { PrismaClient } from '@prisma/client';
+import { prisma } from '../lib/prisma.js';
 import { invalidateShippingConfigCache, appendShippingLog } from './shipping/shipping-config.service.js';
 import { encryptCredentialsJson, hasMasterKey } from './shipping/credentials-crypto.js';
 import { UpsClient } from './providers/ups.client.js';
-
-const prisma = new PrismaClient();
 
 function sanitizePlatform(row) {
   if (!row) {

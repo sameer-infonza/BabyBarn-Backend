@@ -22,3 +22,6 @@ jobs:
 
       - name: Generate Prisma client
         run: npm run build
+
+      - name: Run tests
+        run: npm test

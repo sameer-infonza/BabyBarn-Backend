@@ -1,7 +1,5 @@
-import { PrismaClient } from '@prisma/client';
+import { prisma } from '../lib/prisma.js';
 import { AppError } from '../utils/error-handler.js';
-
-const prisma = new PrismaClient();
 
 /** Days before expiry when renewal checkout is allowed (env override). */
 export function getAccessRenewalWindowDays() {

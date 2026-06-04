@@ -56,6 +56,8 @@ enum StoreCreditTxnType {
   EARNED
   REDEEMED
   ADJUSTED
+  HOLD
+  RELEASE
 }
 
 enum MembershipPaymentType {
@@ -108,13 +110,16 @@ model User {
   inventoryAdjustments   InventoryAdjustment[]
   returnRequests         ReturnRequest[]
   storeCreditWallet      StoreCreditWallet?
+  refreshTokens          RefreshToken[]
   membershipPayments     MembershipPayment[]
+  checkoutIntents      CheckoutIntent[]
 
   stripeCustomerId   String?
   accessNumber       String?   @unique
   babyName           String?
   membershipShippingAddressJson Json?
   accessRenewalReminderSentAt DateTime?
+  accessExpiredNoticeSentAt   DateTime?
   accessMemberUntil  DateTime?
   emailVerifiedAt    DateTime?
   // When false, customer cannot sign in.
@@ -228,7 +233,8 @@ model Product {
   slug        String   @unique
   description String?
   price       Float
-  stock       Int      @default(0)
+  stock         Int @default(0)
+  reservedStock Int @default(0)
   categoryId  Int
   imageUrl    String?
   sku         String   @unique
@@ -250,6 +256,7 @@ model Product {
 
   category   Category                @relation(fields: [categoryId], references: [id], onDelete: Cascade)
   orderItems OrderItem[]
+  checkoutIntentLines CheckoutIntentLine[]
   variants   ProductVariant[]
   inventoryAdjustments InventoryAdjustment[]
 
@@ -270,13 +277,16 @@ model ProductVariant {
   product       Product  @relation(fields: [productId], references: [id], onDelete: Cascade)
   combination   Json
   sku           String
-  stock         Int      @default(0)
+  stock         Int @default(0)
+  reservedStock Int @default(0)
+  stockVersion  Int @default(0)
   priceOverride Float?
   imageUrl      String?
   sortOrder     Int      @default(0)
 
   inventoryAdjustments InventoryAdjustment[]
   orderItems           OrderItem[]
+  checkoutIntentLines  CheckoutIntentLine[]
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -285,9 +295,71 @@ model ProductVariant {
   @@index([productId])
 }
 
+enum CheckoutIntentStatus {
+  PENDING
+  CONSUMED
+  EXPIRED
+  FAILED
+}
+
+/// In-progress checkout (stock/credit held). Becomes an Order only after payment succeeds.
+model CheckoutIntent {
+  id                      Int                  @id @default(autoincrement())
+  publicId                String               @unique @default(cuid())
+  userId                  Int
+  status                  CheckoutIntentStatus @default(PENDING)
+  checkoutSignature       String
+  subtotal                Float
+  shippingCost            Float                @default(0)
+  storeCreditApplied      Float                @default(0)
+  totalAmount             Float
+  shippingAddressJson     Json?
+  billingAddressJson      Json?
+  shippingCarrier         String?
+  shippingShipmentId      String?
+  selectedRateId          String?
+  selectedRateProvider    String?
+  selectedRateServiceLevel String?
+  selectedRateServiceToken String?
+  selectedRateAmount      Float?
+  selectedRateCurrency    String?
+  selectedRateEstimatedDays Int?
+  stripePaymentIntentId   String?              @unique
+  orderPublicId           String?              @unique
+  expiresAt               DateTime?
+
+  user  User                 @relation(fields: [userId], references: [id], onDelete: Cascade)
+  lines CheckoutIntentLine[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([userId, status])
+  @@index([checkoutSignature])
+  @@index([createdAt])
+}
+
+model CheckoutIntentLine {
+  id               Int     @id @default(autoincrement())
+  checkoutIntentId Int
+  productId        Int
+  productVariantId Int?
+  quantity         Int
+  price            Float
+
+  checkoutIntent CheckoutIntent @relation(fields: [checkoutIntentId], references: [id], onDelete: Cascade)
+  product        Product        @relation(fields: [productId], references: [id], onDelete: Restrict)
+  productVariant ProductVariant? @relation(fields: [productVariantId], references: [id], onDelete: SetNull)
+
+  @@index([checkoutIntentId])
+  @@index([productId])
+}
+
 model Order {
   id          Int         @id @default(autoincrement())
   publicId    String      @unique @default(cuid())
+  /// Customer-facing reference, e.g. BB-000042 (not the API publicId).
+  orderNumber String      @unique
   userId      Int
   status      OrderStatus @default(PENDING)
   /// Fulfillment pipeline; null until order is paid (then usually NEW_ORDER).
@@ -328,6 +400,8 @@ model Order {
   trackingHistoryJson Json?
   paymentStatus            OrderPaymentStatus @default(PAID)
   stripeCheckoutSessionId  String?            @unique
+  stripePaymentIntentId    String?            @unique
+  storeCreditApplied       Float              @default(0)
 
   cancellationReviewStatus  CancellationReviewStatus @default(NONE)
   cancellationRequestedAt   DateTime?
@@ -347,6 +421,7 @@ model Order {
   @@index([status])
   @@index([fulfillmentStatus])
   @@index([publicId])
+  @@index([orderNumber])
   @@index([paymentStatus])
   @@index([cancellationReviewStatus])
 }
@@ -525,6 +600,7 @@ model StoreCreditWallet {
   publicId String @unique @default(cuid())
   userId Int @unique
   balance Float @default(0)
+  heldBalance Float @default(0)
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
@@ -539,12 +615,36 @@ model StoreCreditTransaction {
   type StoreCreditTxnType
   amount Float
   note String?
+  orderPublicId String?
   createdAt DateTime @default(now())
 
   wallet StoreCreditWallet @relation(fields: [walletId], references: [id], onDelete: Cascade)
 
   @@index([walletId])
   @@index([type])
+  @@index([orderPublicId])
+}
+
+model StripeWebhookEvent {
+  id Int @id @default(autoincrement())
+  eventId String @unique
+  type String
+  processedAt DateTime @default(now())
+
+  @@index([processedAt])
+}
+
+model RefreshToken {
+  id Int @id @default(autoincrement())
+  publicId String @unique @default(cuid())
+  userId Int
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  tokenHash String @unique
+  expiresAt DateTime
+  revokedAt DateTime?
+  createdAt DateTime @default(now())
+
+  @@index([userId])
 }
 
 model InventoryAdjustment {

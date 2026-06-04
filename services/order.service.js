@@ -1,21 +1,32 @@
-import { PrismaClient } from '@prisma/client';
+import { prisma } from '../lib/prisma.js';
 import { AppError } from '../utils/error-handler.js';
 import {
   assertAndDecrementOrderStock,
   assertStockAvailable,
   syncParentStockFromVariants,
 } from './inventory.service.js';
+import {
+  commitOrderLineStock,
+  releaseOrderLineStock,
+  reserveOrderLineStock,
+  variantAvailableStock,
+} from './inventory-reservation.js';
+import { walletService } from './wallet.service.js';
 import { shippingService } from './shipping.service.js';
 import { writeAdminAudit } from './audit.service.js';
 import * as orderDocuments from './pdf/order-documents.service.js';
 import { emailService } from './email.service.js';
 import { config } from '../config/env.js';
+import { assignOrderNumber, placeholderOrderNumber } from '../utils/order-number.js';
+import {
+  buildCheckoutSignature,
+  buildCheckoutSignatureFromOrder,
+} from '../utils/checkout-signature.js';
 import { buildParcelsForOrder } from './shipping/order-parcels.js';
 import fs from 'fs';
 import path from 'path';
 import { SHIPPING_LABELS_DIR } from '../utils/product-upload.js';
 
-const prisma = new PrismaClient();
 let ensureOrderCheckoutColumnsPromise = null;
 
 function isSchemaBootstrapSkippableError(error) {
@@ -276,27 +287,21 @@ export class OrderService {
     }
 
     const tab = filters.tab ? String(filters.tab) : 'all';
+    const terminalStatuses = ['DELIVERED', 'CANCELLED', 'REFUNDED', 'RETURNED'];
+
     if (tab === 'delivered') {
       and.push({
         OR: [
-          { status: { contains: 'DELIVER', mode: 'insensitive' } },
+          { status: 'DELIVERED' },
+          { fulfillmentStatus: 'DELIVERED' },
           { deliveredAt: { not: null } },
         ],
       });
     } else if (tab === 'active') {
       and.push({
-        AND: [
-          { deliveredAt: null },
-          {
-            NOT: {
-              OR: [
-                { status: { contains: 'DELIVER', mode: 'insensitive' } },
-                { status: { contains: 'CANCEL', mode: 'insensitive' } },
-                { status: { contains: 'REFUND', mode: 'insensitive' } },
-              ],
-            },
-          },
-        ],
+        deliveredAt: null,
+        status: { notIn: terminalStatuses },
+        NOT: { fulfillmentStatus: 'DELIVERED' },
       });
     } else if (tab === 'returns') {
       and.push({ returnRequests: { some: {} } });
@@ -307,6 +312,7 @@ export class OrderService {
       and.push({
         OR: [
           { publicId: { contains: search, mode: 'insensitive' } },
+          { orderNumber: { contains: search, mode: 'insensitive' } },
           {
             orderItems: {
               some: { product: { name: { contains: search, mode: 'insensitive' } } },
@@ -435,6 +441,13 @@ export class OrderService {
   }
 
   async createOrder(userPublicId, items) {
+    if (config.nodeEnv === 'production') {
+      throw new AppError(
+        410,
+        'Direct order creation is disabled. Use checkout and payment.',
+        'USE_CHECKOUT'
+      );
+    }
     const user = await prisma.user.findUnique({
       where: { publicId: userPublicId },
       select: { id: true },
@@ -467,6 +480,7 @@ export class OrderService {
       const order = await tx.order.create({
         data: {
           userId: user.id,
+          orderNumber: placeholderOrderNumber(),
           totalAmount,
           paymentStatus: 'PAID',
           orderItems: {
@@ -479,9 +493,127 @@ export class OrderService {
         },
         include: { orderItems: { include: { product: true } } },
       });
+      await assignOrderNumber(tx, order.id);
 
-      return order;
+      return tx.order.findUnique({
+        where: { id: order.id },
+        include: { orderItems: { include: { product: true } } },
+      });
     });
+  }
+
+  checkoutSignature(items, opts = {}) {
+    return buildCheckoutSignature({
+      items,
+      selectedRateId: opts.selectedRateId,
+      storeCreditToApply: opts.storeCreditToApply,
+      shippingAddress: opts.shippingAddress,
+    });
+  }
+
+  async findReusablePendingCheckoutOrder(userId, signature) {
+    const since = new Date(Date.now() - config.pendingOrderTtlMinutes * 60 * 1000);
+    const candidates = await prisma.order.findMany({
+      where: {
+        userId,
+        paymentStatus: 'UNPAID',
+        status: 'PENDING',
+        createdAt: { gte: since },
+        stripePaymentIntentId: { not: null },
+      },
+      include: {
+        orderItems: {
+          include: {
+            product: { select: { publicId: true } },
+            productVariant: { select: { publicId: true } },
+          },
+        },
+      },
+      orderBy: { createdAt: 'desc' },
+      take: 15,
+    });
+
+    for (const order of candidates) {
+      if (buildCheckoutSignatureFromOrder(order, order.orderItems) === signature) {
+        return order;
+      }
+    }
+    return null;
+  }
+
+  /** Mark other in-progress checkout orders failed and release their holds. */
+  async supersedeOtherPendingCheckoutOrders(userId, keepOrderPublicId) {
+    const since = new Date(Date.now() - config.pendingOrderTtlMinutes * 60 * 1000);
+    const stale = await prisma.order.findMany({
+      where: {
+        userId,
+        paymentStatus: 'UNPAID',
+        status: 'PENDING',
+        publicId: { not: keepOrderPublicId },
+        createdAt: { gte: since },
+        stripePaymentIntentId: { not: null },
+      },
+      select: { publicId: true },
+    });
+
+    for (const row of stale) {
+      await this.releasePendingOrderResources(row.publicId).catch((err) => {
+        console.error('[order] supersede release failed', row.publicId, err);
+      });
+      await prisma.order.updateMany({
+        where: { publicId: row.publicId, paymentStatus: 'UNPAID' },
+        data: { paymentStatus: 'FAILED', status: 'CANCELLED' },
+      });
+    }
+  }
+
+  /**
+   * One pending order per checkout fingerprint — avoids duplicate UNPAID rows when the client
+   * re-fetches payment intents (React strict mode, address edits, step navigation).
+   */
+  async resolvePendingOrderForCheckout(userPublicId, items, opts = {}) {
+    const user = await prisma.user.findUnique({
+      where: { publicId: userPublicId },
+      select: { id: true },
+    });
+    if (!user) {
+      throw new AppError(401, 'Unauthorized');
+    }
+
+    const signature = this.checkoutSignature(items, opts);
+
+    if (opts.orderPublicId) {
+      const byId = await prisma.order.findFirst({
+        where: {
+          publicId: opts.orderPublicId,
+          userId: user.id,
+          paymentStatus: 'UNPAID',
+          status: 'PENDING',
+        },
+        include: {
+          orderItems: {
+            include: {
+              product: { select: { publicId: true } },
+              productVariant: { select: { publicId: true } },
+            },
+          },
+        },
+      });
+      if (byId && buildCheckoutSignatureFromOrder(byId, byId.orderItems) === signature) {
+        await this.supersedeOtherPendingCheckoutOrders(user.id, byId.publicId);
+        return byId;
+      }
+    }
+
+    const reusable = await this.findReusablePendingCheckoutOrder(user.id, signature);
+    if (reusable) {
+      await this.supersedeOtherPendingCheckoutOrders(user.id, reusable.publicId);
+      return reusable;
+    }
+
+    const order = await this.createPendingOrderForStripe(userPublicId, items, opts);
+    await this.supersedeOtherPendingCheckoutOrders(user.id, order.publicId);
+    return order;
   }
 
   /**
@@ -526,7 +658,7 @@ export class OrderService {
           if (!v) {
             throw new AppError(404, `Variant not found for item ${index + 1}`);
           }
-          if (v.stock < item.quantity) {
+          if (variantAvailableStock(v) < item.quantity) {
             throw new AppError(400, `Insufficient stock for "${product.name}"`);
           }
           variant = v;
@@ -543,11 +675,14 @@ export class OrderService {
           quantity: item.quantity,
           price: unitApplied,
         });
+
+        await reserveOrderLineStock(tx, product, variantDbId, item.quantity);
       }
 
-      return tx.order.create({
+      const created = await tx.order.create({
         data: {
           userId: user.id,
+          orderNumber: placeholderOrderNumber(),
           totalAmount: subtotal,
           paymentStatus: 'UNPAID',
           status: 'PENDING',
@@ -559,6 +694,11 @@ export class OrderService {
             create: lineCreates,
           },
         },
+        include: { orderItems: { include: { product: true } } },
+      });
+      await assignOrderNumber(tx, created.id);
+      return tx.order.findUnique({
+        where: { id: created.id },
         include: { orderItems: { include: { product: true } } },
       });
     });
@@ -579,6 +719,9 @@ export class OrderService {
       shipmentId = shippingRates.shipmentId || null;
     } catch (error) {
       console.error('[order] checkout shipping rates failed', order.publicId, error?.message || error);
+      await this.releasePendingOrderResources(order.publicId).catch((releaseErr) => {
+        console.error('[order] failed to release resources after shipping error', releaseErr);
+      });
       if (!(error instanceof AppError)) {
         throw new AppError(502, 'Unable to calculate shipping for checkout', 'SHIPPING_RATE_FAILED');
       }
@@ -600,40 +743,57 @@ export class OrderService {
 
     if (opts.storeCreditToApply && Number(opts.storeCreditToApply) > 0) {
       try {
-        await prisma.$transaction(async (tx) => {
-          const wallet = await tx.storeCreditWallet.findUnique({ where: { userId: user.id } });
-          if (!wallet || wallet.balance <= 0) return;
-
-          const capped = Math.min(Number(opts.storeCreditToApply), wallet.balance, totalAmount);
-          if (capped <= 0) return;
-
-          await tx.storeCreditWallet.update({
-            where: { id: wallet.id },
-            data: { balance: wallet.balance - capped },
-          });
-          await tx.storeCreditTransaction.create({
-            data: {
-              walletId: wallet.id,
-              type: 'REDEEMED',
-              amount: -capped,
-              note: `Applied on checkout for order ${order.publicId}`,
-            },
-          });
-          totalAmount = Math.max(0, totalAmount - capped);
-          await tx.order.update({
+        const held = await walletService.holdCredit(user.id, opts.storeCreditToApply, order.publicId);
+        if (held > 0) {
+          totalAmount = Math.max(0, totalAmount - held);
+          await prisma.order.update({
             where: { id: order.id },
-            data: { totalAmount },
+            data: { totalAmount, storeCreditApplied: held },
           });
-        });
-        order.totalAmount = totalAmount;
-      } catch (error) {
-        if (!isMissingWalletTableError(error)) {
-          throw error;
+          order.totalAmount = totalAmount;
+          order.storeCreditApplied = held;
         }
+      } catch (error) {
+        await this.releasePendingOrderResources(order.publicId).catch((releaseErr) => {
+          console.error('[order] failed to release resources after credit hold error', releaseErr);
+        });
+        throw error;
       }
     }
 
     return order;
+  }
+
+  async releasePendingOrderResources(orderPublicId) {
+    await prisma.$transaction(async (tx) => {
+      const order = await tx.order.findUnique({
+        where: { publicId: orderPublicId },
+        include: { orderItems: true },
+      });
+      if (!order || order.paymentStatus === 'PAID') return;
+
+      for (const line of order.orderItems) {
+        const product = await tx.product.findUnique({
+          where: { id: line.productId },
+          include: { variants: { orderBy: { sortOrder: 'asc' } } },
+        });
+        if (!product) continue;
+        await releaseOrderLineStock(tx, product, line.productVariantId, line.quantity);
+      }
+
+      if (order.storeCreditApplied > 0) {
+        await walletService.releaseHoldInTx(
+          tx,
+          order.userId,
+          order.storeCreditApplied,
+          orderPublicId
+        );
+        await tx.order.update({
+          where: { id: order.id },
+          data: { storeCreditApplied: 0 },
+        });
+      }
+    });
   }
 
   async fulfillUnpaidOrderAfterPayment(orderPublicId) {
@@ -654,21 +814,16 @@ export class OrderService {
           where: { id: line.productId },
           include: { variants: { orderBy: { sortOrder: 'asc' } } },
         });
-        if (line.productVariantId) {
-          const v = await tx.productVariant.findUnique({
-            where: { id: line.productVariantId },
-          });
-          if (!v || v.stock < line.quantity) {
-            throw new AppError(400, `Insufficient stock for "${product.name}"`);
-          }
-          await tx.productVariant.update({
-            where: { id: v.id },
-            data: { stock: v.stock - line.quantity },
-          });
-          await syncParentStockFromVariants(tx, product.id);
-        } else {
-          await assertAndDecrementOrderStock(tx, product, line.quantity);
-        }
+        await commitOrderLineStock(tx, product, line.productVariantId, line.quantity);
+      }
+
+      if (order.storeCreditApplied > 0) {
+        await walletService.captureHoldInTx(
+          tx,
+          order.userId,
+          order.storeCreditApplied,
+          orderPublicId
+        );
       }
 
       return tx.order.update({
@@ -783,6 +938,7 @@ export class OrderService {
       and.push({
         OR: [
           { publicId: { contains: q, mode: 'insensitive' } },
+          { orderNumber: { contains: q, mode: 'insensitive' } },
           { user: { email: { contains: q, mode: 'insensitive' } } },
           { user: { firstName: { contains: q, mode: 'insensitive' } } },
           { user: { lastName: { contains: q, mode: 'insensitive' } } },
@@ -870,15 +1026,52 @@ export class OrderService {
     return order;
   }
 
-  async refundOrder(orderPublicId, actor) {
+  async refundOrder(orderPublicId, actor, opts = {}) {
     const order = await prisma.order.findUnique({ where: { publicId: orderPublicId } });
     if (!order) throw new AppError(404, 'Order not found');
     if (order.paymentStatus !== 'PAID') {
-      throw new AppError(400, 'Only paid orders can be marked refunded');
+      throw new AppError(400, 'Only paid orders can be refunded');
     }
     if (order.status === 'REFUNDED' || order.paymentStatus === 'REFUNDED') {
       throw new AppError(400, 'Order already refunded');
     }
+
+    const { getStripe } = await import('./payment.service.js');
+    const stripe = getStripe();
+    if (!stripe) {
+      throw new AppError(503, 'Stripe is not configured', 'STRIPE_NOT_CONFIGURED');
+    }
+
+    let paymentIntentId = order.stripePaymentIntentId;
+    if (!paymentIntentId && order.stripeCheckoutSessionId) {
+      const ref = order.stripeCheckoutSessionId;
+      if (ref.startsWith('pi_')) {
+        paymentIntentId = ref;
+      } else if (ref.startsWith('cs_')) {
+        const session = await stripe.checkout.sessions.retrieve(ref);
+        paymentIntentId =
+          typeof session.payment_intent === 'string' ? session.payment_intent : session.payment_intent?.id;
+      }
+    }
+    if (!paymentIntentId) {
+      throw new AppError(400, 'No Stripe payment reference found for this order', 'NO_PAYMENT_REFERENCE');
+    }
+
+    const refundAmountUsd = opts.amount != null ? Number(opts.amount) : Number(order.totalAmount);
+    const amountCents = Math.round(refundAmountUsd * 100);
+    if (amountCents < 1) {
+      throw new AppError(400, 'Refund amount must be greater than zero');
+    }
+
+    const refund = await stripe.refunds.create(
+      {
+        payment_intent: paymentIntentId,
+        amount: amountCents,
+        metadata: { orderPublicId, actorEmail: actor?.email || '' },
+      },
+      { idempotencyKey: `refund-${orderPublicId}-${amountCents}` }
+    );
+
     const updated = await prisma.order.update({
       where: { id: order.id },
       data: { status: 'REFUNDED', paymentStatus: 'REFUNDED' },
@@ -890,8 +1083,32 @@ export class OrderService {
       action: 'ORDER_REFUND',
       entityType: 'Order',
       entityId: orderPublicId,
-      meta: { totalAmount: order.totalAmount, shippingCost: order.shippingCost },
+      meta: {
+        totalAmount: order.totalAmount,
+        shippingCost: order.shippingCost,
+        stripeRefundId: refund.id,
+        refundAmountUsd,
+      },
     });
+
+    try {
+      const customer = updated.user;
+      if (customer?.email) {
+        await emailService.sendTemplate({
+          to: customer.email,
+          template: 'refund-confirmation',
+          context: {
+            name: [customer.firstName, customer.lastName].filter(Boolean).join(' '),
+            orderId: order.orderNumber || orderPublicId,
+            amount: `$${refundAmountUsd.toFixed(2)}`,
+            actionUrl: `${config.frontend.customerUrl}/dashboard/orders/${orderPublicId}`,
+          },
+        });
+      }
+    } catch (emailErr) {
+      console.error('[order] refund confirmation email failed', orderPublicId, emailErr);
+    }
+
     return updated;
   }
 
@@ -1021,7 +1238,7 @@ export class OrderService {
         template: 'order-tracking',
         context: {
           name,
-          orderId: order.publicId,
+          orderId: order.orderNumber || order.publicId,
           trackingNumber,
           carrier: order.shippingCarrier || 'UPS',
           actionUrl,
@@ -1389,7 +1606,7 @@ export class OrderService {
     return list;
   }
 
-  async getPickupListOrdersForPdf(publicId) {
+  async getPickupListForPdf(publicId) {
     const list = await prisma.pickupList.findUnique({
       where: { publicId },
       include: {
@@ -1399,7 +1616,7 @@ export class OrderService {
             order: {
               include: {
                 user: { select: { email: true, firstName: true, lastName: true, phone: true } },
-                orderItems: { include: { product: true } },
+                orderItems: { include: { product: true, productVariant: true } },
               },
             },
           },
@@ -1407,7 +1624,10 @@ export class OrderService {
       },
     });
     if (!list) throw new AppError(404, 'Pickup list not found');
-    return list.lines.map((l) => l.order);
+    return {
+      title: list.title,
+      orders: list.lines.map((l) => l.order),
+    };
   }
 
   async getOrderPdfBuffer(orderPublicId, kind) {
@@ -1478,6 +1698,35 @@ export class OrderService {
     }
     return { scanned: orders.length, touched };
   }
+
+  /** Expire unpaid checkout orders and release reserved inventory / store credit holds. */
+  async expireStalePendingOrders() {
+    const ttlMs = config.pendingOrderTtlMinutes * 60 * 1000;
+    const cutoff = new Date(Date.now() - ttlMs);
+    const stale = await prisma.order.findMany({
+      where: {
+        paymentStatus: 'UNPAID',
+        createdAt: { lt: cutoff },
+      },
+      select: { publicId: true },
+      take: 50,
+      orderBy: { createdAt: 'asc' },
+    });
+
+    for (const row of stale) {
+      await this.releasePendingOrderResources(row.publicId).catch((err) => {
+        console.error('[order] expire cleanup release failed', row.publicId, err);
+      });
+      await prisma.order.updateMany({
+        where: { publicId: row.publicId, paymentStatus: 'UNPAID' },
+        data: { paymentStatus: 'FAILED' },
+      });
+    }
+
+    return stale.length;
+  }
 }
 
 export const orderService = new OrderService();
+
+export { computeAppliedUnitPrice, resolveSelectedRate, selectedRateUpdateData };

@@ -1,10 +1,9 @@
 import { randomBytes } from 'crypto';
-import { Prisma, PrismaClient } from '@prisma/client';
+import { Prisma } from '@prisma/client';
 import { AppError } from '../utils/error-handler.js';
 import { slugifyName } from '../utils/slug.js';
 import { config } from '../config/env.js';
-
-const prisma = new PrismaClient();
+import { prisma } from '../lib/prisma.js';
 
 function normalizeMediaUrl(url) {
   if (!url) return null;

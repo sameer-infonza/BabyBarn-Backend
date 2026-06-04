@@ -1,12 +1,11 @@
-import { PrismaClient, Prisma } from '@prisma/client';
+import { Prisma } from '@prisma/client';
 import bcrypt from 'bcryptjs';
 import { AppError } from '../utils/error-handler.js';
 import { normalizeTeamPermissionModules } from '../constants/admin-modules.js';
 import { emailService } from './email.service.js';
 import { writeAdminAudit } from './audit.service.js';
 import { config } from '../config/env.js';
-
-const prisma = new PrismaClient();
+import { prisma } from '../lib/prisma.js';
 
 function isStorefrontCustomerRole(roleName) {
   return roleName === 'CUSTOMER' || roleName === 'USER';
@@ -173,6 +172,7 @@ export async function getCustomerDetail(userPublicId) {
       orderBy: { createdAt: 'desc' },
       take: 50,
       select: {
+        id: true,
         publicId: true,
         status: true,
         paymentStatus: true,
@@ -185,6 +185,7 @@ export async function getCustomerDetail(userPublicId) {
       orderBy: { createdAt: 'desc' },
       take: 50,
       select: {
+        id: true,
         publicId: true,
         status: true,
         type: true,

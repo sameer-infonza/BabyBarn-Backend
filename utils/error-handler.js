@@ -16,6 +16,16 @@ export const catchAsync = (fn) => {
 
 function mapPrismaError(err) {
   const prismaCode = typeof err?.code === 'string' ? err.code : '';
+  const name = typeof err?.name === 'string' ? err.name : '';
+
+  if (name === 'PrismaClientInitializationError' || prismaCode === 'P1001' || prismaCode === 'P1000') {
+    return new AppError(
+      503,
+      'Database is unavailable. Start PostgreSQL and verify DATABASE_URL in backend/.env.',
+      'DATABASE_UNAVAILABLE'
+    );
+  }
+
   if (!/^P\d{4}$/.test(prismaCode)) return null;
 
   if (prismaCode === 'P2025') {
