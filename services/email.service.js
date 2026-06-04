@@ -1,7 +1,7 @@
 import sgMail from '@sendgrid/mail';
 import nodemailer from 'nodemailer';
 import { config } from '../config/env.js';
-import { renderBrandedEmailTemplate } from '../../packages/brand/index.js';
+import { renderBrandedEmailTemplate } from '@babybarn/brand';
 import { getBrandContext } from '../lib/brand-context.js';
 import { AppError } from '../utils/error-handler.js';
 

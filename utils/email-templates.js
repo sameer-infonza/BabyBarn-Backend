@@ -2,7 +2,7 @@
  * Transactional email rendering — delegates to @babybarn/brand design system.
  * @deprecated Import renderBrandedEmailTemplate from packages/brand in new code.
  */
-import { renderBrandedEmailTemplate } from '../../packages/brand/index.js';
+import { renderBrandedEmailTemplate } from '@babybarn/brand';
 import { getBrandContext } from '../lib/brand-context.js';
 
 export function renderEmailTemplate(template, context) {

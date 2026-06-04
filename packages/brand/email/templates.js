@@ -1,0 +1,294 @@
+import { escapeHtml } from '../lib/escape.js';
+import { renderEmailDocument } from './layout.js';
+import {
+  emailBodyParagraph,
+  emailCtaButton,
+  emailHeroText,
+  emailInfoRows,
+  emailLinkFallback,
+  emailMutedNote,
+  emailOrderSummary,
+  emailPanel,
+  emailStatusBadge,
+} from './components.js';
+
+function doc(subject, preview, bodyHtml, brand) {
+  return {
+    subject,
+    html: renderEmailDocument({ title: subject, preview, bodyHtml, brand }),
+  };
+}
+
+function greet(name) {
+  return emailBodyParagraph(`Hi ${escapeHtml(name || 'there')},`);
+}
+
+export function renderBrandedEmailTemplate(template, context = {}, brand) {
+  const name = context.name || 'there';
+  const actionUrl = context.actionUrl || context.loginUrl || '';
+
+  if (template === 'verify-email') {
+    const subject = 'Verify your Baby Barn account';
+    const bodyHtml = `
+      ${greet(name)}
+      ${emailBodyParagraph('Thanks for signing up. Please verify your email to activate your account and start shopping with member pricing.')}
+      ${emailCtaButton(context.actionUrl, 'Verify email')}
+      ${emailLinkFallback(context.actionUrl)}
+    `;
+    const { html } = doc(subject, 'Verify your email to activate your account.', bodyHtml, brand);
+    return { subject, html, text: `Hi ${name}, verify your account: ${context.actionUrl}` };
+  }
+
+  if (template === 'forgot-password') {
+    const subject = 'Reset your Baby Barn password';
+    const bodyHtml = `
+      ${greet(name)}
+      ${emailBodyParagraph('We received a request to reset your password. This link expires in <strong>60 minutes</strong>.')}
+      ${emailCtaButton(context.actionUrl, 'Reset password')}
+      ${emailMutedNote('If you did not request this, you can safely ignore this email.')}
+      ${emailLinkFallback(context.actionUrl)}
+    `;
+    const { html } = doc(subject, 'Password reset instructions inside.', bodyHtml, brand);
+    return { subject, html, text: `Reset your password (expires in 60 minutes): ${context.actionUrl}` };
+  }
+
+  if (template === 'welcome') {
+    const subject = 'Welcome to Baby Barn';
+    const bodyHtml = `
+      ${emailHeroText('Welcome aboard', 'Your account is active — explore curated essentials for your little one.')}
+      ${greet(name)}
+      ${emailBodyParagraph('Shop new and circular pieces, track orders, and manage ACCESS membership from your dashboard.')}
+      ${emailCtaButton(context.actionUrl, 'Go to dashboard')}
+    `;
+    const { html } = doc(subject, 'Welcome to Baby Barn', bodyHtml, brand);
+    return { subject, html, text: `Welcome to Baby Barn. Open: ${context.actionUrl}` };
+  }
+
+  if (template === 'otp') {
+    const subject = 'Your Baby Barn verification code';
+    const bodyHtml = `
+      ${greet(name)}
+      ${emailBodyParagraph('Your one-time verification code is:')}
+      ${emailPanel(`<div style="text-align:center;font-size:32px;font-weight:800;letter-spacing:6px;color:#49297e;">${escapeHtml(context.otp || '')}</div>`)}
+      ${emailMutedNote(`This code expires in ${escapeHtml(String(context.minutes || 10))} minutes.`)}
+    `;
+    const { html } = doc(subject, 'Your verification code', bodyHtml, brand);
+    return { subject, html, text: `Your OTP is ${context.otp}. Expires in ${context.minutes || 10} minutes.` };
+  }
+
+  if (template === 'order-confirmation') {
+    const subject = 'Your Baby Barn order is confirmed';
+    const lines = Array.isArray(context.lines) ? context.lines : [];
+    const bodyHtml = `
+      ${emailHeroText('Order confirmed', 'We are preparing your items with care.')}
+      ${greet(name)}
+      ${emailOrderSummary({
+        orderId: context.orderId,
+        lines,
+        subtotal: context.subtotal,
+        shipping: context.shipping,
+        total: context.total,
+      })}
+      ${emailCtaButton(context.actionUrl, 'View your order')}
+    `;
+    const { html } = doc(subject, `Order ${context.orderId || ''} confirmed`, bodyHtml, brand);
+    return {
+      subject,
+      html,
+      text: `Order ${context.orderId} confirmed. Total ${context.total}. View: ${context.actionUrl}`,
+    };
+  }
+
+  if (template === 'order-tracking') {
+    const subject = 'Your Baby Barn order has shipped';
+    const bodyHtml = `
+      ${emailHeroText('On the way', 'Your package is moving through our carbon-balanced route.')}
+      ${greet(name)}
+      ${emailPanel(
+        `<table width="100%">${emailInfoRows([
+          { label: 'Order', value: context.orderId, bold: true },
+          { label: 'Carrier', value: context.carrier || 'UPS' },
+          { label: 'Tracking', value: context.trackingNumber, bold: true },
+        ])}</table>`,
+        { title: 'Shipment' }
+      )}
+      ${emailCtaButton(context.actionUrl, 'Track your order')}
+    `;
+    const { html } = doc(subject, 'Tracking number inside', bodyHtml, brand);
+    return {
+      subject,
+      html,
+      text: `Order ${context.orderId} shipped. ${context.carrier} ${context.trackingNumber}. ${context.actionUrl}`,
+    };
+  }
+
+  if (template === 'order-cancelled') {
+    const subject = 'Your Baby Barn order was cancelled';
+    const bodyHtml = `
+      ${greet(name)}
+      ${emailBodyParagraph(`Your order <strong>${escapeHtml(context.orderId || '')}</strong> has been cancelled.`)}
+      ${context.reason ? emailMutedNote(context.reason) : ''}
+      ${emailCtaButton(context.actionUrl, 'View orders')}
+    `;
+    const { html } = doc(subject, 'Order cancellation notice', bodyHtml, brand);
+    return { subject, html, text: `Order ${context.orderId} cancelled. ${context.actionUrl}` };
+  }
+
+  if (template === 'refund-confirmation') {
+    const subject = 'Your Baby Barn refund is processing';
+    const bodyHtml = `
+      ${greet(name)}
+      ${emailBodyParagraph(`A refund of <strong>${escapeHtml(context.amount || '')}</strong> for order <strong>${escapeHtml(context.orderId || '')}</strong> has been initiated.`)}
+      ${emailMutedNote('Depending on your bank, funds may take 5–10 business days to appear.')}
+      ${emailCtaButton(context.actionUrl, 'View order')}
+    `;
+    const { html } = doc(subject, 'Refund confirmation', bodyHtml, brand);
+    return { subject, html, text: `Refund ${context.amount} for order ${context.orderId}. ${context.actionUrl}` };
+  }
+
+  if (template === 'return-status') {
+    const subject = 'Update on your return request';
+    const tone =
+      String(context.status || '').toUpperCase() === 'APPROVED'
+        ? 'success'
+        : String(context.status || '').toUpperCase() === 'REJECTED'
+          ? 'danger'
+          : 'info';
+    const bodyHtml = `
+      ${greet(name)}
+      ${emailBodyParagraph('Your return request status has been updated:')}
+      <p style="margin:12px 0 20px;">${emailStatusBadge(context.status || 'Updated', tone)}</p>
+      ${context.note ? emailMutedNote(context.note) : ''}
+      ${emailCtaButton(context.actionUrl, 'View return details')}
+    `;
+    const { html } = doc(subject, 'Return status update', bodyHtml, brand);
+    return { subject, html, text: `Return status: ${context.status}. ${context.actionUrl}` };
+  }
+
+  if (template === 'store-credit-update') {
+    const subject = 'Store credit update — Baby Barn';
+    const bodyHtml = `
+      ${greet(name)}
+      ${emailBodyParagraph(`Your store credit balance was updated by <strong>${escapeHtml(context.amount || '')}</strong>.`)}
+      ${context.note ? emailMutedNote(context.note) : ''}
+      ${emailCtaButton(context.actionUrl, 'Open wallet')}
+    `;
+    const { html } = doc(subject, 'Store credit update', bodyHtml, brand);
+    return { subject, html, text: `Store credit updated by ${context.amount}. ${context.actionUrl}` };
+  }
+
+  if (template === 'access-purchase') {
+    const subject = 'Your ACCESS membership is active';
+    const bodyHtml = `
+      ${emailHeroText('ACCESS is active', 'Member pricing and circular returns are now unlocked.')}
+      ${greet(name)}
+      ${emailPanel(
+        `<table width="100%">${emailInfoRows([
+          { label: 'Member number', value: context.accessNumber, bold: true },
+          { label: 'Amount paid', value: context.amount },
+          { label: 'Valid through', value: context.validUntil, bold: true },
+        ])}</table>`,
+        { title: 'Membership' }
+      )}
+      ${emailCtaButton(context.actionUrl, 'View membership')}
+    `;
+    const { html } = doc(subject, 'ACCESS membership confirmed', bodyHtml, brand);
+    return {
+      subject,
+      html,
+      text: `ACCESS active. Member ${context.accessNumber}. Valid until ${context.validUntil}. ${context.actionUrl}`,
+    };
+  }
+
+  if (template === 'access-renewal') {
+    const subject = 'Your ACCESS membership has been renewed';
+    const bodyHtml = `
+      ${greet(name)}
+      ${emailPanel(
+        `<table width="100%">${emailInfoRows([
+          { label: 'Member number', value: context.accessNumber },
+          { label: 'Amount paid', value: context.amount },
+          { label: 'New expiry', value: context.validUntil, bold: true },
+        ])}</table>`,
+        { title: 'Renewal' }
+      )}
+      ${emailCtaButton(context.actionUrl, 'View membership')}
+    `;
+    const { html } = doc(subject, 'ACCESS renewed', bodyHtml, brand);
+    return { subject, html, text: `ACCESS renewed until ${context.validUntil}. ${context.actionUrl}` };
+  }
+
+  if (template === 'access-renewal-reminder') {
+    const subject = 'Your ACCESS membership renews soon';
+    const bodyHtml = `
+      ${greet(name)}
+      ${emailBodyParagraph(
+        `Your ACCESS membership (<strong>${escapeHtml(context.accessNumber || '')}</strong>) expires on <strong>${escapeHtml(context.validUntil || '')}</strong>.`
+      )}
+      ${emailBodyParagraph('Renew now to keep member pricing, returns, and refurbished access without interruption.')}
+      ${emailCtaButton(context.actionUrl, 'Renew ACCESS', 'secondary')}
+      ${emailMutedNote('ACCESS is an annual one-time payment — not a recurring subscription.')}
+    `;
+    const { html } = doc(subject, 'Renew ACCESS before it expires', bodyHtml, brand);
+    return { subject, html, text: `ACCESS expires ${context.validUntil}. Renew: ${context.actionUrl}` };
+  }
+
+  if (template === 'access-expired') {
+    const subject = 'Your ACCESS membership has expired';
+    const bodyHtml = `
+      ${greet(name)}
+      ${emailBodyParagraph(`Your ACCESS membership expired on <strong>${escapeHtml(context.validUntil || '')}</strong>.`)}
+      ${emailBodyParagraph('Reactivate anytime to restore member pricing and circular benefits.')}
+      ${emailCtaButton(context.actionUrl, 'Reactivate ACCESS')}
+    `;
+    const { html } = doc(subject, 'ACCESS expired', bodyHtml, brand);
+    return { subject, html, text: `ACCESS expired. Reactivate: ${context.actionUrl}` };
+  }
+
+  if (template === 'team-invite') {
+    const subject = 'Your Baby Barn team account';
+    const bodyHtml = `
+      ${greet(name)}
+      ${emailBodyParagraph(
+        `Your team account was created with the role <strong>${escapeHtml(context.roleTitle || 'Team Member')}</strong>.`
+      )}
+      ${emailPanel(
+        `<table width="100%">${emailInfoRows([
+          { label: 'Email', value: context.email },
+          { label: 'Temporary password', value: context.temporaryPassword, bold: true },
+        ])}</table>`,
+        { title: 'Sign-in credentials' }
+      )}
+      ${context.loginUrl ? emailCtaButton(context.loginUrl, 'Open admin console', 'secondary') : ''}
+      ${context.loginUrl ? emailLinkFallback(context.loginUrl) : ''}
+      ${emailMutedNote('Please change your password after your first login.')}
+    `;
+    const { html } = doc(subject, 'Team account credentials', bodyHtml, brand);
+    return {
+      subject,
+      html,
+      text: `Team account created. Email: ${context.email}. Temporary password: ${context.temporaryPassword}`,
+    };
+  }
+
+  if (template === 'contact-inquiry-admin') {
+    const subject = `[Baby Barn Contact] ${context.subjectLine || 'New message'}`;
+    const bodyHtml = `
+      ${emailHeroText('New contact inquiry', 'A customer submitted the storefront contact form.')}
+      ${emailPanel(
+        `<table width="100%">${emailInfoRows([
+          { label: 'From', value: `${context.fromName || ''} <${context.fromEmail || ''}>` },
+          { label: 'Subject', value: context.subjectLine, bold: true },
+        ])}</table>`,
+        { title: 'Sender' }
+      )}
+      ${emailPanel(`<pre style="white-space:pre-wrap;font-family:inherit;margin:0;font-size:14px;line-height:22px;color:#222;">${escapeHtml(context.message || '')}</pre>`, {
+        title: 'Message',
+      })}
+    `;
+    const { html } = doc(subject, context.subjectLine || 'Contact form', bodyHtml, brand);
+    return { subject, html, text: context.plainText || '' };
+  }
+
+  throw new Error(`Unsupported email template: ${template}`);
+}

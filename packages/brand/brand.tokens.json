@@ -1,0 +1,67 @@
+{
+  "name": {
+    "display": "Baby Barn",
+    "legal": "MyBABY BARN",
+    "tagline": "Family essentials with care"
+  },
+  "colors": {
+    "ink": "#1a0f35",
+    "inkSoft": "#5a5368",
+    "inkMuted": "#8b8499",
+    "purple": "#49297e",
+    "mint": "#00db96",
+    "sage": "#4A7C59",
+    "sageDark": "#1f3c2f",
+    "sageLight": "#E8F0EB",
+    "sageMid": "#B5CFBA",
+    "cream": "#fefcf7",
+    "creamDark": "#f2efe8",
+    "white": "#FFFFFF",
+    "charcoal": "#1C1917",
+    "muted": "#78716C",
+    "border": "#E7E5E0",
+    "borderLight": "#ececec",
+    "rose": "#D97777",
+    "amber": "#C47C35",
+    "sky": "#5B8FA8",
+    "emailBody": "#222222",
+    "emailMuted": "#666666",
+    "emailFooterBg": "#f8f8f8"
+  },
+  "typography": {
+    "emailFontStack": "'Plus Jakarta Sans', 'Helvetica Neue', Arial, sans-serif",
+    "pdfFontRegular": "Helvetica",
+    "pdfFontBold": "Helvetica-Bold"
+  },
+  "spacing": {
+    "emailMaxWidth": 600,
+    "emailRadius": 12,
+    "buttonRadius": 22,
+    "cardRadius": 10
+  },
+  "contact": {
+    "supportEmail": "hello@babybarn.co",
+    "pressEmail": "press@babybarn.co",
+    "websitePath": "/"
+  },
+  "legal": {
+    "copyrightHolder": "Baby Barn",
+    "automatedNotice": "This is an automated message from Baby Barn. Please do not reply directly to this email.",
+    "privacyPath": "/privacy-policy",
+    "termsPath": "/terms"
+  },
+  "email": {
+    "headerBadgeBg": "#E8F0EB",
+    "ctaPrimaryBg": "#00db96",
+    "ctaPrimaryText": "#1a0f35",
+    "ctaSecondaryBg": "#49297e",
+    "ctaSecondaryText": "#FFFFFF"
+  },
+  "pdf": {
+    "headerBarHeight": 56,
+    "accentBar": "#4A7C59",
+    "titleColor": "#1a0f35",
+    "bodyColor": "#44403C",
+    "mutedColor": "#78716C"
+  }
+}

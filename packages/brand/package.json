@@ -1,0 +1,13 @@
+{
+  "name": "@babybarn/brand",
+  "version": "1.0.0",
+  "description": "Shared Baby Barn branding tokens and document templates (email + PDF)",
+  "type": "module",
+  "main": "index.js",
+  "exports": {
+    ".": "./index.js",
+    "./tokens": "./lib/tokens.js",
+    "./email": "./email/index.js",
+    "./pdf": "./pdf/index.js"
+  }
+}

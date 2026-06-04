@@ -13,8 +13,8 @@ import {
   pdfDrawHeader,
   pdfKeyValue,
   pdfSectionTitle,
-} from '../../../packages/brand/pdf/layout.js';
-import { renderPickupListLayout } from '../../../packages/brand/pdf/pickup-list.js';
+  renderPickupListLayout,
+} from '@babybarn/brand/pdf';
 
 function orderRef(order) {
   return order.orderNumber || order.publicId;

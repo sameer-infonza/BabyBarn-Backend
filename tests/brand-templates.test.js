@@ -1,7 +1,7 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { renderBrandedEmailTemplate } from '../../packages/brand/email/templates.js';
-import { mergeBrandContext } from '../../packages/brand/lib/tokens.js';
+import { renderBrandedEmailTemplate } from '@babybarn/brand';
+import { mergeBrandContext } from '@babybarn/brand/tokens';
 
 const brand = mergeBrandContext({
   storeUrl: 'https://babybarn.co',
