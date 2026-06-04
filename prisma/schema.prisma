@@ -70,6 +70,37 @@ enum ProductType {
   REFURBISHED
 }
 
+enum InventoryLedgerEventType {
+  RESERVE
+  RELEASE
+  COMMIT
+  ADJUST
+  RESTOCK
+  REFUND_RESTORE
+}
+
+enum ProductUnitStatus {
+  IN_STOCK
+  RESERVED
+  SOLD
+  WITH_CUSTOMER
+  RETURNED
+  INSPECTION
+  REFURBISHING
+  QA_HOLD
+  AVAILABLE_REFURB
+  RETIRED
+}
+
+enum RefurbishmentJobStatus {
+  RECEIVED
+  INSPECTION
+  IN_PROGRESS
+  QA_APPROVED
+  LISTED
+  CANCELLED
+}
+
 enum CancellationReviewStatus {
   NONE
   PENDING
@@ -113,6 +144,8 @@ model User {
   refreshTokens          RefreshToken[]
   membershipPayments     MembershipPayment[]
   checkoutIntents      CheckoutIntent[]
+  wishlistItems        WishlistItem[]
+  stockAlertSubscriptions StockAlertSubscription[]
 
   stripeCustomerId   String?
   accessNumber       String?   @unique
@@ -259,6 +292,13 @@ model Product {
   checkoutIntentLines CheckoutIntentLine[]
   variants   ProductVariant[]
   inventoryAdjustments InventoryAdjustment[]
+  inventoryLedgerEvents InventoryLedgerEvent[]
+  wishlistItems        WishlistItem[]
+  stockAlertSubscriptions StockAlertSubscription[]
+  productUnits         ProductUnit[]
+  sourceReturnId       Int?
+  sourceReturn         ReturnRequest? @relation("RefurbListedFromReturn", fields: [sourceReturnId], references: [id], onDelete: SetNull)
+  refurbishmentJobsListed RefurbishmentJob[] @relation("RefurbJobListedProduct")
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -268,6 +308,7 @@ model Product {
   @@index([publicId])
   @@index([isDraft])
   @@index([productType])
+  @@index([sourceReturnId])
 }
 
 model ProductVariant {
@@ -285,8 +326,12 @@ model ProductVariant {
   sortOrder     Int      @default(0)
 
   inventoryAdjustments InventoryAdjustment[]
+  inventoryLedgerEvents InventoryLedgerEvent[]
   orderItems           OrderItem[]
   checkoutIntentLines  CheckoutIntentLine[]
+  wishlistItems        WishlistItem[]
+  stockAlertSubscriptions StockAlertSubscription[]
+  productUnits         ProductUnit[]
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -512,10 +557,130 @@ model ReturnRequest {
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
   order Order @relation(fields: [orderId], references: [id], onDelete: Cascade)
   orderItem OrderItem? @relation(fields: [orderItemId], references: [id], onDelete: SetNull)
+  refurbishmentJob RefurbishmentJob?
+  listedProducts Product[] @relation("RefurbListedFromReturn")
+  productUnits   ProductUnit[]
 
   @@index([userId])
   @@index([orderId])
   @@index([status])
+}
+
+model InventoryLedgerEvent {
+  id               Int                    @id @default(autoincrement())
+  publicId         String                 @unique @default(cuid())
+  productId        Int
+  product          Product                @relation(fields: [productId], references: [id], onDelete: Cascade)
+  productVariantId Int?
+  productVariant   ProductVariant?        @relation(fields: [productVariantId], references: [id], onDelete: SetNull)
+  quantityDelta    Int
+  eventType        InventoryLedgerEventType
+  referenceType    String
+  referenceId      String
+  actorUserId      Int?
+  note             String?
+  createdAt        DateTime               @default(now())
+
+  @@index([productId, createdAt])
+  @@index([productVariantId])
+  @@index([referenceType, referenceId])
+  @@index([eventType])
+  @@index([createdAt])
+}
+
+model ProductUnit {
+  id                 Int              @id @default(autoincrement())
+  publicId           String           @unique @default(cuid())
+  unitSku            String           @unique
+  productId          Int?
+  product            Product?         @relation(fields: [productId], references: [id], onDelete: SetNull)
+  productVariantId   Int?
+  productVariant     ProductVariant?  @relation(fields: [productVariantId], references: [id], onDelete: SetNull)
+  status             ProductUnitStatus @default(IN_STOCK)
+  cycleNumber        Int              @default(1)
+  sourceOrderItemId  Int?
+  sourceReturnId     Int?
+  sourceReturn       ReturnRequest?   @relation(fields: [sourceReturnId], references: [id], onDelete: SetNull)
+  purchasedAt        DateTime?
+  returnedAt         DateTime?
+  inspectedAt        DateTime?
+  refurbishedAt      DateTime?
+  relistedAt         DateTime?
+  soldAt             DateTime?
+  events             ProductUnitEvent[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([productId])
+  @@index([status])
+  @@index([sourceReturnId])
+}
+
+model ProductUnitEvent {
+  id          Int               @id @default(autoincrement())
+  publicId    String            @unique @default(cuid())
+  unitId      Int
+  unit        ProductUnit       @relation(fields: [unitId], references: [id], onDelete: Cascade)
+  fromStatus  ProductUnitStatus?
+  toStatus    ProductUnitStatus
+  actorUserId Int?
+  note        String?
+  metadata    Json?
+  createdAt   DateTime          @default(now())
+
+  @@index([unitId, createdAt])
+}
+
+model RefurbishmentJob {
+  id               Int                   @id @default(autoincrement())
+  publicId         String                @unique @default(cuid())
+  returnRequestId  Int                   @unique
+  returnRequest    ReturnRequest         @relation(fields: [returnRequestId], references: [id], onDelete: Cascade)
+  status           RefurbishmentJobStatus @default(RECEIVED)
+  listedProductId  Int?
+  listedProduct    Product?              @relation("RefurbJobListedProduct", fields: [listedProductId], references: [id], onDelete: SetNull)
+  notes            String?               @db.Text
+  inspectedAt      DateTime?
+  refurbishedAt    DateTime?
+  listedAt         DateTime?
+  createdAt        DateTime              @default(now())
+  updatedAt        DateTime              @updatedAt
+
+  @@index([status])
+}
+
+model WishlistItem {
+  id          Int      @id @default(autoincrement())
+  userId      Int
+  productId   Int
+  productVariantId Int?
+  priceAtAdd  Float?
+  user        User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  product     Product  @relation(fields: [productId], references: [id], onDelete: Cascade)
+  productVariant ProductVariant? @relation(fields: [productVariantId], references: [id], onDelete: SetNull)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@unique([userId, productId, productVariantId])
+  @@index([userId])
+  @@index([productId])
+}
+
+model StockAlertSubscription {
+  id               Int      @id @default(autoincrement())
+  userId           Int
+  productId        Int
+  productVariantId Int?
+  notifiedAt       DateTime?
+  user             User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  product          Product  @relation(fields: [productId], references: [id], onDelete: Cascade)
+  productVariant   ProductVariant? @relation(fields: [productVariantId], references: [id], onDelete: SetNull)
+  createdAt        DateTime @default(now())
+
+  @@unique([userId, productId, productVariantId])
+  @@index([productId])
+  @@index([userId])
 }
 
 model AdminAuditLog {

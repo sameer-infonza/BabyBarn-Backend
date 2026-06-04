@@ -65,11 +65,17 @@ export class InventoryController {
   async history(req, res) {
     const page = parseInt(String(req.query.page), 10) || 1;
     const limit = parseInt(String(req.query.limit), 10) || 20;
-    const result = await inventoryService.listHistory({ page, limit });
+    const productId = req.query.productId ? String(req.query.productId) : undefined;
+    const result = await inventoryService.listHistory({ page, limit, productPublicId: productId });
     res.status(200).json({
       success: true,
       data: toPublicJson(result),
     });
+  }
+
+  async productTimeline(req, res) {
+    const data = await inventoryService.getProductTimeline(req.params.id);
+    res.status(200).json({ success: true, data: toPublicJson(data) });
   }
 }
 

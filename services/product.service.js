@@ -37,7 +37,7 @@ function randomSku(prefix) {
   return `${prefix}-${hex}`;
 }
 
-async function ensureUniqueSlug(tx, base) {
+export async function ensureUniqueSlug(tx, base) {
   let slug = base;
   let n = 0;
   while (true) {

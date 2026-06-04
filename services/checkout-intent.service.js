@@ -106,7 +106,10 @@ export class CheckoutIntentService {
           include: { variants: { orderBy: { sortOrder: 'asc' } } },
         });
         if (!product) continue;
-        await releaseOrderLineStock(tx, product, line.productVariantId, line.quantity);
+        await releaseOrderLineStock(tx, product, line.productVariantId, line.quantity, {
+          referenceType: 'checkout_intent',
+          referenceId: intentPublicId,
+        });
       }
 
       if (intent.storeCreditApplied > 0) {
@@ -191,6 +194,16 @@ export class CheckoutIntentService {
         let variantDbId = null;
         let variant = null;
 
+        if ((product.variants ?? []).length > 0) {
+          if (!item.variantId) {
+            throw new AppError(
+              400,
+              `Select a variant for "${product.name}"`,
+              'VARIANT_REQUIRED'
+            );
+          }
+        }
+
         if (item.variantId) {
           const v = product.variants.find((x) => x.publicId === item.variantId);
           if (!v) {
@@ -214,7 +227,10 @@ export class CheckoutIntentService {
           price: unitApplied,
         });
 
-        await reserveOrderLineStock(tx, product, variantDbId, item.quantity);
+        await reserveOrderLineStock(tx, product, variantDbId, item.quantity, {
+          referenceType: 'checkout_intent',
+          referenceId: signature,
+        });
       }
 
       return tx.checkoutIntent.create({
@@ -382,7 +398,10 @@ export class CheckoutIntentService {
           where: { id: line.productId },
           include: { variants: { orderBy: { sortOrder: 'asc' } } },
         });
-        await commitOrderLineStock(tx, product, line.productVariantId, line.quantity);
+        await commitOrderLineStock(tx, product, line.productVariantId, line.quantity, {
+          referenceType: 'order',
+          referenceId: created.publicId,
+        });
       }
 
       if (intent.storeCreditApplied > 0) {
@@ -398,6 +417,13 @@ export class CheckoutIntentService {
         where: { id: intent.id },
         data: { status: 'CONSUMED', orderPublicId: created.publicId },
       });
+
+      const fullOrder = await tx.order.findUnique({
+        where: { id: created.id },
+        include: { orderItems: true },
+      });
+      const { createUnitsForPaidOrder } = await import('./product-unit.service.js');
+      await createUnitsForPaidOrder(tx, fullOrder, fullOrder.orderItems);
 
       return tx.order.findUnique({
         where: { id: created.id },

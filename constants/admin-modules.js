@@ -33,7 +33,7 @@ export const TEAM_PERMISSION_TO_ROUTE_MODULES = {
   'product-management': ['categories', 'products', 'refurbished'],
   'inventory-management': ['inventory', 'inspection'],
   'order-management': ['orders', 'shipping'],
-  'returns-refurbishment': ['returns'],
+  'returns-refurbishment': ['returns', 'inspection'],
   'finance-management': ['finance', 'store-credit', 'activity'],
   'membership-management': ['access'],
   'user-management': ['customers'],

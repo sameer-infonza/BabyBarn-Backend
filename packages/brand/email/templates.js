@@ -290,5 +290,37 @@ export function renderBrandedEmailTemplate(template, context = {}, brand) {
     return { subject, html, text: context.plainText || '' };
   }
 
+  if (template === 'back-in-stock') {
+    const subject = `${context.productName || 'An item'} is back in stock`;
+    const bodyHtml = `
+      ${greet(name)}
+      ${emailBodyParagraph(
+        `Good news — <strong>${escapeHtml(context.productName || 'your item')}</strong> is available again on Baby Barn.`
+      )}
+      ${context.actionUrl ? emailCtaButton(context.actionUrl, 'Shop now') : ''}
+      ${context.actionUrl ? emailLinkFallback(context.actionUrl) : ''}
+    `;
+    const { html } = doc(subject, 'Back in stock', bodyHtml, brand);
+    return { subject, html, text: `${context.productName} is back in stock.` };
+  }
+
+  if (template === 'price-drop') {
+    const subject = `Price drop on ${context.productName || 'a wishlist item'}`;
+    const bodyHtml = `
+      ${greet(name)}
+      ${emailBodyParagraph(
+        `<strong>${escapeHtml(context.productName || 'An item')}</strong> on your wishlist is now <strong>${escapeHtml(context.newPrice || '')}</strong> (was ${escapeHtml(context.oldPrice || '')}).`
+      )}
+      ${context.actionUrl ? emailCtaButton(context.actionUrl, 'View product') : ''}
+      ${context.actionUrl ? emailLinkFallback(context.actionUrl) : ''}
+    `;
+    const { html } = doc(subject, 'Wishlist price drop', bodyHtml, brand);
+    return {
+      subject,
+      html,
+      text: `${context.productName} dropped from ${context.oldPrice} to ${context.newPrice}.`,
+    };
+  }
+
   throw new Error(`Unsupported email template: ${template}`);
 }

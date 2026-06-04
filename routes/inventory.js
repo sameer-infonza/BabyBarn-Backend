@@ -37,6 +37,14 @@ router.post(
   (req, res, next) => inventoryController.adjust(req, res).catch(next)
 );
 
+router.get(
+  '/products/:id/timeline',
+  authenticate,
+  authorize('ADMIN', 'ADMIN_TEAM'),
+  requireConsoleModule('inventory'),
+  (req, res, next) => inventoryController.productTimeline(req, res).catch(next)
+);
+
 router.patch(
   '/products/:id/type',
   authenticate,

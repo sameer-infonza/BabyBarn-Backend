@@ -1,7 +1,9 @@
 import { validate } from '../utils/validation.js';
 import { returnRequestCreateSchema, returnStatusUpdateSchema } from '../schemas/index.js';
 import { returnsService } from '../services/returns.service.js';
+import { refurbishmentService } from '../services/refurbishment.service.js';
 import { toPublicJson } from '../utils/serialize.js';
+import { z } from 'zod';
 
 export class ReturnsController {
   async listAll(req, res) {
@@ -34,6 +36,28 @@ export class ReturnsController {
     const body = await validate(returnStatusUpdateSchema, req.body);
     const actor = { id: req.user?.id, email: req.user?.email };
     const data = await returnsService.updateStatus(req.params.id, body, actor);
+    res.status(200).json({ success: true, data: toPublicJson(data) });
+  }
+
+  async listRefurbJobs(req, res) {
+    const page = parseInt(String(req.query.page), 10) || 1;
+    const status = req.query.status ? String(req.query.status) : undefined;
+    const data = await refurbishmentService.listJobs({ page, status });
+    res.status(200).json({ success: true, data: toPublicJson(data) });
+  }
+
+  async updateRefurbJobStatus(req, res) {
+    const body = await validate(
+      z.object({
+        status: z.enum(['RECEIVED', 'INSPECTION', 'IN_PROGRESS', 'QA_APPROVED', 'LISTED', 'CANCELLED']),
+        notes: z.string().optional(),
+      }),
+      req.body
+    );
+    const actor = { id: req.user?.id, email: req.user?.email };
+    const data = await refurbishmentService.updateStatus(req.params.jobId, body.status, actor, {
+      notes: body.notes,
+    });
     res.status(200).json({ success: true, data: toPublicJson(data) });
   }
 }

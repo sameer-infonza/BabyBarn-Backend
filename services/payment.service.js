@@ -213,10 +213,33 @@ async function markOrderRefundedBySessionId(sessionId, source) {
   if (!sessionId || typeof sessionId !== 'string') {
     return { handled: true, source, error: 'missing sessionId' };
   }
-  await prisma.order.updateMany({
+  const order = await prisma.order.findFirst({
     where: { stripeCheckoutSessionId: sessionId, paymentStatus: { in: ['PAID', 'REFUNDED'] } },
-    data: { paymentStatus: 'REFUNDED', status: 'REFUNDED' },
+    include: { orderItems: true },
   });
+  if (!order) {
+    return { handled: true, flow: 'order', source, sessionId, error: 'order not found' };
+  }
+  if (order.paymentStatus === 'PAID') {
+    const { restockPaidOrderInTx } = await import('./inventory-restock.service.js');
+    await prisma.$transaction(async (tx) => {
+      await restockPaidOrderInTx(tx, order, {
+        referenceType: 'order',
+        referenceId: order.publicId,
+        eventType: 'REFUND_RESTORE',
+        note: `Stripe ${source}`,
+      });
+      await tx.order.update({
+        where: { id: order.id },
+        data: { paymentStatus: 'REFUNDED', status: 'REFUNDED' },
+      });
+    });
+  } else {
+    await prisma.order.updateMany({
+      where: { id: order.id },
+      data: { paymentStatus: 'REFUNDED', status: 'REFUNDED' },
+    });
+  }
   return { handled: true, flow: 'order', source, sessionId };
 }
 

@@ -1,5 +1,6 @@
 import { AppError } from '../utils/error-handler.js';
 import { syncParentStockFromVariants } from './inventory.service.js';
+import { writeInventoryLedger } from './inventory-ledger.service.js';
 
 export function variantAvailableStock(variant) {
   return Math.max(0, variant.stock - (variant.reservedStock ?? 0));
@@ -13,8 +14,62 @@ export function productAvailableStock(product) {
   return Math.max(0, product.stock - (product.reservedStock ?? 0));
 }
 
-/** Reserve stock when a pending order is created. */
-export async function reserveOrderLineStock(tx, product, variantDbId, quantity) {
+async function ledgerReserve(tx, productId, productVariantId, quantity, ledgerCtx) {
+  if (!ledgerCtx || quantity < 1) return;
+  await writeInventoryLedger(tx, {
+    productId,
+    productVariantId,
+    quantityDelta: 0,
+    eventType: 'RESERVE',
+    referenceType: ledgerCtx.referenceType,
+    referenceId: ledgerCtx.referenceId,
+    actorUserId: ledgerCtx.actorUserId ?? null,
+    note: ledgerCtx.note ?? null,
+  });
+}
+
+async function ledgerRelease(tx, productId, productVariantId, quantity, ledgerCtx) {
+  if (!ledgerCtx || quantity < 1) return;
+  await writeInventoryLedger(tx, {
+    productId,
+    productVariantId,
+    quantityDelta: 0,
+    eventType: 'RELEASE',
+    referenceType: ledgerCtx.referenceType,
+    referenceId: ledgerCtx.referenceId,
+    actorUserId: ledgerCtx.actorUserId ?? null,
+  });
+}
+
+async function ledgerCommit(tx, productId, productVariantId, quantity, ledgerCtx) {
+  if (!ledgerCtx || quantity < 1) return;
+  await writeInventoryLedger(tx, {
+    productId,
+    productVariantId,
+    quantityDelta: -quantity,
+    eventType: 'COMMIT',
+    referenceType: ledgerCtx.referenceType,
+    referenceId: ledgerCtx.referenceId,
+    actorUserId: ledgerCtx.actorUserId ?? null,
+  });
+}
+
+async function ledgerRestock(tx, productId, productVariantId, quantity, ledgerCtx, eventType = 'RESTOCK') {
+  if (!ledgerCtx || quantity < 1) return;
+  await writeInventoryLedger(tx, {
+    productId,
+    productVariantId,
+    quantityDelta: quantity,
+    eventType,
+    referenceType: ledgerCtx.referenceType,
+    referenceId: ledgerCtx.referenceId,
+    actorUserId: ledgerCtx.actorUserId ?? null,
+    note: ledgerCtx.note ?? null,
+  });
+}
+
+/** Reserve stock when checkout intent is created. */
+export async function reserveOrderLineStock(tx, product, variantDbId, quantity, ledgerCtx = null) {
   if (quantity < 1) return;
 
   if (variantDbId) {
@@ -38,6 +93,7 @@ export async function reserveOrderLineStock(tx, product, variantDbId, quantity) 
     if (updated.count === 0) {
       throw new AppError(409, 'Stock changed during checkout. Please try again.', 'STOCK_CONFLICT');
     }
+    await ledgerReserve(tx, product.id, variantDbId, quantity, ledgerCtx);
     return;
   }
 
@@ -61,6 +117,7 @@ export async function reserveOrderLineStock(tx, product, variantDbId, quantity) 
     if (updated.count === 0) {
       throw new AppError(409, 'Stock changed during checkout. Please try again.', 'STOCK_CONFLICT');
     }
+    await ledgerReserve(tx, product.id, null, quantity, ledgerCtx);
     return;
   }
 
@@ -87,6 +144,7 @@ export async function reserveOrderLineStock(tx, product, variantDbId, quantity) 
     if (updated.count === 0) {
       throw new AppError(409, 'Stock changed during checkout. Please try again.', 'STOCK_CONFLICT');
     }
+    await ledgerReserve(tx, product.id, v.id, take, ledgerCtx);
     remaining -= take;
   }
   if (remaining > 0) {
@@ -95,7 +153,7 @@ export async function reserveOrderLineStock(tx, product, variantDbId, quantity) 
 }
 
 /** Convert reservation to a sale after payment succeeds. */
-export async function commitOrderLineStock(tx, product, variantDbId, quantity) {
+export async function commitOrderLineStock(tx, product, variantDbId, quantity, ledgerCtx = null) {
   if (quantity < 1) return;
 
   if (variantDbId) {
@@ -112,6 +170,7 @@ export async function commitOrderLineStock(tx, product, variantDbId, quantity) {
       },
     });
     await syncParentStockFromVariants(tx, product.id);
+    await ledgerCommit(tx, product.id, variantDbId, quantity, ledgerCtx);
     return;
   }
 
@@ -131,6 +190,7 @@ export async function commitOrderLineStock(tx, product, variantDbId, quantity) {
         reservedStock: { decrement: quantity },
       },
     });
+    await ledgerCommit(tx, product.id, null, quantity, ledgerCtx);
     return;
   }
 
@@ -151,6 +211,7 @@ export async function commitOrderLineStock(tx, product, variantDbId, quantity) {
         stockVersion: { increment: 1 },
       },
     });
+    await ledgerCommit(tx, product.id, v.id, reserved, ledgerCtx);
     remaining -= reserved;
   }
   if (remaining > 0) {
@@ -160,7 +221,7 @@ export async function commitOrderLineStock(tx, product, variantDbId, quantity) {
 }
 
 /** Release reservation when checkout fails or expires. */
-export async function releaseOrderLineStock(tx, product, variantDbId, quantity) {
+export async function releaseOrderLineStock(tx, product, variantDbId, quantity, ledgerCtx = null) {
   if (quantity < 1) return;
 
   if (variantDbId) {
@@ -172,6 +233,7 @@ export async function releaseOrderLineStock(tx, product, variantDbId, quantity) 
       where: { id: variantDbId },
       data: { reservedStock: { decrement: toRelease } },
     });
+    await ledgerRelease(tx, product.id, variantDbId, toRelease, ledgerCtx);
     return;
   }
 
@@ -187,6 +249,7 @@ export async function releaseOrderLineStock(tx, product, variantDbId, quantity) 
       where: { id: product.id },
       data: { reservedStock: { decrement: toRelease } },
     });
+    await ledgerRelease(tx, product.id, null, toRelease, ledgerCtx);
     return;
   }
 
@@ -203,6 +266,60 @@ export async function releaseOrderLineStock(tx, product, variantDbId, quantity) 
       where: { id: v.id },
       data: { reservedStock: { decrement: toRelease } },
     });
+    await ledgerRelease(tx, product.id, v.id, toRelease, ledgerCtx);
     remaining -= toRelease;
   }
+}
+
+/** Restore sellable stock after refund or approved standard return (no reservation). */
+export async function restockOrderLineStock(
+  tx,
+  product,
+  variantDbId,
+  quantity,
+  ledgerCtx = null,
+  eventType = 'REFUND_RESTORE'
+) {
+  if (quantity < 1) return;
+
+  if (variantDbId) {
+    await tx.productVariant.update({
+      where: { id: variantDbId },
+      data: { stock: { increment: quantity }, stockVersion: { increment: 1 } },
+    });
+    await syncParentStockFromVariants(tx, product.id);
+    await ledgerRestock(tx, product.id, variantDbId, quantity, ledgerCtx, eventType);
+    return;
+  }
+
+  const fresh = await tx.product.findUnique({
+    where: { id: product.id },
+    include: { variants: { orderBy: { sortOrder: 'asc' } } },
+  });
+
+  if ((fresh.variants ?? []).length === 0) {
+    await tx.product.update({
+      where: { id: product.id },
+      data: { stock: { increment: quantity } },
+    });
+    await ledgerRestock(tx, product.id, null, quantity, ledgerCtx, eventType);
+    return;
+  }
+
+  let remaining = quantity;
+  const variants = await tx.productVariant.findMany({
+    where: { productId: product.id },
+    orderBy: { sortOrder: 'asc' },
+  });
+  for (const v of variants) {
+    if (remaining <= 0) break;
+    const take = Math.min(remaining, 1);
+    await tx.productVariant.update({
+      where: { id: v.id },
+      data: { stock: { increment: take }, stockVersion: { increment: 1 } },
+    });
+    await ledgerRestock(tx, product.id, v.id, take, ledgerCtx, eventType);
+    remaining -= take;
+  }
+  await syncParentStockFromVariants(tx, product.id);
 }

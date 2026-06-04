@@ -21,6 +21,8 @@ import { orderService } from './services/order.service.js';
 import shippingRoutes from './routes/shipping.js';
 import publicRoutes from './routes/public.js';
 import membershipRoutes from './routes/membership.js';
+import wishlistRoutes from './routes/wishlist.js';
+import stockAlertsRoutes from './routes/stock-alerts.js';
 import { stripeWebhook } from './controllers/payment.controller.js';
 import { sendAccessRenewalReminders, sendAccessExpiredNotices } from './services/membership.service.js';
 
@@ -273,6 +275,18 @@ app.listen(PORT, () => {
       })
     );
   }, pendingOrderCleanupMs);
+
+  const engagementMs = 6 * 60 * 60 * 1000;
+  setInterval(() => {
+    import('./services/engagement-jobs.service.js').then(({ sendBackInStockAlerts, sendWishlistPriceDropAlerts }) => {
+      sendBackInStockAlerts().catch((err) => {
+        console.error('[jobs] back-in-stock alerts failed', err);
+      });
+      sendWishlistPriceDropAlerts().catch((err) => {
+        console.error('[jobs] price-drop alerts failed', err);
+      });
+    });
+  }, engagementMs);
 });
 
 process.on('unhandledRejection', (reason) => {

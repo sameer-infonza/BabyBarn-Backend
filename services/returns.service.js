@@ -1,4 +1,12 @@
 import { prisma } from '../lib/prisma.js';
+import { config } from '../config/env.js';
+import { AppError } from '../utils/error-handler.js';
+import { writeAdminAudit } from './audit.service.js';
+import { emailService } from './email.service.js';
+import { getBusinessSettings } from './admin.service.js';
+import { restockOrderLineStock } from './inventory-reservation.js';
+import { refurbishmentService } from './refurbishment.service.js';
+import { markUnitsReturnedForReturn } from './product-unit.service.js';
 
 function isMissingWalletTableError(error) {
   return Boolean(
@@ -199,7 +207,39 @@ export class ReturnsService {
       meta: { from: rr.status, to: status, notes: data.notes },
     });
 
+    if (status === 'RECEIVED') {
+      await prisma.$transaction(async (tx) => {
+        await markUnitsReturnedForReturn(tx, rr.id);
+      });
+    }
+
+    if (status === 'APPROVED' && rr.type === 'STANDARD' && config.standardReturnRestock) {
+      const full = await prisma.returnRequest.findUnique({
+        where: { id: rr.id },
+        include: { orderItem: true },
+      });
+      if (full?.orderItem) {
+        await prisma.$transaction(async (tx) => {
+          const product = await tx.product.findUnique({
+            where: { id: full.orderItem.productId },
+            include: { variants: { orderBy: { sortOrder: 'asc' } } },
+          });
+          if (product) {
+            await restockOrderLineStock(
+              tx,
+              product,
+              full.orderItem.productVariantId,
+              1,
+              { referenceType: 'return', referenceId: returnPublicId, note: 'Standard return approved' },
+              'RESTOCK'
+            );
+          }
+        });
+      }
+    }
+
     if (status === 'APPROVED' && rr.type === 'REFURBISHMENT') {
+      await refurbishmentService.createJobForReturn(rr.id);
       try {
         const wallet = await prisma.storeCreditWallet.upsert({
           where: { userId: rr.userId },

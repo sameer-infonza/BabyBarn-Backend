@@ -26,6 +26,8 @@ const ALL_TEMPLATES = [
   'access-expired',
   'team-invite',
   'contact-inquiry-admin',
+  'back-in-stock',
+  'price-drop',
 ];
 
 describe('brand email templates', () => {

@@ -1,6 +1,7 @@
 import { prisma } from '../lib/prisma.js';
 import { AppError } from '../utils/error-handler.js';
 import { productAvailableStock, variantAvailableStock } from './inventory-reservation.js';
+import { writeInventoryLedger } from './inventory-ledger.service.js';
 
 export const LOW_STOCK_THRESHOLD = parseInt(process.env.LOW_STOCK_THRESHOLD || '10', 10);
 
@@ -79,7 +80,17 @@ async function adjustManualStock(tx, product, userId, { variantPublicId, delta, 
         productVariantId: null,
       },
     });
-    return { applied, variantPublicId: null };
+    await writeInventoryLedger(tx, {
+      productId: product.id,
+      productVariantId: null,
+      quantityDelta: applied,
+      eventType: 'ADJUST',
+      referenceType: 'inventory_adjustment',
+      referenceId: product.publicId,
+      actorUserId: userId,
+      note: reason?.trim() || null,
+    });
+    return { applied, variantPublicId: null, variantDbId: null };
   }
 
   if (!variantPublicId) {
@@ -113,8 +124,18 @@ async function adjustManualStock(tx, product, userId, { variantPublicId, delta, 
       productVariantId: v.id,
     },
   });
+  await writeInventoryLedger(tx, {
+    productId: product.id,
+    productVariantId: v.id,
+    quantityDelta: applied,
+    eventType: 'ADJUST',
+    referenceType: 'inventory_adjustment',
+    referenceId: `${product.publicId}:${v.publicId}`,
+    actorUserId: userId,
+    note: reason?.trim() || null,
+  });
 
-  return { applied, variantPublicId: v.publicId };
+  return { applied, variantPublicId: v.publicId, variantDbId: v.id };
 }
 
 /**
@@ -169,7 +190,9 @@ function flattenProductToSkuLines(p) {
   if (variants.length > 0) {
     return variants.map((v) => {
       const totalStock = v.stock;
-      const stockStatus = stockStatusFromTotal(totalStock);
+      const reservedStock = v.reservedStock ?? 0;
+      const availableStock = variantAvailableStock(v);
+      const stockStatus = stockStatusFromTotal(availableStock);
       return {
         lineKey: `${p.publicId}:${v.publicId}`,
         productId: p.publicId,
@@ -181,6 +204,8 @@ function flattenProductToSkuLines(p) {
         productType: p.productType,
         inventoryModel: p.inventoryModel,
         totalStock,
+        reservedStock,
+        availableStock,
         stockStatus,
         updatedAt: v.updatedAt,
       };
@@ -188,7 +213,9 @@ function flattenProductToSkuLines(p) {
   }
 
   const totalStock = p.stock;
-  const stockStatus = stockStatusFromTotal(totalStock);
+  const reservedStock = p.reservedStock ?? 0;
+  const availableStock = productAvailableStock(p);
+  const stockStatus = stockStatusFromTotal(availableStock);
   return [
     {
       lineKey: `${p.publicId}:simple`,
@@ -201,6 +228,8 @@ function flattenProductToSkuLines(p) {
       productType: p.productType,
       inventoryModel: p.inventoryModel,
       totalStock,
+      reservedStock,
+      availableStock,
       stockStatus,
       updatedAt: p.updatedAt,
     },
@@ -353,63 +382,91 @@ export class InventoryService {
     });
   }
 
-  async listHistory({ page = 1, limit = 20 }) {
-    const skip = (page - 1) * limit;
+  async listHistory({ page = 1, limit = 20, productPublicId = null }) {
+    const { listLedgerHistory } = await import('./inventory-ledger.service.js');
+    const ledger = await listLedgerHistory({ page, limit, productPublicId });
+    return {
+      entries: ledger.entries.map((e) => ({
+        id: e.id,
+        eventType: e.eventType,
+        quantityChange: e.quantityDelta,
+        reason: e.note,
+        referenceType: e.referenceType,
+        referenceId: e.referenceId,
+        createdAt: e.createdAt,
+        product: e.product,
+        variant: e.variant,
+        user: null,
+      })),
+      pagination: ledger.pagination,
+    };
+  }
 
-    const [rows, total] = await Promise.all([
-      prisma.inventoryAdjustment.findMany({
-        skip,
-        take: limit,
+  async getProductTimeline(productPublicId) {
+    const product = await prisma.product.findUnique({
+      where: { publicId: productPublicId },
+      select: { id: true, publicId: true, name: true },
+    });
+    if (!product) throw new AppError(404, 'Product not found');
+
+    const [ledger, units, orderLines] = await Promise.all([
+      prisma.inventoryLedgerEvent.findMany({
+        where: { productId: product.id },
         orderBy: { createdAt: 'desc' },
+        take: 100,
+        include: { productVariant: { select: { publicId: true, sku: true } } },
+      }),
+      prisma.productUnit.findMany({
+        where: { productId: product.id },
+        orderBy: { updatedAt: 'desc' },
+        take: 50,
+        include: { events: { orderBy: { createdAt: 'desc' }, take: 20 } },
+      }),
+      prisma.orderItem.findMany({
+        where: { productId: product.id },
+        orderBy: { createdAt: 'desc' },
+        take: 30,
         include: {
-          product: { select: { publicId: true, name: true, sku: true } },
-          productVariant: { select: { publicId: true, sku: true, combination: true } },
-          user: {
-            select: {
-              publicId: true,
-              email: true,
-              firstName: true,
-              lastName: true,
-            },
-          },
+          order: { select: { publicId: true, orderNumber: true, status: true, paymentStatus: true, createdAt: true } },
         },
       }),
-      prisma.inventoryAdjustment.count(),
     ]);
 
-    const entries = rows.map((r) => ({
-      id: r.publicId,
-      quantityChange: r.quantityChange,
-      reason: r.reason,
-      createdAt: r.createdAt,
-      product: {
-        id: r.product.publicId,
-        name: r.product.name,
-        sku: r.product.sku,
-      },
-      variant: r.productVariant
-        ? {
-            id: r.productVariant.publicId,
-            sku: r.productVariant.sku,
-            combinationLabel: combinationLabel(r.productVariant.combination),
-          }
-        : null,
-      user: {
-        id: r.user.publicId,
-        email: r.user.email,
-        firstName: r.user.firstName,
-        lastName: r.user.lastName,
-      },
-    }));
-
     return {
-      entries,
-      pagination: {
-        total,
-        page,
-        limit,
-        pages: Math.ceil(total / limit) || 1,
-      },
+      product: { id: product.publicId, name: product.name },
+      ledger: ledger.map((e) => ({
+        id: e.publicId,
+        eventType: e.eventType,
+        quantityDelta: e.quantityDelta,
+        referenceType: e.referenceType,
+        referenceId: e.referenceId,
+        createdAt: e.createdAt,
+        variantSku: e.productVariant?.sku ?? null,
+      })),
+      units: units.map((u) => ({
+        id: u.publicId,
+        unitSku: u.unitSku,
+        status: u.status,
+        cycleNumber: u.cycleNumber,
+        purchasedAt: u.purchasedAt,
+        returnedAt: u.returnedAt,
+        relistedAt: u.relistedAt,
+        events: u.events.map((ev) => ({
+          id: ev.publicId,
+          fromStatus: ev.fromStatus,
+          toStatus: ev.toStatus,
+          note: ev.note,
+          createdAt: ev.createdAt,
+        })),
+      })),
+      orders: orderLines.map((li) => ({
+        orderId: li.order.publicId,
+        orderNumber: li.order.orderNumber,
+        quantity: li.quantity,
+        status: li.order.status,
+        paymentStatus: li.order.paymentStatus,
+        createdAt: li.order.createdAt,
+      })),
     };
   }
 }

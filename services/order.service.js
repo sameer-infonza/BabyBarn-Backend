@@ -676,7 +676,10 @@ export class OrderService {
           price: unitApplied,
         });
 
-        await reserveOrderLineStock(tx, product, variantDbId, item.quantity);
+        await reserveOrderLineStock(tx, product, variantDbId, item.quantity, {
+          referenceType: 'order',
+          referenceId: `pending:${user.id}`,
+        });
       }
 
       const created = await tx.order.create({
@@ -778,7 +781,10 @@ export class OrderService {
           include: { variants: { orderBy: { sortOrder: 'asc' } } },
         });
         if (!product) continue;
-        await releaseOrderLineStock(tx, product, line.productVariantId, line.quantity);
+        await releaseOrderLineStock(tx, product, line.productVariantId, line.quantity, {
+          referenceType: 'order',
+          referenceId: orderPublicId,
+        });
       }
 
       if (order.storeCreditApplied > 0) {
@@ -814,7 +820,10 @@ export class OrderService {
           where: { id: line.productId },
           include: { variants: { orderBy: { sortOrder: 'asc' } } },
         });
-        await commitOrderLineStock(tx, product, line.productVariantId, line.quantity);
+        await commitOrderLineStock(tx, product, line.productVariantId, line.quantity, {
+          referenceType: 'order',
+          referenceId: orderPublicId,
+        });
       }
 
       if (order.storeCreditApplied > 0) {
@@ -826,9 +835,15 @@ export class OrderService {
         );
       }
 
-      return tx.order.update({
+      const paid = await tx.order.update({
         where: { id: order.id },
         data: { paymentStatus: 'PAID', status: 'PROCESSING', fulfillmentStatus: 'NEW_ORDER' },
+        include: { orderItems: true },
+      });
+      const { createUnitsForPaidOrder } = await import('./product-unit.service.js');
+      await createUnitsForPaidOrder(tx, paid, paid.orderItems);
+      return tx.order.findUnique({
+        where: { id: order.id },
         include: { orderItems: { include: { product: true } } },
       });
     });
@@ -1072,10 +1087,24 @@ export class OrderService {
       { idempotencyKey: `refund-${orderPublicId}-${amountCents}` }
     );
 
-    const updated = await prisma.order.update({
-      where: { id: order.id },
-      data: { status: 'REFUNDED', paymentStatus: 'REFUNDED' },
-      include: { orderItems: { include: { product: true } }, user: userForOrderList },
+    const updated = await prisma.$transaction(async (tx) => {
+      const withItems = await tx.order.findUnique({
+        where: { id: order.id },
+        include: { orderItems: true },
+      });
+      const { restockPaidOrderInTx } = await import('./inventory-restock.service.js');
+      await restockPaidOrderInTx(tx, withItems, {
+        referenceType: 'order',
+        referenceId: orderPublicId,
+        eventType: 'REFUND_RESTORE',
+        note: 'Stripe refund',
+        actorUserId: null,
+      });
+      return tx.order.update({
+        where: { id: order.id },
+        data: { status: 'REFUNDED', paymentStatus: 'REFUNDED' },
+        include: { orderItems: { include: { product: true } }, user: userForOrderList },
+      });
     });
     await writeAdminAudit({
       actorId: actor?.id,
