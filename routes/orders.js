@@ -46,6 +46,13 @@ router.get(
   (req, res, next) => orderController.getPickupListPdf(req, res, next)
 );
 router.patch(
+  '/admin/:id/items/:itemId/pick',
+  authenticate,
+  authorize('ADMIN', 'ADMIN_TEAM'),
+  requireConsoleModule('orders'),
+  (req, res, next) => orderController.pickOrderItem(req, res).catch(next)
+);
+router.patch(
   '/admin/:id/fulfillment',
   authenticate,
   authorize('ADMIN', 'ADMIN_TEAM'),

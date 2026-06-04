@@ -23,6 +23,7 @@ import {
   buildCheckoutSignatureFromOrder,
 } from '../utils/checkout-signature.js';
 import { buildParcelsForOrder } from './shipping/order-parcels.js';
+import { assertMembershipCheckoutAllowed } from './membership-eligibility.service.js';
 import fs from 'fs';
 import path from 'path';
 import { SHIPPING_LABELS_DIR } from '../utils/product-upload.js';
@@ -97,6 +98,18 @@ function computeAppliedUnitPrice(product, variant, hasAccess) {
   return { unitRetail, unitApplied };
 }
 
+/** Persisted line pricing snapshot for orders and checkout intents. */
+function buildOrderLinePricing(product, variant, effectiveHasAccess) {
+  const { unitRetail, unitApplied } = computeAppliedUnitPrice(product, variant, effectiveHasAccess);
+  const pricingTier =
+    effectiveHasAccess && unitApplied < unitRetail ? 'ACCESS' : 'STANDARD';
+  return {
+    price: unitApplied,
+    retailUnitPrice: unitRetail,
+    pricingTier,
+  };
+}
+
 function isMissingWalletTableError(error) {
   return Boolean(
     error &&
@@ -168,11 +181,34 @@ function resolveSelectedRate(rates, requestedRateId, requestedRate = null) {
   });
 }
 
+/** Match equivalent service tier across rate lists (ACCESS vs standard amounts differ). */
+function matchRateByServiceTier(rates, reference) {
+  const list = Array.isArray(rates) ? rates : [];
+  if (list.length === 0) return null;
+  if (!reference || typeof reference !== 'object') return list[0] || null;
+  const token = String(reference.serviceToken || '').trim().toLowerCase();
+  const level = String(reference.serviceLevel || '').trim().toLowerCase();
+  const provider = String(reference.provider || '').trim().toLowerCase();
+  if (token) {
+    const byToken = list.find((rate) => String(rate?.serviceToken || '').trim().toLowerCase() === token);
+    if (byToken) return byToken;
+  }
+  if (level) {
+    const byLevel = list.find((rate) => String(rate?.serviceLevel || '').trim().toLowerCase() === level);
+    if (byLevel) return byLevel;
+  }
+  if (provider) {
+    const byProvider = list.find((rate) => String(rate?.provider || '').trim().toLowerCase() === provider);
+    if (byProvider) return byProvider;
+  }
+  return list[0] || null;
+}
+
 export class OrderService {
   async calculateCheckoutQuote(userPublicId, payload) {
     const user = await prisma.user.findUnique({
       where: { publicId: userPublicId },
-      select: { id: true, accessMemberUntil: true },
+      select: { id: true, accessMemberUntil: true, babyName: true },
     });
     if (!user) throw new AppError(401, 'Unauthorized');
     const items = Array.isArray(payload?.items) ? payload.items : [];
@@ -180,8 +216,18 @@ export class OrderService {
 
     const now = new Date();
     const hasAccess = Boolean(user.accessMemberUntil && user.accessMemberUntil > now);
+    let includeAccessMembership = Boolean(payload?.includeAccessMembership);
+    if (includeAccessMembership && hasAccess) {
+      includeAccessMembership = false;
+    }
+    if (includeAccessMembership) {
+      await assertMembershipCheckoutAllowed(userPublicId, { intent: 'purchase' });
+    }
+    const effectiveHasAccess = hasAccess || includeAccessMembership;
     let subtotalRetail = 0;
     let subtotalApplied = 0;
+    let memberSubtotalIfAccess = 0;
+    let potentialAccessPricingLineCount = 0;
     const lines = [];
 
     for (const item of items) {
@@ -198,33 +244,75 @@ export class OrderService {
         if (!variant) throw new AppError(404, 'Variant not found');
       }
 
-      const { unitRetail, unitApplied } = computeAppliedUnitPrice(product, variant, hasAccess);
+      const linePricing = buildOrderLinePricing(product, variant, effectiveHasAccess);
+      if (!hasAccess) {
+        const memberLinePricing = buildOrderLinePricing(product, variant, true);
+        memberSubtotalIfAccess += memberLinePricing.price * quantity;
+        if (memberLinePricing.pricingTier === 'ACCESS') {
+          potentialAccessPricingLineCount += 1;
+        }
+      }
 
-      subtotalRetail += unitRetail * quantity;
-      subtotalApplied += unitApplied * quantity;
+      subtotalRetail += linePricing.retailUnitPrice * quantity;
+      subtotalApplied += linePricing.price * quantity;
       lines.push({
         productId: product.publicId,
         variantId: variant?.publicId || null,
         name: product.name,
         quantity,
-        retailUnitPrice: unitRetail,
-        appliedUnitPrice: unitApplied,
-        lineTotal: unitApplied * quantity,
+        retailUnitPrice: linePricing.retailUnitPrice,
+        appliedUnitPrice: linePricing.price,
+        pricingTier: linePricing.pricingTier,
+        lineTotal: linePricing.price * quantity,
         condition: product.productType,
         sizeAgeGroup: product.sizeAgeGroup || null,
       });
     }
 
     const accessDiscount = Math.max(0, subtotalRetail - subtotalApplied);
+    const { getBusinessSettings } = await import('./admin.service.js');
+    const settings = await getBusinessSettings();
+    const accessMembershipAnnualFee = Number(settings.accessMembershipPriceUsd || 50);
+    const accessMembershipFee = includeAccessMembership ? accessMembershipAnnualFee : 0;
     const shippingRates = await shippingService.getRates({
       shippingAddress: payload?.shippingAddress,
       parcels: payload?.parcels,
       preferProviderOnly: false,
       surface: 'checkout',
-      hasAccess,
+      hasAccess: effectiveHasAccess,
     });
     const selectedRate = resolveSelectedRate(shippingRates.rates, payload?.selectedRateId, payload?.selectedRate);
     const shippingCost = Number(selectedRate?.amount || 0);
+
+    let accessSavings = null;
+    if (!hasAccess) {
+      const itemSavings = includeAccessMembership
+        ? accessDiscount
+        : Math.max(0, subtotalApplied - memberSubtotalIfAccess);
+      let shippingSavings = 0;
+      const compareShippingRates = await shippingService.getRates({
+        shippingAddress: payload?.shippingAddress,
+        parcels: payload?.parcels,
+        preferProviderOnly: false,
+        surface: 'checkout',
+        hasAccess: !includeAccessMembership,
+      });
+      const compareRate = matchRateByServiceTier(compareShippingRates.rates, selectedRate);
+      const compareShippingCost = Number(compareRate?.amount || 0);
+      shippingSavings = Math.max(
+        0,
+        includeAccessMembership ? compareShippingCost - shippingCost : shippingCost - compareShippingCost
+      );
+      const totalSavings = Math.round((itemSavings + shippingSavings) * 100) / 100;
+      accessSavings = {
+        itemSavings: Math.round(itemSavings * 100) / 100,
+        shippingSavings: Math.round(shippingSavings * 100) / 100,
+        totalSavings,
+        eligibleLineCount: potentialAccessPricingLineCount,
+        annualFee: accessMembershipAnnualFee,
+        netAnnualCostAfterToday: Math.max(0, Math.round((accessMembershipAnnualFee - totalSavings) * 100) / 100),
+      };
+    }
 
     let availableStoreCredit = 0;
     try {
@@ -241,14 +329,21 @@ export class OrderService {
       availableStoreCredit = 0;
     }
     const requestedStoreCredit = Number(payload?.storeCreditToApply || 0);
-    const storeCreditApplied = Math.max(0, Math.min(requestedStoreCredit, availableStoreCredit, subtotalApplied + shippingCost));
-    const totalPayable = Math.max(0, subtotalApplied + shippingCost - storeCreditApplied);
+    const storeCreditApplied = Math.max(
+      0,
+      Math.min(requestedStoreCredit, availableStoreCredit, subtotalApplied + shippingCost + accessMembershipFee)
+    );
+    const totalPayable = Math.max(0, subtotalApplied + shippingCost + accessMembershipFee - storeCreditApplied);
 
-    const accessPricingLineCount = lines.filter((l) => l.retailUnitPrice > l.appliedUnitPrice).length;
+    const accessPricingLineCount = lines.filter((l) => l.pricingTier === 'ACCESS').length;
 
     return {
-      hasAccess,
+      hasAccess: effectiveHasAccess,
+      includeAccessMembership,
+      accessMembershipFee,
+      accessMembershipAnnualFee: hasAccess ? 0 : accessMembershipAnnualFee,
       accessPricingLineCount,
+      accessSavings,
       lines,
       shippingEstimate: {
         cost: shippingCost,
@@ -266,6 +361,7 @@ export class OrderService {
         subtotalRetail,
         subtotalApplied,
         accessDiscount,
+        accessMembershipFee,
         shippingCost,
         storeCreditAvailable: availableStoreCredit,
         storeCreditApplied,
@@ -667,13 +763,15 @@ export class OrderService {
           assertStockAvailable(product, item.quantity);
         }
 
-        const { unitApplied } = computeAppliedUnitPrice(product, variant, hasAccess);
-        subtotal += unitApplied * item.quantity;
+        const linePricing = buildOrderLinePricing(product, variant, hasAccess);
+        subtotal += linePricing.price * item.quantity;
         lineCreates.push({
           productId: product.id,
           productVariantId: variantDbId,
           quantity: item.quantity,
-          price: unitApplied,
+          price: linePricing.price,
+          retailUnitPrice: linePricing.retailUnitPrice,
+          pricingTier: linePricing.pricingTier,
         });
 
         await reserveOrderLineStock(tx, product, variantDbId, item.quantity, {
@@ -929,13 +1027,16 @@ export class OrderService {
     }
     const mf = membershipFilter && String(membershipFilter).trim();
     if (mf === 'access') {
-      and.push({ user: { accessMemberUntil: { gt: new Date() } } });
-    } else if (mf === 'standard') {
       and.push({
         OR: [
-          { user: { accessMemberUntil: null } },
-          { user: { accessMemberUntil: { lte: new Date() } } },
+          { accessMembershipIncluded: true },
+          { orderItems: { some: { pricingTier: 'ACCESS' } } },
         ],
+      });
+    } else if (mf === 'standard') {
+      and.push({
+        accessMembershipIncluded: false,
+        NOT: { orderItems: { some: { pricingTier: 'ACCESS' } } },
       });
     }
     if (dateFrom || dateTo) {
@@ -1593,6 +1694,95 @@ export class OrderService {
     return updated;
   }
 
+  async pickOrderItem(orderPublicId, itemPublicId, body, actor) {
+    const order = await prisma.order.findUnique({
+      where: { publicId: orderPublicId },
+      include: { orderItems: true },
+    });
+    if (!order) throw new AppError(404, 'Order not found');
+    const line = order.orderItems.find((li) => li.publicId === itemPublicId);
+    if (!line) throw new AppError(404, 'Order item not found');
+
+    const pickedQuantity = Math.max(0, Math.min(Number(body.pickedQuantity ?? 0), line.quantity));
+    const now = pickedQuantity > 0 ? new Date() : null;
+
+    await prisma.orderItem.update({
+      where: { id: line.id },
+      data: {
+        pickedQuantity,
+        pickedAt: pickedQuantity >= line.quantity ? now : pickedQuantity > 0 ? now : null,
+        pickedByUserId: pickedQuantity > 0 && actor?.id ? actor.id : null,
+      },
+    });
+
+    let refreshed = await prisma.order.findUnique({
+      where: { id: order.id },
+      include: {
+        orderItems: {
+          include: {
+            product: {
+              select: {
+                publicId: true,
+                name: true,
+                sku: true,
+                productType: true,
+                imageUrl: true,
+                price: true,
+              },
+            },
+            productVariant: {
+              select: { publicId: true, sku: true, combination: true, priceOverride: true },
+            },
+          },
+        },
+        user: userForOrderList,
+      },
+    });
+
+    const allPicked = refreshed.orderItems.every((li) => li.pickedQuantity >= li.quantity);
+    if (
+      allPicked &&
+      refreshed.fulfillmentStatus === 'ACCEPTED' &&
+      refreshed.paymentStatus === 'PAID'
+    ) {
+      refreshed = await prisma.order.update({
+        where: { id: order.id },
+        data: { fulfillmentStatus: 'PICKUP_READY', pickupReadyAt: new Date() },
+        include: {
+          orderItems: {
+            include: {
+              product: {
+                select: {
+                  publicId: true,
+                  name: true,
+                  sku: true,
+                  productType: true,
+                  imageUrl: true,
+                  price: true,
+                },
+              },
+              productVariant: {
+                select: { publicId: true, sku: true, combination: true, priceOverride: true },
+              },
+            },
+          },
+          user: userForOrderList,
+        },
+      });
+    }
+
+    await writeAdminAudit({
+      actorId: actor?.id,
+      actorEmail: actor?.email,
+      action: 'ORDER_ITEM_PICKED',
+      entityType: 'OrderItem',
+      entityId: itemPublicId,
+      meta: { orderPublicId, pickedQuantity, quantity: line.quantity },
+    });
+
+    return refreshed;
+  }
+
   async bulkPatchOrderFulfillment({ orderPublicIds, action }, actor) {
     const results = [];
     for (const pid of orderPublicIds) {
@@ -1611,7 +1801,12 @@ export class OrderService {
       where: { publicId: { in: orderPublicIds } },
       include: {
         user: { select: { email: true, firstName: true, lastName: true, phone: true } },
-        orderItems: { include: { product: true } },
+        orderItems: {
+          include: {
+            product: true,
+            productVariant: { select: { sku: true } },
+          },
+        },
       },
     });
     if (!orders.length) throw new AppError(400, 'No matching orders');
@@ -1662,12 +1857,21 @@ export class OrderService {
   async getOrderPdfBuffer(orderPublicId, kind) {
     const order = await prisma.order.findUnique({
       where: { publicId: orderPublicId },
-      include: { orderItems: { include: { product: true } }, user: true },
+      include: {
+        orderItems: { include: { product: true, productVariant: { select: { sku: true } } } },
+        user: true,
+      },
     });
     if (!order) throw new AppError(404, 'Order not found');
     if (kind === 'invoice') return orderDocuments.renderInvoicePdfBuffer(order);
     if (kind === 'packing') return orderDocuments.renderPackingSlipPdfBuffer(order);
     if (kind === 'summary') return orderDocuments.renderShippingSummaryPdfBuffer(order);
+    if (kind === 'pick-list') {
+      return orderDocuments.renderPickupListPdfBuffer({
+        title: `Pick list — ${order.orderNumber || order.publicId}`,
+        orders: [order],
+      });
+    }
     throw new AppError(400, 'Unknown PDF kind', 'PDF_KIND_INVALID');
   }
 
@@ -1758,4 +1962,4 @@ export class OrderService {
 
 export const orderService = new OrderService();
 
-export { computeAppliedUnitPrice, resolveSelectedRate, selectedRateUpdateData };
+export { computeAppliedUnitPrice, buildOrderLinePricing, resolveSelectedRate, selectedRateUpdateData };

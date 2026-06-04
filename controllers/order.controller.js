@@ -14,6 +14,7 @@ import {
   orderFulfillmentActionSchema,
   orderBulkFulfillmentSchema,
   pickupListCreateSchema,
+  orderItemPickSchema,
 } from '../schemas/index.js';
 import { toPublicJson } from '../utils/serialize.js';
 
@@ -258,6 +259,13 @@ export class OrderController {
     const { id } = req.params;
     const body = await validate(orderFulfillmentActionSchema, req.body);
     const order = await orderService.patchOrderFulfillment(id, body, adminActor(req));
+    res.status(200).json({ success: true, data: toPublicJson(order) });
+  }
+
+  async pickOrderItem(req, res) {
+    const { id, itemId } = req.params;
+    const body = await validate(orderItemPickSchema, req.body);
+    const order = await orderService.pickOrderItem(id, itemId, body, adminActor(req));
     res.status(200).json({ success: true, data: toPublicJson(order) });
   }
 

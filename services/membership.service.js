@@ -175,6 +175,105 @@ export async function completeMembershipPayment(session) {
   return { handled: true, flow: 'membership', paymentType, accessNumber };
 }
 
+/** ACCESS purchased in the same payment as an order checkout intent. */
+export async function completeMembershipFromBundledCheckout({
+  userId,
+  userPublicId,
+  amountUsd,
+  stripeReferenceId,
+  babyName,
+  shippingAddress,
+}) {
+  const ref = String(stripeReferenceId || '').trim();
+  if (ref) {
+    const existingPayment = await prisma.membershipPayment.findFirst({
+      where: { stripeSessionId: ref },
+    });
+    if (existingPayment) return existingPayment;
+  }
+
+  const user = await prisma.user.findUnique({
+    where: { id: userId },
+    select: {
+      id: true,
+      email: true,
+      firstName: true,
+      lastName: true,
+      accessNumber: true,
+      accessMemberUntil: true,
+      babyName: true,
+    },
+  });
+  if (!user) return null;
+
+  if (babyName || shippingAddress) {
+    await prisma.user.update({
+      where: { id: user.id },
+      data: {
+        ...(babyName ? { babyName: String(babyName).trim() } : {}),
+        ...(shippingAddress ? { membershipShippingAddressJson: shippingAddress } : {}),
+      },
+    });
+  }
+
+  const days = parseInt(process.env.ACCESS_MEMBERSHIP_DAYS || '365', 10);
+  const now = new Date();
+  const wasActive = user.accessMemberUntil && user.accessMemberUntil > now;
+  const base =
+    user.accessMemberUntil && user.accessMemberUntil > now
+      ? new Date(user.accessMemberUntil)
+      : now;
+  const until = new Date(base);
+  until.setUTCDate(until.getUTCDate() + days);
+
+  const accessNumber = user.accessNumber || (await generateUniqueAccessNumber());
+  const paymentType = wasActive ? 'RENEWAL' : 'PURCHASE';
+  const settings = await getBusinessSettings();
+
+  const membershipPayment = await prisma.$transaction(async (tx) => {
+    await tx.user.update({
+      where: { id: user.id },
+      data: {
+        accessMemberUntil: until,
+        accessNumber,
+        accessRenewalReminderSentAt: null,
+      },
+    });
+    return tx.membershipPayment.create({
+      data: {
+        userId: user.id,
+        type: paymentType,
+        amount: amountUsd > 0 ? amountUsd : settings.accessMembershipPriceUsd,
+        stripeSessionId: ref || null,
+        accessValidUntil: until,
+      },
+    });
+  });
+
+  const name = [user.firstName, user.lastName].filter(Boolean).join(' ') || 'there';
+  try {
+    await emailService.sendTemplate({
+      to: user.email,
+      template: paymentType === 'RENEWAL' ? 'access-renewal' : 'access-purchase',
+      context: {
+        name,
+        accessNumber,
+        amount: `$${Number(membershipPayment.amount).toFixed(2)}`,
+        validUntil: until.toLocaleDateString('en-US', {
+          month: 'long',
+          day: 'numeric',
+          year: 'numeric',
+        }),
+        actionUrl: `${config.frontend.customerUrl}/dashboard/access`,
+      },
+    });
+  } catch (err) {
+    console.error('[membership] bundled checkout email failed', err);
+  }
+
+  return membershipPayment;
+}
+
 export async function listMembershipPaymentsForUser(userPublicId) {
   const user = await prisma.user.findUnique({
     where: { publicId: userPublicId },

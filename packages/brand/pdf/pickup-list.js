@@ -19,13 +19,17 @@ function flattenRows(orders) {
       : [{ quantity: 0, product: { name: '(no items)' } }];
     for (const li of items) {
       n += 1;
+      const pickedQty = Number(li.pickedQuantity ?? 0);
+      const qty = Number(li.quantity) || 0;
       rows.push({
         n,
         orderRef: ref,
         customer,
         product: li.product?.name || 'Item',
         sku: li.productVariant?.sku || li.product?.sku || '—',
-        qty: Number(li.quantity) || 0,
+        qty,
+        plan: li.pricingTier === 'ACCESS' ? 'ACCESS' : 'Standard',
+        picked: pickedQty >= qty && qty > 0 ? 'Yes' : pickedQty > 0 ? `${pickedQty}/${qty}` : 'No',
       });
     }
   }
@@ -54,8 +58,10 @@ export function renderPickupListLayout(doc, { brand, title, orders }) {
     { key: 'orderRef', label: 'Order', w: 78, align: 'left' },
     { key: 'customer', label: 'Customer', w: 108, align: 'left' },
     { key: 'product', label: 'Product', w: 0, align: 'left' }, // flex
-    { key: 'sku', label: 'SKU', w: 88, align: 'left' },
-    { key: 'qty', label: 'Qty', w: 32, align: 'center' },
+    { key: 'sku', label: 'SKU', w: 72, align: 'left' },
+    { key: 'qty', label: 'Qty', w: 28, align: 'center' },
+    { key: 'plan', label: 'Plan', w: 52, align: 'left' },
+    { key: 'picked', label: 'Picked', w: 44, align: 'center' },
   ];
   const fixedW = cols.reduce((s, col) => s + (col.w || 0), 0);
   const flexCol = cols.find((col) => col.w === 0);

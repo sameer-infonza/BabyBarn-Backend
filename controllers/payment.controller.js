@@ -57,6 +57,9 @@ export async function orderCheckout(req, res, next) {
       selectedRateId: body.selectedRateId,
       selectedRate: body.selectedRate,
       storeCreditToApply: body.storeCreditToApply,
+      orderId: body.orderId,
+      includeAccessMembership: body.includeAccessMembership,
+      babyName: body.babyName,
     });
     res.status(200).json({ success: true, data: toPublicJson(data) });
   } catch (e) {
@@ -79,6 +82,9 @@ export async function orderPaymentIntent(req, res, next) {
       selectedRate: body.selectedRate,
       storeCreditToApply: body.storeCreditToApply,
       saveCard: body.saveCard,
+      orderId: body.orderId,
+      includeAccessMembership: body.includeAccessMembership,
+      babyName: body.babyName,
     });
     res.status(200).json({ success: true, data: toPublicJson(data) });
   } catch (e) {

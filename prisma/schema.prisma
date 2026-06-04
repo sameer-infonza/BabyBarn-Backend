@@ -52,6 +52,11 @@ enum ReturnStatus {
   REJECTED
 }
 
+enum OrderItemPricingTier {
+  STANDARD
+  ACCESS
+}
+
 enum StoreCreditTxnType {
   EARNED
   REDEEMED
@@ -143,6 +148,7 @@ model User {
   storeCreditWallet      StoreCreditWallet?
   refreshTokens          RefreshToken[]
   membershipPayments     MembershipPayment[]
+  orderItemsPicked       OrderItem[]           @relation("OrderItemPickedBy")
   checkoutIntents      CheckoutIntent[]
   wishlistItems        WishlistItem[]
   stockAlertSubscriptions StockAlertSubscription[]
@@ -181,6 +187,7 @@ model MembershipPayment {
   stripeSessionId String?
   paidAt    DateTime @default(now())
   accessValidUntil DateTime?
+  bundledOrders    Order[]
 
   @@index([userId])
   @@index([paidAt])
@@ -372,6 +379,9 @@ model CheckoutIntent {
   stripePaymentIntentId   String?              @unique
   orderPublicId           String?              @unique
   expiresAt               DateTime?
+  includeAccessMembership Boolean              @default(false)
+  accessMembershipAmount  Float                @default(0)
+  membershipBabyName      String?
 
   user  User                 @relation(fields: [userId], references: [id], onDelete: Cascade)
   lines CheckoutIntentLine[]
@@ -391,6 +401,8 @@ model CheckoutIntentLine {
   productVariantId Int?
   quantity         Int
   price            Float
+  retailUnitPrice  Float?
+  pricingTier      OrderItemPricingTier @default(STANDARD)
 
   checkoutIntent CheckoutIntent @relation(fields: [checkoutIntentId], references: [id], onDelete: Cascade)
   product        Product        @relation(fields: [productId], references: [id], onDelete: Restrict)
@@ -447,6 +459,9 @@ model Order {
   stripeCheckoutSessionId  String?            @unique
   stripePaymentIntentId    String?            @unique
   storeCreditApplied       Float              @default(0)
+  accessMembershipIncluded Boolean            @default(false)
+  membershipPaymentId      Int?
+  membershipPayment        MembershipPayment? @relation(fields: [membershipPaymentId], references: [id], onDelete: SetNull)
 
   cancellationReviewStatus  CancellationReviewStatus @default(NONE)
   cancellationRequestedAt   DateTime?
@@ -526,10 +541,16 @@ model OrderItem {
   productVariantId Int?
   quantity  Int
   price     Float
+  pricingTier     OrderItemPricingTier @default(STANDARD)
+  retailUnitPrice Float?
+  pickedQuantity  Int      @default(0)
+  pickedAt        DateTime?
+  pickedByUserId  Int?
 
   order   Order   @relation(fields: [orderId], references: [id], onDelete: Cascade)
   product Product @relation(fields: [productId], references: [id], onDelete: Cascade)
   productVariant ProductVariant? @relation(fields: [productVariantId], references: [id], onDelete: SetNull)
+  pickedBy User? @relation("OrderItemPickedBy", fields: [pickedByUserId], references: [id], onDelete: SetNull)
   returnRequests ReturnRequest[]
 
   createdAt DateTime @default(now())
@@ -538,6 +559,7 @@ model OrderItem {
   @@index([orderId])
   @@index([productId])
   @@index([productVariantId])
+  @@index([pickedByUserId])
 }
 
 model ReturnRequest {

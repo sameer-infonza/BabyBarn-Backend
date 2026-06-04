@@ -59,7 +59,12 @@ function toStripeAppError(error, code, flow = 'order') {
 async function ensureCheckoutPaymentIntent(stripe, checkoutIntent, user, opts = {}) {
   const refreshed = await prisma.checkoutIntent.findUnique({
     where: { id: checkoutIntent.id },
-    select: { totalAmount: true, publicId: true, stripePaymentIntentId: true },
+    select: {
+      totalAmount: true,
+      publicId: true,
+      stripePaymentIntentId: true,
+      includeAccessMembership: true,
+    },
   });
   const payable = Number(refreshed?.totalAmount ?? checkoutIntent.totalAmount);
   const amountCents = Math.round(payable * 100);
@@ -76,6 +81,8 @@ async function ensureCheckoutPaymentIntent(stripe, checkoutIntent, user, opts = 
     metadata: {
       flow: 'order',
       checkoutIntentPublicId,
+      includeAccessMembership:
+        refreshed?.includeAccessMembership || checkoutIntent.includeAccessMembership ? 'true' : 'false',
     },
     ...(opts.saveCard ? { setup_future_usage: 'off_session' } : {}),
   };
@@ -483,10 +490,36 @@ export async function createOrderCheckoutSession(userPublicId, items, opts = {})
     selectedRate: opts.selectedRate,
     storeCreditToApply: opts.storeCreditToApply,
     checkoutIntentPublicId: opts.orderId,
+    includeAccessMembership: opts.includeAccessMembership,
+    membershipBabyName: opts.babyName,
+    babyName: opts.babyName,
   });
 
   const successUrl = `${config.storeUrl}/checkout/success?session_id={CHECKOUT_SESSION_ID}`;
   const cancelUrl = `${config.storeUrl}/checkout/error?reason=cancelled`;
+
+  const lineItems = checkoutIntent.lines.map((line) => ({
+    quantity: line.quantity,
+    price_data: {
+      currency: 'usd',
+      unit_amount: Math.round(Number(line.price) * 100),
+      product_data: {
+        name: line.product.name,
+      },
+    },
+  }));
+  if (checkoutIntent.includeAccessMembership && Number(checkoutIntent.accessMembershipAmount) > 0) {
+    lineItems.push({
+      quantity: 1,
+      price_data: {
+        currency: 'usd',
+        unit_amount: Math.round(Number(checkoutIntent.accessMembershipAmount) * 100),
+        product_data: {
+          name: 'Baby Barn ACCESS Membership (1 year)',
+        },
+      },
+    });
+  }
 
   const session = await createCheckoutSessionWithOptionalTransfer(
     stripe,
@@ -494,19 +527,11 @@ export async function createOrderCheckoutSession(userPublicId, items, opts = {})
     mode: 'payment',
     customer_email: user.email,
     customer_creation: 'always',
-    line_items: checkoutIntent.lines.map((line) => ({
-      quantity: line.quantity,
-      price_data: {
-        currency: 'usd',
-        unit_amount: Math.round(Number(line.price) * 100),
-        product_data: {
-          name: line.product.name,
-        },
-      },
-    })),
+    line_items: lineItems,
     metadata: {
       flow: 'order',
       checkoutIntentPublicId: checkoutIntent.publicId,
+      includeAccessMembership: checkoutIntent.includeAccessMembership ? 'true' : 'false',
     },
     success_url: successUrl,
     cancel_url: cancelUrl,
@@ -660,6 +685,9 @@ export async function createOrderPaymentIntent(userPublicId, items, opts = {}) {
     selectedRate: opts.selectedRate,
     storeCreditToApply: opts.storeCreditToApply,
     checkoutIntentPublicId: opts.orderId,
+    includeAccessMembership: opts.includeAccessMembership,
+    membershipBabyName: opts.babyName,
+    babyName: opts.babyName,
   });
 
   return ensureCheckoutPaymentIntent(stripe, checkoutIntent, user, opts);

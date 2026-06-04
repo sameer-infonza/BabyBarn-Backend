@@ -159,6 +159,8 @@ export const createOrderSchema = z.object({
   selectedRate: checkoutSelectedRateSchema.optional(),
   storeCreditToApply: z.number().min(0).optional(),
   saveCard: z.boolean().optional(),
+  includeAccessMembership: z.boolean().optional(),
+  babyName: z.string().trim().min(1).max(120).optional(),
   /** Reuse in-progress checkout (CheckoutIntent publicId; legacy clients may still send orderId). */
   orderId: z.string().min(1).optional(),
 });
@@ -175,6 +177,8 @@ export const checkoutQuoteSchema = z.object({
   parcels: z.array(checkoutParcelSchema).optional(),
   selectedRateId: z.string().min(1).optional(),
   storeCreditToApply: z.number().min(0).optional(),
+  includeAccessMembership: z.boolean().optional(),
+  babyName: z.string().trim().min(1).max(120).optional(),
 });
 
 export const trackingUpdateSchema = z.object({
@@ -263,6 +267,10 @@ export const orderBulkFulfillmentSchema = z.object({
 export const pickupListCreateSchema = z.object({
   title: z.string().max(200).optional(),
   orderPublicIds: z.array(z.string().min(1)).min(1).max(200),
+});
+
+export const orderItemPickSchema = z.object({
+  pickedQuantity: z.number().int().min(0),
 });
 
 export const returnRequestCreateSchema = z

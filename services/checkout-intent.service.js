@@ -15,11 +15,14 @@ import {
 import { walletService } from './wallet.service.js';
 import { shippingService } from './shipping.service.js';
 import {
-  computeAppliedUnitPrice,
+  buildOrderLinePricing,
   resolveSelectedRate,
   selectedRateUpdateData,
 } from './order.service.js';
+import { getBusinessSettings } from './admin.service.js';
+import { assertMembershipCheckoutAllowed } from './membership-eligibility.service.js';
 import { assignOrderNumber, placeholderOrderNumber } from '../utils/order-number.js';
+import { completeMembershipFromBundledCheckout } from './membership.service.js';
 import {
   buildCheckoutSignature,
   buildCheckoutSignatureFromOrder,
@@ -40,6 +43,8 @@ function checkoutSignature(items, opts = {}) {
     selectedRateId: opts.selectedRateId,
     storeCreditToApply: opts.storeCreditToApply,
     shippingAddress: opts.shippingAddress,
+    includeAccessMembership: opts.includeAccessMembership,
+    babyName: opts.membershipBabyName || opts.babyName,
   });
 }
 
@@ -163,7 +168,7 @@ export class CheckoutIntentService {
   async createCheckoutIntent(userPublicId, items, opts = {}) {
     const user = await db().user.findUnique({
       where: { publicId: userPublicId },
-      select: { id: true, accessMemberUntil: true },
+      select: { id: true, accessMemberUntil: true, babyName: true },
     });
     if (!user) {
       throw new AppError(401, 'Unauthorized');
@@ -171,7 +176,28 @@ export class CheckoutIntentService {
 
     const now = new Date();
     const hasAccess = Boolean(user.accessMemberUntil && user.accessMemberUntil > now);
-    const signature = checkoutSignature(items, opts);
+    let includeAccessMembership = Boolean(opts.includeAccessMembership);
+    if (includeAccessMembership && hasAccess) {
+      includeAccessMembership = false;
+    }
+    if (includeAccessMembership) {
+      await assertMembershipCheckoutAllowed(userPublicId, { intent: 'purchase' });
+      const babyName = String(opts.membershipBabyName || opts.babyName || user.babyName || '').trim();
+      if (!babyName) {
+        throw new AppError(400, 'Baby name is required when adding ACCESS at checkout', 'MEMBERSHIP_BABY_NAME_REQUIRED');
+      }
+    }
+
+    const effectiveHasAccess = hasAccess || includeAccessMembership;
+    const settings = await getBusinessSettings();
+    const accessMembershipAmount = includeAccessMembership
+      ? Number(settings.accessMembershipPriceUsd || 50)
+      : 0;
+    const membershipBabyName = includeAccessMembership
+      ? String(opts.membershipBabyName || opts.babyName || user.babyName || '').trim()
+      : null;
+
+    const signature = checkoutSignature(items, { ...opts, includeAccessMembership, membershipBabyName });
     const expiresAt = new Date(Date.now() + config.pendingOrderTtlMinutes * 60 * 1000);
 
     let subtotal = 0;
@@ -218,13 +244,15 @@ export class CheckoutIntentService {
           assertStockAvailable(product, item.quantity);
         }
 
-        const { unitApplied } = computeAppliedUnitPrice(product, variant, hasAccess);
-        subtotal += unitApplied * item.quantity;
+        const linePricing = buildOrderLinePricing(product, variant, effectiveHasAccess);
+        subtotal += linePricing.price * item.quantity;
         lineCreates.push({
           productId: product.id,
           productVariantId: variantDbId,
           quantity: item.quantity,
-          price: unitApplied,
+          price: linePricing.price,
+          retailUnitPrice: linePricing.retailUnitPrice,
+          pricingTier: linePricing.pricingTier,
         });
 
         await reserveOrderLineStock(tx, product, variantDbId, item.quantity, {
@@ -240,8 +268,11 @@ export class CheckoutIntentService {
           status: 'PENDING',
           subtotal,
           shippingCost: 0,
-          totalAmount: subtotal,
+          totalAmount: subtotal + accessMembershipAmount,
           storeCreditApplied: 0,
+          includeAccessMembership,
+          accessMembershipAmount,
+          membershipBabyName,
           shippingAddressJson: opts.shippingAddress ?? null,
           billingAddressJson: opts.billingAddress ?? null,
           expiresAt,
@@ -260,7 +291,7 @@ export class CheckoutIntentService {
         parcels: opts.parcels,
         preferProviderOnly: false,
         surface: 'checkout',
-        hasAccess,
+        hasAccess: effectiveHasAccess,
       });
       selectedRate = resolveSelectedRate(shippingRates.rates, opts.selectedRateId, opts.selectedRate);
       shippingCost = Number(selectedRate?.amount || 0);
@@ -280,7 +311,7 @@ export class CheckoutIntentService {
       throw error;
     }
 
-    let totalAmount = subtotal + shippingCost;
+    let totalAmount = subtotal + shippingCost + accessMembershipAmount;
     await db().checkoutIntent.update({
       where: { id: intent.id },
       data: {
@@ -292,6 +323,7 @@ export class CheckoutIntentService {
     });
     intent.shippingCost = shippingCost;
     intent.totalAmount = totalAmount;
+    intent.accessMembershipAmount = accessMembershipAmount;
 
     if (opts.storeCreditToApply && Number(opts.storeCreditToApply) > 0) {
       try {
@@ -380,12 +412,15 @@ export class CheckoutIntentService {
           selectedRateAmount: intent.selectedRateAmount,
           selectedRateCurrency: intent.selectedRateCurrency,
           selectedRateEstimatedDays: intent.selectedRateEstimatedDays,
+          accessMembershipIncluded: Boolean(intent.includeAccessMembership),
           orderItems: {
             create: intent.lines.map((line) => ({
               productId: line.productId,
               productVariantId: line.productVariantId,
               quantity: line.quantity,
               price: line.price,
+              retailUnitPrice: line.retailUnitPrice ?? line.price,
+              pricingTier: line.pricingTier || 'STANDARD',
             })),
           },
         },
@@ -427,9 +462,27 @@ export class CheckoutIntentService {
 
       return tx.order.findUnique({
         where: { id: created.id },
-        include: { orderItems: { include: { product: true } } },
+        include: { orderItems: { include: { product: true } }, user: { select: { publicId: true } } },
       });
     });
+
+    if (existing.includeAccessMembership && order) {
+      const membershipPayment = await completeMembershipFromBundledCheckout({
+        userId: existing.userId,
+        userPublicId: order.user?.publicId,
+        amountUsd: Number(existing.accessMembershipAmount || 0),
+        stripeReferenceId: existing.stripePaymentIntentId || checkoutIntentPublicId,
+        babyName: existing.membershipBabyName,
+        shippingAddress: existing.shippingAddressJson,
+      });
+      if (membershipPayment?.id) {
+        order = await db().order.update({
+          where: { publicId: order.publicId },
+          data: { membershipPaymentId: membershipPayment.id },
+          include: { orderItems: { include: { product: true } } },
+        });
+      }
+    }
 
     return order;
   }

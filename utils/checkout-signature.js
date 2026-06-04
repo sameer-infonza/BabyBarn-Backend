@@ -2,7 +2,14 @@
  * Stable fingerprint for checkout cart + delivery + rate + credit.
  * Used to reuse one pending order per checkout attempt (not one per PI API call).
  */
-export function buildCheckoutSignature({ items, selectedRateId, storeCreditToApply, shippingAddress }) {
+export function buildCheckoutSignature({
+  items,
+  selectedRateId,
+  storeCreditToApply,
+  shippingAddress,
+  includeAccessMembership,
+  babyName,
+}) {
   const normalizedItems = [...items]
     .map((item) => [item.productId, item.variantId || '', item.quantity])
     .sort((a, b) => {
@@ -24,6 +31,8 @@ export function buildCheckoutSignature({ items, selectedRateId, storeCreditToApp
     rate: selectedRateId || '',
     credit: Number(storeCreditToApply || 0).toFixed(2),
     ship,
+    access: includeAccessMembership ? '1' : '0',
+    baby: String(babyName || '').trim().toLowerCase(),
   });
 }
 
@@ -54,5 +63,7 @@ export function buildCheckoutSignatureFromOrder(order, orderItems) {
     rate: order.selectedRateId || '',
     credit: Number(order.storeCreditApplied || 0).toFixed(2),
     ship,
+    access: order.includeAccessMembership ? '1' : '0',
+    baby: String(order.membershipBabyName || '').trim().toLowerCase(),
   });
 }
