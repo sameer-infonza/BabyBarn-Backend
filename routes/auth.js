@@ -1,6 +1,6 @@
 import { Router } from 'express';
 import { authController } from '../controllers/auth.controller.js';
-import { authenticate } from '../middleware/auth.js';
+import { authenticate, requireFullAccount } from '../middleware/auth.js';
 
 const router = Router();
 
@@ -19,23 +19,25 @@ router.get('/verify-email', (req, res, next) =>
 router.post('/resend-verification', (req, res, next) =>
   authController.resendVerification(req, res).catch(next)
 );
-router.get('/me', authenticate, (req, res, next) => authController.getProfile(req, res).catch(next));
-router.patch('/me', authenticate, (req, res, next) =>
+router.get('/me', authenticate, requireFullAccount, (req, res, next) =>
+  authController.getProfile(req, res).catch(next)
+);
+router.patch('/me', authenticate, requireFullAccount, (req, res, next) =>
   authController.updateProfile(req, res).catch(next)
 );
-router.post('/change-password', authenticate, (req, res, next) =>
+router.post('/change-password', authenticate, requireFullAccount, (req, res, next) =>
   authController.changePassword(req, res).catch(next)
 );
-router.get('/addresses', authenticate, (req, res, next) =>
+router.get('/addresses', authenticate, requireFullAccount, (req, res, next) =>
   authController.listAddresses(req, res).catch(next)
 );
-router.post('/addresses', authenticate, (req, res, next) =>
+router.post('/addresses', authenticate, requireFullAccount, (req, res, next) =>
   authController.createAddress(req, res).catch(next)
 );
-router.patch('/addresses/:addressId', authenticate, (req, res, next) =>
+router.patch('/addresses/:addressId', authenticate, requireFullAccount, (req, res, next) =>
   authController.updateAddress(req, res).catch(next)
 );
-router.delete('/addresses/:addressId', authenticate, (req, res, next) =>
+router.delete('/addresses/:addressId', authenticate, requireFullAccount, (req, res, next) =>
   authController.deleteAddress(req, res).catch(next)
 );
 

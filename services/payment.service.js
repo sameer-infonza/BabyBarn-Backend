@@ -5,6 +5,7 @@ import { AppError } from '../utils/error-handler.js';
 import { orderService } from './order.service.js';
 import { checkoutIntentService } from './checkout-intent.service.js';
 import { emailService } from './email.service.js';
+import { buildOrderTrackingUrl } from '../lib/order-tracking-token.js';
 
 async function getMembershipUnitAmountCents() {
   try {
@@ -64,6 +65,7 @@ async function ensureCheckoutPaymentIntent(stripe, checkoutIntent, user, opts = 
       publicId: true,
       stripePaymentIntentId: true,
       includeAccessMembership: true,
+      contactEmail: true,
     },
   });
   const payable = Number(refreshed?.totalAmount ?? checkoutIntent.totalAmount);
@@ -77,7 +79,7 @@ async function ensureCheckoutPaymentIntent(stripe, checkoutIntent, user, opts = 
     amount: amountCents,
     currency: 'usd',
     payment_method_types: ['card'],
-    receipt_email: user.email || undefined,
+    receipt_email: refreshed?.contactEmail || checkoutIntent.contactEmail || user.email || undefined,
     metadata: {
       flow: 'order',
       checkoutIntentPublicId,
@@ -493,6 +495,8 @@ export async function createOrderCheckoutSession(userPublicId, items, opts = {})
     includeAccessMembership: opts.includeAccessMembership,
     membershipBabyName: opts.babyName,
     babyName: opts.babyName,
+    contactEmail: opts.contactEmail,
+    contactPhone: opts.contactPhone,
   });
 
   const successUrl = `${config.storeUrl}/checkout/success?session_id={CHECKOUT_SESSION_ID}`;
@@ -553,21 +557,28 @@ async function sendOrderConfirmationEmail(orderPublicId) {
     where: { publicId: orderPublicId },
     include: {
       orderItems: { include: { product: { select: { name: true } } } },
-      user: { select: { email: true, firstName: true, lastName: true } },
+      user: { select: { email: true, firstName: true, lastName: true, isGuest: true } },
     },
   });
-  if (!orderDetail?.user?.email) return;
+  const recipientEmail = orderDetail?.contactEmail || orderDetail?.user?.email;
+  if (!recipientEmail) return;
 
   const subtotal = orderDetail.orderItems.reduce(
     (sum, li) => sum + Number(li.price) * li.quantity,
     0
   );
+  const orderRef = orderDetail.orderNumber || orderDetail.publicId;
+  const trackingUrl = buildOrderTrackingUrl({ orderNumber: orderRef, email: recipientEmail });
+  const dashboardUrl = orderDetail.user?.isGuest
+    ? trackingUrl
+    : `${config.frontend.customerUrl}/dashboard/orders/${orderDetail.publicId}`;
+
   await emailService.sendTemplate({
-    to: orderDetail.user.email,
+    to: recipientEmail,
     template: 'order-confirmation',
     context: {
       name: [orderDetail.user.firstName, orderDetail.user.lastName].filter(Boolean).join(' '),
-      orderId: orderDetail.orderNumber || orderDetail.publicId,
+      orderId: orderRef,
       lines: orderDetail.orderItems.map((li) => ({
         name: li.product?.name || 'Item',
         qty: li.quantity,
@@ -576,7 +587,8 @@ async function sendOrderConfirmationEmail(orderPublicId) {
       subtotal: `$${subtotal.toFixed(2)}`,
       shipping: `$${Number(orderDetail.shippingCost || 0).toFixed(2)}`,
       total: `$${Number(orderDetail.totalAmount).toFixed(2)}`,
-      actionUrl: `${config.frontend.customerUrl}/dashboard/orders/${orderDetail.publicId}`,
+      actionUrl: dashboardUrl,
+      trackingUrl,
     },
   });
 }
@@ -688,6 +700,8 @@ export async function createOrderPaymentIntent(userPublicId, items, opts = {}) {
     includeAccessMembership: opts.includeAccessMembership,
     membershipBabyName: opts.babyName,
     babyName: opts.babyName,
+    contactEmail: opts.contactEmail,
+    contactPhone: opts.contactPhone,
   });
 
   return ensureCheckoutPaymentIntent(stripe, checkoutIntent, user, opts);
@@ -741,6 +755,7 @@ export async function getCheckoutSessionSummary(userPublicId, sessionId) {
         email: true,
         firstName: true,
         lastName: true,
+        isGuest: true,
       },
     },
   };
@@ -857,8 +872,19 @@ export async function getCheckoutSessionSummary(userPublicId, sessionId) {
     return sum;
   }, 0);
 
+  const recipientEmail =
+    session?.customer_details?.email || order.contactEmail || order.user?.email || user.email;
+  const orderRef = order.orderNumber || order.publicId;
+  const placedAsGuest = Boolean(order.placedAsGuest || order.user?.isGuest);
+  const trackingUrl =
+    recipientEmail && orderRef
+      ? buildOrderTrackingUrl({ orderNumber: orderRef, email: recipientEmail })
+      : null;
+
   return {
     sessionId: ref,
+    placedAsGuest,
+    trackingUrl,
     order: {
       id: order.publicId,
       orderNumber: order.orderNumber,
@@ -891,7 +917,7 @@ export async function getCheckoutSessionSummary(userPublicId, sessionId) {
     payment: {
       sessionStatus: session?.status || null,
       paymentStatus: session?.payment_status || order.paymentStatus,
-      customerEmail: session?.customer_details?.email || order.user?.email || user.email,
+      customerEmail: recipientEmail,
       customerName:
         session?.customer_details?.name ||
         [order.user?.firstName, order.user?.lastName].filter(Boolean).join(' ') ||

@@ -48,6 +48,7 @@ function toPublicUser(user) {
     accessNumber: user.accessNumber ?? undefined,
     babyName: user.babyName ?? undefined,
     membershipShippingAddressJson: user.membershipShippingAddressJson ?? undefined,
+    isGuest: Boolean(user.isGuest),
   };
   if (roleName === 'ADMIN' || roleName === 'ADMIN_TEAM') {
     out.adminModules = user.adminModules !== undefined ? user.adminModules : null;
@@ -104,9 +105,41 @@ export class AuthService {
   }
 
   async register(email, password, firstName, lastName) {
-    const existingUser = await prisma.user.findUnique({ where: { email } });
+    const normalizedEmail = String(email || '').trim().toLowerCase();
+    const existingUser = await prisma.user.findUnique({ where: { email: normalizedEmail } });
 
     if (existingUser) {
+      if (existingUser.isGuest) {
+        const hashedPassword = await bcrypt.hash(password, 10);
+        const user = await prisma.user.update({
+          where: { id: existingUser.id },
+          data: {
+            password: hashedPassword,
+            firstName: firstName?.trim() || existingUser.firstName,
+            lastName: lastName?.trim() || existingUser.lastName,
+            isGuest: false,
+            convertedAt: new Date(),
+            emailVerifiedAt: existingUser.emailVerifiedAt ?? new Date(),
+          },
+          include: { role: true },
+        });
+
+        const payload = {
+          id: user.publicId,
+          email: user.email,
+          role: user.role.name,
+        };
+        const token = generateToken(payload);
+        const refreshToken = await issueRefreshToken(user.id);
+
+        return {
+          user: toPublicUser(user),
+          token,
+          ...(refreshToken ? { refreshToken } : {}),
+          convertedFromGuest: true,
+          message: 'Account created. Your previous guest orders are now in your dashboard.',
+        };
+      }
       throw new AppError(400, 'Email already registered');
     }
 
@@ -121,7 +154,7 @@ export class AuthService {
 
     const user = await prisma.user.create({
       data: {
-        email,
+        email: normalizedEmail,
         password: hashedPassword,
         firstName,
         lastName,
@@ -167,6 +200,14 @@ export class AuthService {
 
     if (user.isActive === false) {
       throw new AppError(403, 'This account has been deactivated.');
+    }
+
+    if (user.isGuest) {
+      throw new AppError(
+        403,
+        'This email was used for guest checkout. Please complete registration to set a password.',
+        'GUEST_ACCOUNT'
+      );
     }
 
     if (this.isCustomerRole(user.role.name) && !user.emailVerifiedAt) {

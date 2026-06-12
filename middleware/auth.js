@@ -20,6 +20,7 @@ export const authenticate = async (req, res, next) => {
           publicId: true,
           email: true,
           isActive: true,
+          isGuest: true,
           adminModules: true,
           role: { select: { name: true } },
         },
@@ -56,6 +57,28 @@ export const authenticate = async (req, res, next) => {
   } catch (error) {
     next(error instanceof AppError ? error : new AppError(401, 'Unauthorized', 'UNAUTHORIZED'));
   }
+};
+
+export const requireFullAccount = (req, res, next) => {
+  void res;
+  if (!req.user) {
+    return next(new AppError(401, 'Unauthorized', 'UNAUTHORIZED'));
+  }
+  if (req.user.scope === 'checkout') {
+    return next(
+      new AppError(403, 'A full account is required for this action.', 'FULL_ACCOUNT_REQUIRED')
+    );
+  }
+  if (req.user.isGuest) {
+    return next(
+      new AppError(
+        403,
+        'Complete your account registration to access this feature.',
+        'GUEST_ACCOUNT'
+      )
+    );
+  }
+  next();
 };
 
 export const authorize = (...roles) => {

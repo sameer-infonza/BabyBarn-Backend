@@ -168,7 +168,7 @@ export class CheckoutIntentService {
   async createCheckoutIntent(userPublicId, items, opts = {}) {
     const user = await db().user.findUnique({
       where: { publicId: userPublicId },
-      select: { id: true, accessMemberUntil: true, babyName: true },
+      select: { id: true, accessMemberUntil: true, babyName: true, isGuest: true, email: true, phone: true },
     });
     if (!user) {
       throw new AppError(401, 'Unauthorized');
@@ -177,6 +177,16 @@ export class CheckoutIntentService {
     const now = new Date();
     const hasAccess = Boolean(user.accessMemberUntil && user.accessMemberUntil > now);
     let includeAccessMembership = Boolean(opts.includeAccessMembership);
+    if (user.isGuest && includeAccessMembership) {
+      throw new AppError(
+        403,
+        'ACCESS membership requires a full account. Please sign in or create an account.',
+        'FULL_ACCOUNT_REQUIRED'
+      );
+    }
+    if (user.isGuest && Number(opts.storeCreditToApply || 0) > 0) {
+      throw new AppError(403, 'Store credit requires a full account.', 'FULL_ACCOUNT_REQUIRED');
+    }
     if (includeAccessMembership && hasAccess) {
       includeAccessMembership = false;
     }
@@ -261,6 +271,9 @@ export class CheckoutIntentService {
         });
       }
 
+      const contactEmail = String(opts.contactEmail || user.email || '').trim().toLowerCase() || null;
+      const contactPhone = String(opts.contactPhone || user.phone || '').trim() || null;
+
       return tx.checkoutIntent.create({
         data: {
           userId: user.id,
@@ -273,6 +286,8 @@ export class CheckoutIntentService {
           includeAccessMembership,
           accessMembershipAmount,
           membershipBabyName,
+          contactEmail,
+          placedAsGuest: Boolean(user.isGuest),
           shippingAddressJson: opts.shippingAddress ?? null,
           billingAddressJson: opts.billingAddress ?? null,
           expiresAt,
@@ -389,6 +404,12 @@ export class CheckoutIntentService {
         throw new AppError(409, 'Checkout already processed', 'CHECKOUT_INTENT_INVALID');
       }
 
+      const contactEmail = intent.contactEmail || null;
+      const contactPhone =
+        intent.shippingAddressJson && typeof intent.shippingAddressJson === 'object'
+          ? intent.shippingAddressJson.phoneNumber || intent.shippingAddressJson.phone || null
+          : null;
+
       const created = await tx.order.create({
         data: {
           userId: intent.userId,
@@ -399,6 +420,9 @@ export class CheckoutIntentService {
           paymentStatus: 'PAID',
           status: 'PROCESSING',
           fulfillmentStatus: 'NEW_ORDER',
+          contactEmail,
+          contactPhone,
+          placedAsGuest: Boolean(intent.placedAsGuest),
           shippingAddressJson: intent.shippingAddressJson,
           billingAddressJson: intent.billingAddressJson,
           shippingCarrier: intent.shippingCarrier,

@@ -17,6 +17,7 @@ import { writeAdminAudit } from './audit.service.js';
 import * as orderDocuments from './pdf/order-documents.service.js';
 import { emailService } from './email.service.js';
 import { config } from '../config/env.js';
+import { verifyOrderTrackingToken } from '../lib/order-tracking-token.js';
 import { assignOrderNumber, placeholderOrderNumber } from '../utils/order-number.js';
 import {
   buildCheckoutSignature,
@@ -27,6 +28,39 @@ import { assertMembershipCheckoutAllowed } from './membership-eligibility.servic
 import fs from 'fs';
 import path from 'path';
 import { SHIPPING_LABELS_DIR } from '../utils/product-upload.js';
+
+const orderItemAdminInclude = {
+  product: {
+    select: {
+      publicId: true,
+      name: true,
+      sku: true,
+      productType: true,
+      imageUrl: true,
+      price: true,
+    },
+  },
+  productVariant: {
+    select: { publicId: true, sku: true, combination: true, priceOverride: true },
+  },
+  pickedBy: {
+    select: {
+      publicId: true,
+      email: true,
+      firstName: true,
+      lastName: true,
+    },
+  },
+};
+
+async function resolveActorUserId(actor) {
+  if (!actor?.id) return null;
+  const user = await prisma.user.findUnique({
+    where: { publicId: actor.id },
+    select: { id: true },
+  });
+  return user?.id ?? null;
+}
 
 let ensureOrderCheckoutColumnsPromise = null;
 
@@ -208,7 +242,7 @@ export class OrderService {
   async calculateCheckoutQuote(userPublicId, payload) {
     const user = await prisma.user.findUnique({
       where: { publicId: userPublicId },
-      select: { id: true, accessMemberUntil: true, babyName: true },
+      select: { id: true, accessMemberUntil: true, babyName: true, isGuest: true },
     });
     if (!user) throw new AppError(401, 'Unauthorized');
     const items = Array.isArray(payload?.items) ? payload.items : [];
@@ -217,6 +251,13 @@ export class OrderService {
     const now = new Date();
     const hasAccess = Boolean(user.accessMemberUntil && user.accessMemberUntil > now);
     let includeAccessMembership = Boolean(payload?.includeAccessMembership);
+    if (user.isGuest && includeAccessMembership) {
+      throw new AppError(
+        403,
+        'ACCESS membership requires a full account. Please sign in or create an account.',
+        'FULL_ACCOUNT_REQUIRED'
+      );
+    }
     if (includeAccessMembership && hasAccess) {
       includeAccessMembership = false;
     }
@@ -534,6 +575,94 @@ export class OrderService {
     }
 
     return order;
+  }
+
+  async trackPublicOrder({ token, orderNumber, email }) {
+    let resolvedOrderNumber = orderNumber ? String(orderNumber).trim() : '';
+    let resolvedEmail = email ? String(email).trim().toLowerCase() : '';
+
+    if (token) {
+      const verified = verifyOrderTrackingToken(token);
+      resolvedOrderNumber = verified.orderNumber;
+      resolvedEmail = verified.email;
+    }
+
+    if (!resolvedOrderNumber || !resolvedEmail) {
+      throw new AppError(400, 'Order number and email are required', 'TRACKING_LOOKUP_REQUIRED');
+    }
+
+    const order = await prisma.order.findFirst({
+      where: {
+        OR: [{ orderNumber: resolvedOrderNumber }, { publicId: resolvedOrderNumber }],
+        contactEmail: { equals: resolvedEmail, mode: 'insensitive' },
+      },
+      include: {
+        orderItems: {
+          include: {
+            product: {
+              select: { publicId: true, name: true, slug: true, imageUrl: true },
+            },
+          },
+        },
+      },
+    });
+
+    if (!order) {
+      const fallback = await prisma.order.findFirst({
+        where: {
+          OR: [{ orderNumber: resolvedOrderNumber }, { publicId: resolvedOrderNumber }],
+          user: { email: { equals: resolvedEmail, mode: 'insensitive' } },
+        },
+        include: {
+          orderItems: {
+            include: {
+              product: {
+                select: { publicId: true, name: true, slug: true, imageUrl: true },
+              },
+            },
+          },
+        },
+      });
+      if (!fallback) {
+        throw new AppError(404, 'Order not found. Check your order number and email.', 'ORDER_NOT_FOUND');
+      }
+      return this.formatPublicTrackingOrder(fallback);
+    }
+
+    return this.formatPublicTrackingOrder(order);
+  }
+
+  formatPublicTrackingOrder(order) {
+    const shipping = order.shippingAddressJson && typeof order.shippingAddressJson === 'object'
+      ? order.shippingAddressJson
+      : null;
+    return {
+      id: order.publicId,
+      orderNumber: order.orderNumber,
+      status: order.status,
+      paymentStatus: order.paymentStatus,
+      fulfillmentStatus: order.fulfillmentStatus,
+      createdAt: order.createdAt,
+      totalAmount: Number(order.totalAmount),
+      shippingCost: Number(order.shippingCost || 0),
+      trackingNumber: order.trackingNumber,
+      trackingCarrier: order.trackingCarrier,
+      placedAsGuest: Boolean(order.placedAsGuest),
+      items: order.orderItems.map((item) => ({
+        id: item.id,
+        quantity: item.quantity,
+        unitPrice: Number(item.price),
+        lineTotal: Number(item.price) * item.quantity,
+        product: item.product,
+      })),
+      shipping: shipping
+        ? {
+            city: shipping.city,
+            state: shipping.state,
+            zipCode: shipping.zipCode || shipping.postalCode,
+          }
+        : null,
+    };
   }
 
   async createOrder(userPublicId, items) {
@@ -1117,21 +1246,7 @@ export class OrderService {
           },
         },
         orderItems: {
-          include: {
-            product: {
-              select: {
-                publicId: true,
-                name: true,
-                sku: true,
-                productType: true,
-                imageUrl: true,
-                price: true,
-              },
-            },
-            productVariant: {
-              select: { publicId: true, sku: true, combination: true, priceOverride: true },
-            },
-          },
+          include: orderItemAdminInclude,
         },
         trackingEvents: { orderBy: { createdAt: 'desc' }, take: 80 },
       },
@@ -1242,7 +1357,7 @@ export class OrderService {
     return updated;
   }
 
-  async updateAdminShipping(orderPublicId, payload) {
+  async updateAdminShipping(orderPublicId, payload, actor) {
     const order = await prisma.order.findUnique({ where: { publicId: orderPublicId } });
     if (!order) throw new AppError(404, 'Order not found');
     const data = {};
@@ -1268,11 +1383,34 @@ export class OrderService {
       data.fulfillmentStatus = 'SHIPPED';
       data.outboundShippedAt = new Date();
     }
-    return prisma.order.update({
+    const updated = await prisma.order.update({
       where: { id: order.id },
       data,
       include: { orderItems: { include: { product: true } }, user: userForOrderList },
     });
+    await writeAdminAudit({
+      actorId: actor?.id,
+      actorEmail: actor?.email,
+      action: 'ORDER_SHIPPING_UPDATED',
+      entityType: 'Order',
+      entityId: orderPublicId,
+      meta: {
+        trackingNumber: updated.trackingNumber,
+        shippingCarrier: updated.shippingCarrier,
+        statusChanged: shouldShip,
+      },
+    });
+    if (shouldShip) {
+      await writeAdminAudit({
+        actorId: actor?.id,
+        actorEmail: actor?.email,
+        action: 'FULFILLMENT_mark_shipped',
+        entityType: 'Order',
+        entityId: orderPublicId,
+        meta: { from: order.fulfillmentStatus, to: 'SHIPPED', via: 'manual_shipping' },
+      });
+    }
+    return updated;
   }
 
   async getAdminShippingOptions(orderPublicId, payload = {}) {
@@ -1544,10 +1682,12 @@ export class OrderService {
     return { order: updated, label };
   }
 
-  async addTracking(orderPublicId, tracking) {
+  async addTracking(orderPublicId, tracking, actor) {
     const order = await prisma.order.findUnique({ where: { publicId: orderPublicId } });
     if (!order) throw new AppError(404, 'Order not found');
-    return prisma.order.update({
+    const statusWillShip =
+      order.status === 'PROCESSING' || order.status === 'CONFIRMED' || order.status === 'PENDING';
+    const updated = await prisma.order.update({
       where: { id: order.id },
       data: {
         trackingNumber: tracking.trackingNumber,
@@ -1560,11 +1700,22 @@ export class OrderService {
         ...(tracking.shippingLabelUrl !== undefined
           ? { shippingLabelUrl: tracking.shippingLabelUrl || null }
           : {}),
-        ...(order.status === 'PROCESSING' || order.status === 'CONFIRMED' || order.status === 'PENDING'
-          ? { status: 'SHIPPED' }
-          : {}),
+        ...(statusWillShip ? { status: 'SHIPPED' } : {}),
       },
     });
+    await writeAdminAudit({
+      actorId: actor?.id,
+      actorEmail: actor?.email,
+      action: 'ORDER_TRACKING_ADDED',
+      entityType: 'Order',
+      entityId: orderPublicId,
+      meta: {
+        trackingNumber: updated.trackingNumber,
+        shippingCarrier: updated.shippingCarrier,
+        statusChanged: statusWillShip,
+      },
+    });
+    return updated;
   }
 
   async requestCancellationByUser(orderPublicId, userPublicId, reason) {
@@ -1705,36 +1856,21 @@ export class OrderService {
 
     const pickedQuantity = Math.max(0, Math.min(Number(body.pickedQuantity ?? 0), line.quantity));
     const now = pickedQuantity > 0 ? new Date() : null;
+    const pickerUserId = pickedQuantity > 0 ? await resolveActorUserId(actor) : null;
 
     await prisma.orderItem.update({
       where: { id: line.id },
       data: {
         pickedQuantity,
         pickedAt: pickedQuantity >= line.quantity ? now : pickedQuantity > 0 ? now : null,
-        pickedByUserId: pickedQuantity > 0 && actor?.id ? actor.id : null,
+        pickedByUserId: pickerUserId,
       },
     });
 
     let refreshed = await prisma.order.findUnique({
       where: { id: order.id },
       include: {
-        orderItems: {
-          include: {
-            product: {
-              select: {
-                publicId: true,
-                name: true,
-                sku: true,
-                productType: true,
-                imageUrl: true,
-                price: true,
-              },
-            },
-            productVariant: {
-              select: { publicId: true, sku: true, combination: true, priceOverride: true },
-            },
-          },
-        },
+        orderItems: { include: orderItemAdminInclude },
         user: userForOrderList,
       },
     });
@@ -1745,29 +1881,22 @@ export class OrderService {
       refreshed.fulfillmentStatus === 'ACCEPTED' &&
       refreshed.paymentStatus === 'PAID'
     ) {
+      const prevFulfillment = refreshed.fulfillmentStatus;
       refreshed = await prisma.order.update({
         where: { id: order.id },
         data: { fulfillmentStatus: 'PICKUP_READY', pickupReadyAt: new Date() },
         include: {
-          orderItems: {
-            include: {
-              product: {
-                select: {
-                  publicId: true,
-                  name: true,
-                  sku: true,
-                  productType: true,
-                  imageUrl: true,
-                  price: true,
-                },
-              },
-              productVariant: {
-                select: { publicId: true, sku: true, combination: true, priceOverride: true },
-              },
-            },
-          },
+          orderItems: { include: orderItemAdminInclude },
           user: userForOrderList,
         },
+      });
+      await writeAdminAudit({
+        actorId: actor?.id,
+        actorEmail: actor?.email,
+        action: 'FULFILLMENT_pickup_ready',
+        entityType: 'Order',
+        entityId: orderPublicId,
+        meta: { from: prevFulfillment, to: 'PICKUP_READY', via: 'all_items_picked' },
       });
     }
 

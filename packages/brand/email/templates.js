@@ -89,13 +89,15 @@ export function renderBrandedEmailTemplate(template, context = {}, brand) {
         shipping: context.shipping,
         total: context.total,
       })}
-      ${emailCtaButton(context.actionUrl, 'View your order')}
+      ${emailCtaButton(context.actionUrl, context.trackingUrl ? 'View order details' : 'View your order')}
+      ${context.trackingUrl && context.trackingUrl !== context.actionUrl ? emailCtaButton(context.trackingUrl, 'Track your order') : ''}
     `;
     const { html } = doc(subject, `Order ${context.orderId || ''} confirmed`, bodyHtml, brand);
+    const trackLine = context.trackingUrl ? ` Track: ${context.trackingUrl}` : '';
     return {
       subject,
       html,
-      text: `Order ${context.orderId} confirmed. Total ${context.total}. View: ${context.actionUrl}`,
+      text: `Order ${context.orderId} confirmed. Total ${context.total}. View: ${context.actionUrl}.${trackLine}`,
     };
   }
 

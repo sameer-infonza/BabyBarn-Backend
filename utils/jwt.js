@@ -8,6 +8,13 @@ export const generateToken = (payload) => {
   });
 };
 
+/** Short-lived token for guest checkout (quote, payment, summary only). */
+export const generateCheckoutToken = (payload) => {
+  return jwt.sign({ ...payload, scope: 'checkout' }, config.jwt.secret, {
+    expiresIn: '2h',
+  });
+};
+
 export const verifyToken = (token) => {
   try {
     return jwt.verify(token, config.jwt.secret);

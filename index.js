@@ -18,9 +18,11 @@ import returnsRoutes from './routes/returns.js';
 import walletRoutes from './routes/wallet.js';
 import adminRoutes from './routes/admin.js';
 import { orderService } from './services/order.service.js';
+import { returnsService } from './services/returns.service.js';
 import shippingRoutes from './routes/shipping.js';
 import publicRoutes from './routes/public.js';
 import membershipRoutes from './routes/membership.js';
+import checkoutRoutes from './routes/checkout.js';
 import wishlistRoutes from './routes/wishlist.js';
 import stockAlertsRoutes from './routes/stock-alerts.js';
 import { stripeWebhook } from './controllers/payment.controller.js';
@@ -170,6 +172,9 @@ function mountApi(prefix) {
   app.use(`${prefix}/shipping`, shippingRoutes);
   app.use(`${prefix}/public`, publicRoutes);
   app.use(`${prefix}/membership`, membershipRoutes);
+  app.use(`${prefix}/checkout`, checkoutRoutes);
+  app.use(`${prefix}/wishlist`, wishlistRoutes);
+  app.use(`${prefix}/stock-alerts`, stockAlertsRoutes);
 }
 
 mountApi('/api');
@@ -243,6 +248,9 @@ app.listen(PORT, () => {
   setInterval(() => {
     orderService.syncUpsTrackingBatch().catch((err) => {
       console.error('[jobs] UPS tracking sync failed', err);
+    });
+    returnsService.syncReturnTrackingBatch().catch((err) => {
+      console.error('[jobs] return tracking sync failed', err);
     });
   }, 15 * 60 * 1000);
 
