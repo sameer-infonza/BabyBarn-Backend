@@ -163,6 +163,8 @@ export const createOrderSchema = z.object({
   babyName: z.string().trim().min(1).max(120).optional(),
   /** Reuse in-progress checkout (CheckoutIntent publicId; legacy clients may still send orderId). */
   orderId: z.string().min(1).optional(),
+  contactEmail: z.string().email().optional(),
+  contactPhone: z.string().trim().max(40).optional(),
 });
 
 export const checkoutQuoteSchema = z.object({
@@ -273,6 +275,22 @@ export const orderItemPickSchema = z.object({
   pickedQuantity: z.number().int().min(0),
 });
 
+const refurbQuestionnaireSchema = z.object({
+  isCleanAndWashable: z.enum(['yes', 'no']),
+  stains: z.enum(['no_stains', 'minor_removable', 'permanent']),
+  tearsHoles: z.enum(['no', 'yes']),
+  fastenersBroken: z.enum(['no', 'yes']),
+  heavilyWorn: z.enum(['no', 'yes']),
+  odors: z.enum(['no', 'yes']),
+  stillUsable: z.enum(['yes', 'no']),
+});
+
+const refurbPhotoUrlsSchema = z.object({
+  front: z.string().min(1).optional(),
+  back: z.string().min(1).optional(),
+  defect: z.string().min(1).optional(),
+});
+
 export const returnRequestCreateSchema = z
   .object({
     orderId: z.string().min(1),
@@ -280,15 +298,90 @@ export const returnRequestCreateSchema = z
     orderItemIds: z.array(z.string().min(1)).min(1).max(50).optional(),
     type: z.enum(['STANDARD', 'REFURBISHMENT']).optional().default('STANDARD'),
     reason: z.string().min(3).max(1000),
+    questionnaire: refurbQuestionnaireSchema.optional(),
+    photoUrls: refurbPhotoUrlsSchema.optional(),
   })
   .refine((body) => Boolean(body.orderItemId) || (body.orderItemIds?.length ?? 0) > 0, {
     message: 'At least one order item is required',
     path: ['orderItemIds'],
-  });
+  })
+  .refine(
+    (body) =>
+      body.type !== 'REFURBISHMENT' || (Boolean(body.questionnaire) && Boolean(body.photoUrls)),
+    {
+      message: 'Questionnaire and photos are required for refurbishment returns',
+      path: ['questionnaire'],
+    }
+  )
+  .refine(
+    (body) => {
+      if (body.type !== 'REFURBISHMENT') return true;
+      const ids = body.orderItemIds ?? (body.orderItemId ? [body.orderItemId] : []);
+      return ids.length === 1;
+    },
+    { message: 'One item per refurb return', path: ['orderItemIds'] }
+  )
+  .refine(
+    (body) => {
+      if (body.type !== 'REFURBISHMENT') return true;
+      return Boolean(body.photoUrls?.front?.trim() && body.photoUrls?.back?.trim());
+    },
+    { message: 'Front and back photos are required', path: ['photoUrls'] }
+  )
+  .refine(
+    (body) => {
+      if (body.type !== 'REFURBISHMENT') return true;
+      const urls = body.photoUrls;
+      if (!urls) return false;
+      const paths = [urls.front, urls.back, urls.defect].filter(Boolean);
+      return paths.every((p) => typeof p === 'string' && p.startsWith('/uploads/returns/'));
+    },
+    { message: 'Invalid photo upload paths', path: ['photoUrls'] }
+  );
+
+export const RETURN_STATUS_VALUES = [
+  'REQUESTED',
+  'ELIGIBILITY_REVIEW',
+  'ELIGIBILITY_REJECTED',
+  'APPROVED',
+  'LABEL_GENERATED',
+  'IN_TRANSIT',
+  'RECEIVED',
+  'UNDER_INSPECTION',
+  'INSPECTION_APPROVED',
+  'INSPECTION_REJECTED',
+  'REJECTED',
+];
 
 export const returnStatusUpdateSchema = z.object({
-  status: z.enum(['REQUESTED', 'RECEIVED', 'UNDER_INSPECTION', 'APPROVED', 'REJECTED']),
+  status: z.enum(RETURN_STATUS_VALUES),
   notes: z.string().max(2000).optional().nullable(),
+});
+
+export const returnEligibilityReviewSchema = z.object({
+  decision: z.enum(['approve', 'reject']),
+  notes: z.string().max(2000).optional().nullable(),
+});
+
+export const refurbInspectionCreateSchema = z.object({
+  grade: z.enum(['A', 'B', 'C']),
+  notes: z.string().max(5000).optional().nullable(),
+  photoUrls: z.record(z.string()).optional(),
+  tasksCompleted: z
+    .object({
+      wash: z.boolean().optional(),
+      iron: z.boolean().optional(),
+      repair: z.boolean().optional(),
+    })
+    .optional(),
+  target: z.enum(['return', 'job']).optional().default('return'),
+});
+
+export const returnLabelGenerateSchema = z.object({
+  rateId: z.string().min(1).optional(),
+  shipmentId: z.string().optional(),
+  labelFileType: z.string().optional(),
+  selectedRate: z.record(z.unknown()).optional(),
 });
 
 export const createCategorySchema = z.object({

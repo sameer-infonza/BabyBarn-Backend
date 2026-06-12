@@ -71,9 +71,12 @@ export class ProductController {
       productType: productType === 'NEW' || productType === 'REFURBISHED' ? productType : undefined,
     };
 
+    const statsProductType =
+      productType === 'NEW' || productType === 'REFURBISHED' ? productType : 'NEW';
+
     const [result, stats] = await Promise.all([
       productService.getAllProducts(page, limit, categoryId, { admin: true, listFilters }),
-      productService.getAdminProductStats(),
+      productService.getAdminProductStats(statsProductType),
     ]);
 
     res.status(200).json({

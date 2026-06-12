@@ -5,7 +5,11 @@ import { toPublicJson } from '../utils/serialize.js';
 
 export class InventoryController {
   async getStats(req, res) {
-    const stats = await inventoryService.getStats();
+    const productType = req.query.productType ? String(req.query.productType) : undefined;
+    const stats = await inventoryService.getStats({
+      productType:
+        productType === 'NEW' || productType === 'REFURBISHED' ? productType : undefined,
+    });
     res.status(200).json({ success: true, data: toPublicJson(stats) });
   }
 
@@ -66,7 +70,14 @@ export class InventoryController {
     const page = parseInt(String(req.query.page), 10) || 1;
     const limit = parseInt(String(req.query.limit), 10) || 20;
     const productId = req.query.productId ? String(req.query.productId) : undefined;
-    const result = await inventoryService.listHistory({ page, limit, productPublicId: productId });
+    const productType = req.query.productType ? String(req.query.productType) : undefined;
+    const result = await inventoryService.listHistory({
+      page,
+      limit,
+      productPublicId: productId,
+      productType:
+        productType === 'NEW' || productType === 'REFURBISHED' ? productType : undefined,
+    });
     res.status(200).json({
       success: true,
       data: toPublicJson(result),

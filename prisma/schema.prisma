@@ -46,10 +46,28 @@ enum ReturnType {
 
 enum ReturnStatus {
   REQUESTED
+  ELIGIBILITY_REVIEW
+  ELIGIBILITY_REJECTED
+  APPROVED
+  LABEL_GENERATED
+  IN_TRANSIT
   RECEIVED
   UNDER_INSPECTION
-  APPROVED
+  INSPECTION_APPROVED
+  INSPECTION_REJECTED
   REJECTED
+}
+
+enum RefurbEligibilityDecision {
+  PASS
+  FAIL
+  MANUAL_REVIEW
+}
+
+enum RefurbConditionGrade {
+  A
+  B
+  C
 }
 
 enum OrderItemPricingTier {
@@ -100,6 +118,9 @@ enum ProductUnitStatus {
 enum RefurbishmentJobStatus {
   RECEIVED
   INSPECTION
+  CLEANING
+  IRONING
+  REPAIR
   IN_PROGRESS
   QA_APPROVED
   LISTED
@@ -152,6 +173,8 @@ model User {
   checkoutIntents      CheckoutIntent[]
   wishlistItems        WishlistItem[]
   stockAlertSubscriptions StockAlertSubscription[]
+  eligibilityReviews ReturnEligibilityQuestionnaire[] @relation("EligibilityReviewedBy")
+  refurbInspections  RefurbInspectionRecord[]         @relation("RefurbInspector")
 
   stripeCustomerId   String?
   accessNumber       String?   @unique
@@ -161,6 +184,10 @@ model User {
   accessExpiredNoticeSentAt   DateTime?
   accessMemberUntil  DateTime?
   emailVerifiedAt    DateTime?
+  /// Guest checkout profile — no password login until converted via register.
+  isGuest            Boolean  @default(false)
+  guestCreatedAt     DateTime?
+  convertedAt        DateTime?
   // When false, customer cannot sign in.
   isActive           Boolean  @default(true)
   // JSON array of admin console module slugs; null = all modules (ADMIN_TEAM).
@@ -174,6 +201,7 @@ model User {
   @@index([publicId])
   @@index([isActive])
   @@index([accessNumber])
+  @@index([isGuest])
 }
 
 model MembershipPayment {
@@ -305,6 +333,11 @@ model Product {
   productUnits         ProductUnit[]
   sourceReturnId       Int?
   sourceReturn         ReturnRequest? @relation("RefurbListedFromReturn", fields: [sourceReturnId], references: [id], onDelete: SetNull)
+  sourceProductId      Int?
+  sourceProduct        Product?  @relation("RefurbFromSource", fields: [sourceProductId], references: [id], onDelete: SetNull)
+  refurbChildren       Product[] @relation("RefurbFromSource")
+  conditionGrade       RefurbConditionGrade?
+  refurbishedAt        DateTime?
   refurbishmentJobsListed RefurbishmentJob[] @relation("RefurbJobListedProduct")
 
   createdAt DateTime @default(now())
@@ -316,6 +349,7 @@ model Product {
   @@index([isDraft])
   @@index([productType])
   @@index([sourceReturnId])
+  @@index([sourceProductId])
 }
 
 model ProductVariant {
@@ -382,6 +416,8 @@ model CheckoutIntent {
   includeAccessMembership Boolean              @default(false)
   accessMembershipAmount  Float                @default(0)
   membershipBabyName      String?
+  contactEmail            String?
+  placedAsGuest           Boolean              @default(false)
 
   user  User                 @relation(fields: [userId], references: [id], onDelete: Cascade)
   lines CheckoutIntentLine[]
@@ -462,6 +498,9 @@ model Order {
   accessMembershipIncluded Boolean            @default(false)
   membershipPaymentId      Int?
   membershipPayment        MembershipPayment? @relation(fields: [membershipPaymentId], references: [id], onDelete: SetNull)
+  contactEmail             String?
+  contactPhone             String?
+  placedAsGuest            Boolean              @default(false)
 
   cancellationReviewStatus  CancellationReviewStatus @default(NONE)
   cancellationRequestedAt   DateTime?
@@ -573,6 +612,14 @@ model ReturnRequest {
   reason String?
   notes String?
   creditAwarded Float @default(0)
+  returnLabelUrl String?
+  returnTrackingNumber String?
+  returnShippingCarrier String?
+  returnShipmentId String?
+  returnTransactionId String?
+  labelGeneratedAt DateTime?
+  receivedAt DateTime?
+  inspectionApprovedAt DateTime?
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
@@ -582,6 +629,8 @@ model ReturnRequest {
   refurbishmentJob RefurbishmentJob?
   listedProducts Product[] @relation("RefurbListedFromReturn")
   productUnits   ProductUnit[]
+  eligibilityQuestionnaire ReturnEligibilityQuestionnaire?
+  inspectionRecords RefurbInspectionRecord[]
 
   @@index([userId])
   @@index([orderId])
@@ -668,8 +717,47 @@ model RefurbishmentJob {
   listedAt         DateTime?
   createdAt        DateTime              @default(now())
   updatedAt        DateTime              @updatedAt
+  inspectionRecords RefurbInspectionRecord[]
 
   @@index([status])
+}
+
+model ReturnEligibilityQuestionnaire {
+  id                  Int                       @id @default(autoincrement())
+  publicId            String                    @unique @default(cuid())
+  returnRequestId     Int                       @unique
+  returnRequest       ReturnRequest             @relation(fields: [returnRequestId], references: [id], onDelete: Cascade)
+  answersJson         Json
+  photoUrlsJson       Json?
+  autoDecision        RefurbEligibilityDecision
+  autoDecisionReasons Json?
+  reviewedByUserId    Int?
+  reviewedBy          User?                     @relation("EligibilityReviewedBy", fields: [reviewedByUserId], references: [id], onDelete: SetNull)
+  reviewedAt          DateTime?
+  reviewNotes         String?                   @db.Text
+  createdAt           DateTime                  @default(now())
+  updatedAt           DateTime                  @updatedAt
+
+  @@index([autoDecision])
+}
+
+model RefurbInspectionRecord {
+  id                 Int                  @id @default(autoincrement())
+  publicId           String               @unique @default(cuid())
+  returnRequestId    Int?
+  returnRequest      ReturnRequest?       @relation(fields: [returnRequestId], references: [id], onDelete: Cascade)
+  refurbishmentJobId Int?
+  refurbishmentJob   RefurbishmentJob?    @relation(fields: [refurbishmentJobId], references: [id], onDelete: Cascade)
+  inspectorUserId    Int?
+  inspector          User?                @relation("RefurbInspector", fields: [inspectorUserId], references: [id], onDelete: SetNull)
+  grade              RefurbConditionGrade?
+  notes              String?              @db.Text
+  photoUrlsJson      Json?
+  tasksCompletedJson Json?
+  createdAt          DateTime             @default(now())
+
+  @@index([returnRequestId])
+  @@index([refurbishmentJobId])
 }
 
 model WishlistItem {

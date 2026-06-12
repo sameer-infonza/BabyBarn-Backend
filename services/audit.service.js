@@ -19,6 +19,9 @@ function buildAuditWhere(filters = {}) {
   if (filters.entityType) {
     and.push({ entityType: { equals: String(filters.entityType), mode: 'insensitive' } });
   }
+  if (filters.entityId) {
+    and.push({ entityId: { equals: String(filters.entityId) } });
+  }
   if (filters.actorEmail) {
     and.push({ actorEmail: { contains: String(filters.actorEmail), mode: 'insensitive' } });
   }
@@ -51,6 +54,23 @@ export async function writeAdminAudit({ actorId, actorEmail, action, entityType,
   } catch (e) {
     console.error('[audit] write failed', action, e);
   }
+}
+
+export async function listOrderActivity(orderPublicId, limit = 100) {
+  const rows = await prisma.adminAuditLog.findMany({
+    where: {
+      OR: [
+        { entityType: 'Order', entityId: String(orderPublicId) },
+        {
+          entityType: 'OrderItem',
+          meta: { path: ['orderPublicId'], equals: String(orderPublicId) },
+        },
+      ],
+    },
+    take: Math.min(limit, 200),
+    orderBy: { createdAt: 'desc' },
+  });
+  return { logs: rows };
 }
 
 export async function listAuditLogs(page = 1, limit = 50, filters = {}) {

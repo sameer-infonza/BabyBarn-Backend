@@ -202,6 +202,10 @@ function flattenProductToSkuLines(p) {
         sku: v.sku,
         category,
         productType: p.productType,
+        conditionGrade: p.conditionGrade ?? null,
+        sourceProduct: p.sourceProduct
+          ? { id: p.sourceProduct.publicId, name: p.sourceProduct.name, sku: p.sourceProduct.sku }
+          : null,
         inventoryModel: p.inventoryModel,
         totalStock,
         reservedStock,
@@ -226,6 +230,10 @@ function flattenProductToSkuLines(p) {
       sku: p.sku,
       category,
       productType: p.productType,
+      conditionGrade: p.conditionGrade ?? null,
+      sourceProduct: p.sourceProduct
+        ? { id: p.sourceProduct.publicId, name: p.sourceProduct.name, sku: p.sourceProduct.sku }
+        : null,
       inventoryModel: p.inventoryModel,
       totalStock,
       reservedStock,
@@ -236,10 +244,17 @@ function flattenProductToSkuLines(p) {
   ];
 }
 
+function productTypeWhere(productType) {
+  if (productType === 'NEW' || productType === 'REFURBISHED') {
+    return { productType };
+  }
+  return { productType: 'NEW' };
+}
+
 export class InventoryService {
-  async getStats() {
+  async getStats({ productType } = {}) {
     const products = await prisma.product.findMany({
-      where: { isDraft: false },
+      where: { isDraft: false, ...productTypeWhere(productType) },
       include: { variants: { orderBy: { sortOrder: 'asc' } } },
     });
     let totalSkus = 0;
@@ -273,11 +288,10 @@ export class InventoryService {
 
     const where = {
       isDraft: false,
+      ...productTypeWhere(
+        productTypeFilter && productTypeFilter !== 'all' ? productTypeFilter : undefined
+      ),
     };
-
-    if (productTypeFilter && productTypeFilter !== 'all') {
-      where.productType = productTypeFilter;
-    }
 
     if (search && String(search).trim()) {
       const q = String(search).trim();
@@ -296,6 +310,7 @@ export class InventoryService {
       include: {
         category: true,
         variants: { orderBy: { sortOrder: 'asc' } },
+        sourceProduct: { select: { publicId: true, name: true, sku: true } },
       },
       orderBy: { updatedAt: 'desc' },
     });
@@ -375,6 +390,13 @@ export class InventoryService {
     if (!product) {
       throw new AppError(404, 'Product not found');
     }
+    if (product.sourceProductId != null || product.productType === 'REFURBISHED') {
+      throw new AppError(
+        400,
+        'Cannot change product type on a pipeline refurb SKU.',
+        'REFURB_LOCKED'
+      );
+    }
     return prisma.product.update({
       where: { id: product.id },
       data: { productType },
@@ -382,9 +404,9 @@ export class InventoryService {
     });
   }
 
-  async listHistory({ page = 1, limit = 20, productPublicId = null }) {
+  async listHistory({ page = 1, limit = 20, productPublicId = null, productType = null }) {
     const { listLedgerHistory } = await import('./inventory-ledger.service.js');
-    const ledger = await listLedgerHistory({ page, limit, productPublicId });
+    const ledger = await listLedgerHistory({ page, limit, productPublicId, productType });
     return {
       entries: ledger.entries.map((e) => ({
         id: e.id,

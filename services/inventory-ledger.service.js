@@ -29,7 +29,12 @@ export async function writeInventoryLedger(tx, {
   });
 }
 
-export async function listLedgerHistory({ page = 1, limit = 20, productPublicId = null }) {
+export async function listLedgerHistory({
+  page = 1,
+  limit = 20,
+  productPublicId = null,
+  productType = null,
+}) {
   const { prisma } = await import('../lib/prisma.js');
   const skip = (page - 1) * limit;
   const where = {};
@@ -40,6 +45,8 @@ export async function listLedgerHistory({ page = 1, limit = 20, productPublicId 
     });
     if (!product) return { entries: [], pagination: { total: 0, page, limit, pages: 1 } };
     where.productId = product.id;
+  } else if (productType === 'NEW' || productType === 'REFURBISHED') {
+    where.product = { productType };
   }
 
   const [rows, total] = await Promise.all([

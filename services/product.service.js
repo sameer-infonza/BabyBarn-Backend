@@ -58,14 +58,16 @@ async function ensureUniqueParentSku(tx) {
 }
 
 export class ProductService {
-  async getAdminProductStats() {
+  async getAdminProductStats(productType) {
+    const typeWhere =
+      productType === 'NEW' || productType === 'REFURBISHED' ? { productType } : {};
     const [total, activeListings, outOfStock] = await Promise.all([
-      prisma.product.count(),
+      prisma.product.count({ where: typeWhere }),
       prisma.product.count({
-        where: { isDraft: false, isActiveListing: true },
+        where: { ...typeWhere, isDraft: false, isActiveListing: true },
       }),
       prisma.product.count({
-        where: { isDraft: false, stock: 0 },
+        where: { ...typeWhere, isDraft: false, stock: 0 },
       }),
     ]);
     return { total, activeListings, outOfStock };
@@ -195,6 +197,8 @@ export class ProductService {
       const { search, sizeAgeGroup, status, productType } = listFilters;
       if (productType === 'NEW' || productType === 'REFURBISHED') {
         where.productType = productType;
+      } else {
+        where.productType = 'NEW';
       }
       if (sizeAgeGroup && String(sizeAgeGroup).trim()) {
         where.sizeAgeGroup = String(sizeAgeGroup).trim();
@@ -237,6 +241,17 @@ export class ProductService {
 
     const include = {
       category: true,
+      sourceProduct: {
+        select: {
+          publicId: true,
+          name: true,
+          slug: true,
+          sku: true,
+          price: true,
+          memberPrice: true,
+          compareAtPrice: true,
+        },
+      },
       ...(admin
         ? { variants: { orderBy: { sortOrder: 'asc' } } }
         : {
@@ -287,13 +302,55 @@ export class ProductService {
 
     let product = await prisma.product.findUnique({
       where: { slug: raw },
-      include: { category: true, variants: { orderBy: { sortOrder: 'asc' } } },
+      include: {
+        category: true,
+        variants: { orderBy: { sortOrder: 'asc' } },
+        sourceProduct: {
+          select: {
+            publicId: true,
+            name: true,
+            slug: true,
+            sku: true,
+            price: true,
+            memberPrice: true,
+            compareAtPrice: true,
+          },
+        },
+        ...(admin
+          ? {
+              sourceReturn: {
+                select: { publicId: true },
+              },
+            }
+          : {}),
+      },
     });
 
     if (!product) {
       product = await prisma.product.findUnique({
         where: { publicId: raw },
-        include: { category: true, variants: { orderBy: { sortOrder: 'asc' } } },
+        include: {
+          category: true,
+          variants: { orderBy: { sortOrder: 'asc' } },
+          sourceProduct: {
+            select: {
+              publicId: true,
+              name: true,
+              slug: true,
+              sku: true,
+              price: true,
+              memberPrice: true,
+              compareAtPrice: true,
+            },
+          },
+          ...(admin
+            ? {
+                sourceReturn: {
+                  select: { publicId: true },
+                },
+              }
+            : {}),
+        },
       });
     }
 
@@ -342,8 +399,12 @@ export class ProductService {
       productType = 'NEW',
     } = data;
 
-    if (productType === 'REFURBISHED' && !isRefurbishedEnabled()) {
-      throw new AppError(400, 'Refurbished products are temporarily disabled', 'REFURBISHED_DISABLED');
+    if (productType === 'REFURBISHED') {
+      throw new AppError(
+        400,
+        'Refurbished products are created automatically when a refurb return is listed. Use the inspection queue.',
+        'REFURBISHED_MANUAL_CREATE_BLOCKED'
+      );
     }
 
     const category = await prisma.category.findUnique({
@@ -469,9 +530,26 @@ export class ProductService {
       throw new AppError(404, 'Product not found');
     }
 
-    const { isRefurbishedEnabled } = await import('../config/feature-flags.js');
-    if (data.productType === 'REFURBISHED' && !isRefurbishedEnabled()) {
-      throw new AppError(400, 'Refurbished products are temporarily disabled', 'REFURBISHED_DISABLED');
+    const isPipelineRefurb = product.productType === 'REFURBISHED' && product.sourceProductId != null;
+
+    if (data.productType === 'REFURBISHED') {
+      throw new AppError(
+        400,
+        'Refurbished product type cannot be set manually.',
+        'REFURBISHED_MANUAL_CREATE_BLOCKED'
+      );
+    }
+
+    if (isPipelineRefurb) {
+      if (data.productType !== undefined && data.productType !== product.productType) {
+        throw new AppError(400, 'Cannot change product type on a pipeline refurb SKU.', 'REFURB_LOCKED');
+      }
+      if (data.sku !== undefined && data.sku !== product.sku) {
+        throw new AppError(400, 'Cannot change SKU on a pipeline refurb listing.', 'REFURB_LOCKED');
+      }
+      if (data.categoryId !== undefined) {
+        throw new AppError(400, 'Cannot change category on a pipeline refurb listing.', 'REFURB_LOCKED');
+      }
     }
 
     const {
@@ -488,6 +566,12 @@ export class ProductService {
 
     return prisma.$transaction(async (tx) => {
       const updatePayload = { ...rest };
+
+      if (isPipelineRefurb) {
+        delete updatePayload.productType;
+        delete updatePayload.sku;
+        delete updatePayload.categoryId;
+      }
 
       if (imageUrl !== undefined) {
         updatePayload.imageUrl = normalizeMediaUrl(imageUrl);
@@ -549,9 +633,45 @@ export class ProductService {
         data.inventoryModel !== undefined ? data.inventoryModel : product.inventoryModel;
 
       if (hasVariantsKey) {
-        await tx.productVariant.deleteMany({ where: { productId: product.id } });
-
         const isVariantProduct = inv === 'variant_matrix' && incomingVariants.length > 0;
+
+        if (isPipelineRefurb && isVariantProduct) {
+          if (incomingVariants.length !== product.variants.length) {
+            throw new AppError(
+              400,
+              'Cannot add or remove variants on a pipeline refurb listing.',
+              'REFURB_LOCKED'
+            );
+          }
+          const existingBySku = new Map(product.variants.map((v) => [v.sku, v]));
+          for (const incoming of incomingVariants) {
+            if (!existingBySku.has(incoming.sku)) {
+              throw new AppError(
+                400,
+                'Cannot change variant SKUs on a pipeline refurb listing.',
+                'REFURB_LOCKED'
+              );
+            }
+          }
+          for (const incoming of incomingVariants) {
+            const existing = existingBySku.get(incoming.sku);
+            await tx.productVariant.update({
+              where: { id: existing.id },
+              data: {
+                priceOverride: incoming.priceOverride ?? null,
+                imageUrl: normalizeMediaUrl(incoming.imageUrl),
+              },
+            });
+          }
+          delete updatePayload.stock;
+          return tx.product.update({
+            where: { id: product.id },
+            data: updatePayload,
+            include: { category: true, variants: { orderBy: { sortOrder: 'asc' } } },
+          });
+        }
+
+        await tx.productVariant.deleteMany({ where: { productId: product.id } });
 
         if (isVariantProduct) {
           const seen = new Set();

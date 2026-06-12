@@ -7,6 +7,21 @@ import { getBusinessSettings } from './admin.service.js';
 import { restockOrderLineStock } from './inventory-reservation.js';
 import { refurbishmentService } from './refurbishment.service.js';
 import { markUnitsReturnedForReturn } from './product-unit.service.js';
+import { shippingService } from './shipping.service.js';
+import {
+  buildDemoReturnLabel,
+  demoTrackingNextStatus,
+  isDemoReturnTracking,
+  useDemoReturnLabels,
+} from './shipping/demo-return-label.js';
+import {
+  evaluateRefurbQuestionnaire,
+  initialReturnStatusForDecision,
+} from './refurb-eligibility.service.js';
+import {
+  REFURB_STORE_CREDIT_RATE,
+  refurbCreditMultiplierForGrade,
+} from '../config/refurb.config.js';
 
 function isMissingWalletTableError(error) {
   return Boolean(
@@ -17,25 +32,67 @@ function isMissingWalletTableError(error) {
   );
 }
 
+const STANDARD_TRANSITIONS = {
+  REQUESTED: ['RECEIVED', 'UNDER_INSPECTION', 'APPROVED', 'REJECTED'],
+  RECEIVED: ['UNDER_INSPECTION', 'APPROVED', 'REJECTED'],
+  UNDER_INSPECTION: ['APPROVED', 'REJECTED'],
+  APPROVED: [],
+  REJECTED: [],
+};
+
+const REFURB_TRANSITIONS = {
+  REQUESTED: ['ELIGIBILITY_REVIEW', 'ELIGIBILITY_REJECTED', 'APPROVED', 'REJECTED'],
+  ELIGIBILITY_REVIEW: ['APPROVED', 'ELIGIBILITY_REJECTED', 'REJECTED'],
+  ELIGIBILITY_REJECTED: [],
+  APPROVED: ['LABEL_GENERATED', 'REJECTED'],
+  LABEL_GENERATED: ['IN_TRANSIT', 'RECEIVED', 'REJECTED'],
+  IN_TRANSIT: ['RECEIVED', 'REJECTED'],
+  RECEIVED: ['UNDER_INSPECTION'],
+  UNDER_INSPECTION: ['INSPECTION_APPROVED', 'INSPECTION_REJECTED'],
+  INSPECTION_APPROVED: [],
+  INSPECTION_REJECTED: [],
+  REJECTED: [],
+};
+
+const returnInclude = {
+  user: { select: { publicId: true, email: true, firstName: true, lastName: true } },
+  order: { select: { publicId: true, orderNumber: true, status: true, createdAt: true } },
+  orderItem: {
+    include: {
+      product: {
+        select: { publicId: true, name: true, productType: true, sku: true, slug: true },
+      },
+    },
+  },
+  eligibilityQuestionnaire: true,
+  inspectionRecords: { orderBy: { createdAt: 'desc' }, take: 10 },
+  refurbishmentJob: {
+    include: {
+      listedProduct: { select: { publicId: true, name: true, slug: true, conditionGrade: true } },
+      inspectionRecords: { orderBy: { createdAt: 'desc' }, take: 5 },
+    },
+  },
+};
+
+async function resolveActorUserId(actor) {
+  if (!actor?.id) return null;
+  const user = await prisma.user.findUnique({ where: { publicId: actor.id }, select: { id: true } });
+  return user?.id ?? null;
+}
+
 export class ReturnsService {
-  validateTransition(current, next) {
-    const allowed = {
-      REQUESTED: ['RECEIVED', 'UNDER_INSPECTION', 'APPROVED', 'REJECTED'],
-      RECEIVED: ['UNDER_INSPECTION', 'APPROVED', 'REJECTED'],
-      UNDER_INSPECTION: ['APPROVED', 'REJECTED'],
-      APPROVED: [],
-      REJECTED: [],
-    };
-    return (allowed[current] || []).includes(next);
+  validateTransition(current, next, type = 'STANDARD') {
+    const map = type === 'REFURBISHMENT' ? REFURB_TRANSITIONS : STANDARD_TRANSITIONS;
+    return (map[current] || []).includes(next);
   }
 
-  async listAll() {
+  async listAll(filters = {}) {
+    const where = {};
+    if (filters.type) where.type = filters.type;
+    if (filters.status) where.status = filters.status;
     return prisma.returnRequest.findMany({
-      include: {
-        user: { select: { publicId: true, email: true, firstName: true, lastName: true } },
-        order: { select: { publicId: true, orderNumber: true, status: true, createdAt: true } },
-        orderItem: { include: { product: { select: { name: true, productType: true } } } },
-      },
+      where,
+      include: returnInclude,
       orderBy: { createdAt: 'desc' },
     });
   }
@@ -45,10 +102,7 @@ export class ReturnsService {
     if (!user) throw new AppError(401, 'Unauthorized');
     return prisma.returnRequest.findMany({
       where: { userId: user.id },
-      include: {
-        order: { select: { publicId: true, orderNumber: true, status: true, createdAt: true } },
-        orderItem: { include: { product: { select: { name: true, productType: true } } } },
-      },
+      include: returnInclude,
       orderBy: { createdAt: 'desc' },
     });
   }
@@ -58,10 +112,7 @@ export class ReturnsService {
     if (!user) throw new AppError(401, 'Unauthorized');
     const row = await prisma.returnRequest.findUnique({
       where: { publicId: returnPublicId },
-      include: {
-        order: { select: { publicId: true, orderNumber: true, status: true, createdAt: true } },
-        orderItem: { include: { product: { select: { name: true, productType: true } } } },
-      },
+      include: returnInclude,
     });
     if (!row || row.userId !== user.id) throw new AppError(404, 'Return request not found');
     return row;
@@ -70,11 +121,7 @@ export class ReturnsService {
   async getById(returnPublicId) {
     const row = await prisma.returnRequest.findUnique({
       where: { publicId: returnPublicId },
-      include: {
-        user: { select: { publicId: true, email: true, firstName: true, lastName: true } },
-        order: { select: { publicId: true, orderNumber: true, status: true, createdAt: true } },
-        orderItem: { include: { product: { select: { name: true, productType: true } } } },
-      },
+      include: returnInclude,
     });
     if (!row) throw new AppError(404, 'Return request not found');
     return row;
@@ -110,6 +157,14 @@ export class ReturnsService {
       }
       const hasAccess = Boolean(user.accessMemberUntil && user.accessMemberUntil > new Date());
       if (!hasAccess) throw new AppError(403, 'ACCESS membership required for refurbishment returns');
+      if (itemPublicIds.length !== 1) {
+        throw new AppError(400, 'One item per refurb return');
+      }
+      const targetItem = order.orderItems.find((i) => i.publicId === itemPublicIds[0]);
+      if (!targetItem) throw new AppError(404, 'Order item not found');
+      if (targetItem.product?.productType === 'REFURBISHED') {
+        throw new AppError(400, 'Only new products are eligible for refurbishment returns');
+      }
     }
 
     if (payload.type === 'STANDARD') {
@@ -121,7 +176,7 @@ export class ReturnsService {
       where: {
         orderId: order.id,
         orderItem: { publicId: { in: itemPublicIds } },
-        status: { notIn: ['REJECTED'] },
+        status: { notIn: ['REJECTED', 'ELIGIBILITY_REJECTED', 'INSPECTION_REJECTED'] },
       },
       select: { orderItem: { select: { publicId: true } } },
     });
@@ -131,28 +186,351 @@ export class ReturnsService {
       throw new AppError(400, 'Selected items already have an open return request');
     }
 
-    const created = await prisma.$transaction(
-      pendingIds.map((publicId) => {
-        const orderItem = order.orderItems.find((i) => i.publicId === publicId);
-        if (!orderItem) throw new AppError(404, 'Order item not found');
-        return prisma.returnRequest.create({
+    let eligibilityEval = null;
+    if (payload.type === 'REFURBISHMENT') {
+      eligibilityEval = evaluateRefurbQuestionnaire(payload.questionnaire, payload.photoUrls);
+    }
+
+    const created = [];
+    for (const publicId of pendingIds) {
+      const orderItem = order.orderItems.find((i) => i.publicId === publicId);
+      if (!orderItem) throw new AppError(404, 'Order item not found');
+
+      const initialStatus =
+        payload.type === 'REFURBISHMENT'
+          ? initialReturnStatusForDecision(eligibilityEval.decision)
+          : 'REQUESTED';
+
+      const row = await prisma.$transaction(async (tx) => {
+        const rr = await tx.returnRequest.create({
           data: {
             userId: user.id,
             orderId: order.id,
             orderItemId: orderItem.id,
             type: payload.type,
             reason: payload.reason,
-            status: 'REQUESTED',
-          },
-          include: {
-            order: { select: { publicId: true, orderNumber: true, status: true, createdAt: true } },
-            orderItem: { include: { product: { select: { name: true, productType: true } } } },
+            status: initialStatus,
           },
         });
-      })
-    );
+
+        if (payload.type === 'REFURBISHMENT' && eligibilityEval) {
+          await tx.returnEligibilityQuestionnaire.create({
+            data: {
+              returnRequestId: rr.id,
+              answersJson: payload.questionnaire,
+              photoUrlsJson: payload.photoUrls ?? {},
+              autoDecision: eligibilityEval.decision,
+              autoDecisionReasons: eligibilityEval.reasons,
+            },
+          });
+        }
+
+        return tx.returnRequest.findUnique({
+          where: { id: rr.id },
+          include: returnInclude,
+        });
+      });
+
+      created.push(row);
+    }
 
     return created.length === 1 ? created[0] : created;
+  }
+
+  async reviewEligibility(returnPublicId, { decision, notes }, actor) {
+    const rr = await prisma.returnRequest.findUnique({
+      where: { publicId: returnPublicId },
+      include: { eligibilityQuestionnaire: true, user: { select: { email: true, firstName: true, lastName: true } } },
+    });
+    if (!rr) throw new AppError(404, 'Return request not found');
+    if (rr.type !== 'REFURBISHMENT') throw new AppError(400, 'Not a refurbishment return');
+    if (rr.status !== 'ELIGIBILITY_REVIEW') {
+      throw new AppError(400, 'Return is not awaiting eligibility review');
+    }
+
+    const nextStatus = decision === 'approve' ? 'APPROVED' : 'ELIGIBILITY_REJECTED';
+    const reviewerId = await resolveActorUserId(actor);
+
+    const updated = await prisma.$transaction(async (tx) => {
+      if (rr.eligibilityQuestionnaire) {
+        await tx.returnEligibilityQuestionnaire.update({
+          where: { id: rr.eligibilityQuestionnaire.id },
+          data: {
+            reviewedByUserId: reviewerId,
+            reviewedAt: new Date(),
+            reviewNotes: notes ? String(notes).trim() : null,
+          },
+        });
+      }
+      return tx.returnRequest.update({
+        where: { id: rr.id },
+        data: {
+          status: nextStatus,
+          notes: notes !== undefined ? (notes ? String(notes).trim() : null) : undefined,
+        },
+        include: returnInclude,
+      });
+    });
+
+    await writeAdminAudit({
+      actorId: actor?.id,
+      actorEmail: actor?.email,
+      action: 'RETURN_ELIGIBILITY_REVIEW',
+      entityType: 'ReturnRequest',
+      entityId: returnPublicId,
+      meta: { decision, to: nextStatus },
+    });
+
+    await emailService.sendTemplate({
+      to: rr.user.email,
+      template: 'return-status',
+      context: {
+        name: [rr.user.firstName, rr.user.lastName].filter(Boolean).join(' '),
+        status: nextStatus,
+        actionUrl: `${config.frontend.customerUrl}/dashboard/returns/${returnPublicId}`,
+      },
+    });
+
+    return updated;
+  }
+
+  async generateReturnLabel(returnPublicId, payload, actor) {
+    const rr = await prisma.returnRequest.findUnique({
+      where: { publicId: returnPublicId },
+      include: {
+        order: { select: { shippingAddressJson: true } },
+        user: { select: { email: true, firstName: true, lastName: true } },
+      },
+    });
+    if (!rr) throw new AppError(404, 'Return request not found');
+    if (rr.type !== 'REFURBISHMENT') throw new AppError(400, 'Labels are for refurbishment returns only');
+    if (!['APPROVED', 'LABEL_GENERATED'].includes(rr.status)) {
+      throw new AppError(400, 'Return must be eligibility-approved before generating a label');
+    }
+
+    const fromAddress = rr.order.shippingAddressJson;
+    if (!fromAddress) throw new AppError(400, 'Order has no shipping address for return label');
+
+    const label = useDemoReturnLabels()
+      ? buildDemoReturnLabel(returnPublicId)
+      : await shippingService.generateLabel({
+          ...payload,
+          fromAddress,
+          toAddress: shippingService.getConfiguredOriginAddress(),
+        });
+
+    const updated = await prisma.returnRequest.update({
+      where: { id: rr.id },
+      data: {
+        status: 'LABEL_GENERATED',
+        returnLabelUrl: label.shippingLabelUrl || rr.returnLabelUrl,
+        returnTrackingNumber: label.trackingNumber || rr.returnTrackingNumber,
+        returnShippingCarrier: label.shippingCarrier || rr.returnShippingCarrier,
+        returnShipmentId: payload?.shipmentId ? String(payload.shipmentId) : rr.returnShipmentId,
+        returnTransactionId: label.transactionId || rr.returnTransactionId,
+        labelGeneratedAt: new Date(),
+      },
+      include: returnInclude,
+    });
+
+    await writeAdminAudit({
+      actorId: actor?.id,
+      actorEmail: actor?.email,
+      action: 'RETURN_LABEL_GENERATED',
+      entityType: 'ReturnRequest',
+      entityId: returnPublicId,
+      meta: {
+        trackingNumber: updated.returnTrackingNumber,
+        demo: useDemoReturnLabels(),
+      },
+    });
+
+    return { return: updated, label };
+  }
+
+  resolveReturnStatusFromTracking(trackingStatus, currentStatus) {
+    const statusUp = String(trackingStatus || '').toUpperCase();
+    if (
+      statusUp.includes('DELIVERED') ||
+      statusUp.includes('DELIVERY') ||
+      statusUp.includes('PICKED UP')
+    ) {
+      return 'RECEIVED';
+    }
+    if (
+      statusUp.includes('TRANSIT') ||
+      statusUp.includes('DEPART') ||
+      statusUp.includes('ARRIVAL') ||
+      statusUp.includes('SCAN') ||
+      statusUp.includes('OUT FOR')
+    ) {
+      return currentStatus === 'RECEIVED' ? 'RECEIVED' : 'IN_TRANSIT';
+    }
+    return null;
+  }
+
+  async syncReturnTracking(returnPublicId) {
+    const rr = await prisma.returnRequest.findUnique({
+      where: { publicId: returnPublicId },
+      include: returnInclude,
+    });
+    if (!rr?.returnTrackingNumber) return rr;
+    if (!['LABEL_GENERATED', 'IN_TRANSIT'].includes(rr.status)) return rr;
+
+    if (isDemoReturnTracking(rr.returnTrackingNumber, rr.returnShippingCarrier)) {
+      const nextStatus = demoTrackingNextStatus(rr.status);
+      if (!nextStatus || !this.validateTransition(rr.status, nextStatus, rr.type)) return rr;
+
+      const data = { status: nextStatus };
+      if (nextStatus === 'RECEIVED') data.receivedAt = new Date();
+
+      const updated = await prisma.returnRequest.update({
+        where: { id: rr.id },
+        data,
+        include: returnInclude,
+      });
+
+      if (nextStatus === 'RECEIVED') {
+        await prisma.$transaction(async (tx) => {
+          await markUnitsReturnedForReturn(tx, rr.id);
+        });
+      }
+
+      return updated;
+    }
+
+    const t = await shippingService.trackShipment(
+      rr.returnShippingCarrier || 'UPS',
+      rr.returnTrackingNumber
+    );
+    const nextStatus = this.resolveReturnStatusFromTracking(t.status, rr.status);
+    if (!nextStatus || nextStatus === rr.status) return rr;
+    if (!this.validateTransition(rr.status, nextStatus, rr.type)) return rr;
+
+    const data = { status: nextStatus };
+    if (nextStatus === 'RECEIVED') data.receivedAt = new Date();
+
+    const updated = await prisma.returnRequest.update({
+      where: { id: rr.id },
+      data,
+      include: returnInclude,
+    });
+
+    if (nextStatus === 'RECEIVED') {
+      await prisma.$transaction(async (tx) => {
+        await markUnitsReturnedForReturn(tx, rr.id);
+      });
+    }
+
+    return updated;
+  }
+
+  async syncReturnTrackingBatch() {
+    const rows = await prisma.returnRequest.findMany({
+      where: {
+        type: 'REFURBISHMENT',
+        returnTrackingNumber: { not: null },
+        status: { in: ['LABEL_GENERATED', 'IN_TRANSIT'] },
+      },
+      take: 40,
+      orderBy: { updatedAt: 'asc' },
+    });
+    let touched = 0;
+    for (const row of rows) {
+      try {
+        await this.syncReturnTracking(row.publicId);
+        touched += 1;
+      } catch {
+        /* ignore per-row carrier errors */
+      }
+    }
+    return { scanned: rows.length, touched };
+  }
+
+  async createInspectionRecord(returnPublicId, body, actor) {
+    const rr = await prisma.returnRequest.findUnique({
+      where: { publicId: returnPublicId },
+      include: { refurbishmentJob: true },
+    });
+    if (!rr) throw new AppError(404, 'Return request not found');
+
+    const inspectorUserId = await resolveActorUserId(actor);
+    const record = await prisma.refurbInspectionRecord.create({
+      data: {
+        returnRequestId: body.target === 'job' ? null : rr.id,
+        refurbishmentJobId:
+          body.target === 'job' ? rr.refurbishmentJob?.id ?? null : rr.refurbishmentJob?.id ?? null,
+        inspectorUserId,
+        grade: body.grade,
+        notes: body.notes ? String(body.notes).trim() : null,
+        photoUrlsJson: body.photoUrls ?? undefined,
+        tasksCompletedJson: body.tasksCompleted ?? undefined,
+      },
+    });
+
+    await writeAdminAudit({
+      actorId: actor?.id,
+      actorEmail: actor?.email,
+      action: 'REFURB_INSPECTION_RECORD',
+      entityType: 'ReturnRequest',
+      entityId: returnPublicId,
+      meta: { grade: body.grade },
+    });
+
+    return record;
+  }
+
+  async awardRefurbStoreCredit(rr, grade = 'B') {
+    try {
+      const wallet = await prisma.storeCreditWallet.upsert({
+        where: { userId: rr.userId },
+        update: {},
+        create: { userId: rr.userId, balance: 0, heldBalance: 0 },
+      });
+      let itemAccessPrice = 0;
+      if (rr.orderItemId) {
+        const line = await prisma.orderItem.findUnique({
+          where: { id: rr.orderItemId },
+          select: { price: true },
+        });
+        itemAccessPrice = Number(line?.price ?? 0);
+      }
+      if (itemAccessPrice <= 0) {
+        const settings = await getBusinessSettings();
+        itemAccessPrice = Number(settings.accessMembershipPriceUsd ?? 50);
+      }
+      const gradeMult = refurbCreditMultiplierForGrade(grade);
+      const amount = Math.round(itemAccessPrice * REFURB_STORE_CREDIT_RATE * gradeMult * 100) / 100;
+      await prisma.storeCreditWallet.update({
+        where: { id: wallet.id },
+        data: { balance: wallet.balance + amount },
+      });
+      await prisma.storeCreditTransaction.create({
+        data: {
+          walletId: wallet.id,
+          type: 'EARNED',
+          amount,
+          note: `Reward from approved refurbishment return ${rr.publicId}`,
+        },
+      });
+      await prisma.returnRequest.update({
+        where: { id: rr.id },
+        data: { creditAwarded: amount },
+      });
+      await emailService.sendTemplate({
+        to: rr.user.email,
+        template: 'store-credit-update',
+        context: {
+          name: [rr.user.firstName, rr.user.lastName].filter(Boolean).join(' '),
+          amount: `$${amount.toFixed(2)}`,
+          actionUrl: `${config.frontend.customerUrl}/dashboard/wallet`,
+        },
+      });
+      return amount;
+    } catch (error) {
+      if (!isMissingWalletTableError(error)) throw error;
+      return 0;
+    }
   }
 
   async updateStatus(returnPublicId, { status, notes }, actor) {
@@ -166,12 +544,11 @@ export class ReturnsService {
     if (!rr) throw new AppError(404, 'Return request not found');
 
     if (rr.status === status) {
-      if (notes === undefined) {
-        return rr;
-      }
+      if (notes === undefined) return rr;
       const updatedNotes = await prisma.returnRequest.update({
         where: { id: rr.id },
         data: { notes: notes ? String(notes).trim() : null },
+        include: returnInclude,
       });
       await writeAdminAudit({
         actorId: actor?.id,
@@ -184,18 +561,19 @@ export class ReturnsService {
       return updatedNotes;
     }
 
-    if (!this.validateTransition(rr.status, status)) {
+    if (!this.validateTransition(rr.status, status, rr.type)) {
       throw new AppError(400, `Invalid return status transition: ${rr.status} -> ${status}`);
     }
 
     const data = { status };
-    if (notes !== undefined) {
-      data.notes = notes ? String(notes).trim() : null;
-    }
+    if (notes !== undefined) data.notes = notes ? String(notes).trim() : null;
+    if (status === 'RECEIVED') data.receivedAt = new Date();
+    if (status === 'INSPECTION_APPROVED') data.inspectionApprovedAt = new Date();
 
     const updated = await prisma.returnRequest.update({
       where: { id: rr.id },
       data,
+      include: returnInclude,
     });
 
     await writeAdminAudit({
@@ -238,56 +616,32 @@ export class ReturnsService {
       }
     }
 
-    if (status === 'APPROVED' && rr.type === 'REFURBISHMENT') {
+    if (status === 'INSPECTION_APPROVED' && rr.type === 'REFURBISHMENT') {
       await refurbishmentService.createJobForReturn(rr.id);
-      try {
-        const wallet = await prisma.storeCreditWallet.upsert({
-          where: { userId: rr.userId },
-          update: {},
-          create: { userId: rr.userId, balance: 0, heldBalance: 0 },
-        });
-        let itemAccessPrice = 0;
-        if (rr.orderItemId) {
-          const line = await prisma.orderItem.findUnique({
-            where: { id: rr.orderItemId },
-            select: { price: true },
-          });
-          itemAccessPrice = Number(line?.price ?? 0);
-        }
-        if (itemAccessPrice <= 0) {
-          const settings = await getBusinessSettings();
-          itemAccessPrice = Number(settings.accessMembershipPriceUsd ?? 50);
-        }
-        const amount = Math.round(itemAccessPrice * 0.2 * 100) / 100;
-        await prisma.storeCreditWallet.update({
-          where: { id: wallet.id },
-          data: { balance: wallet.balance + amount },
-        });
-        await prisma.storeCreditTransaction.create({
-          data: {
-            walletId: wallet.id,
-            type: 'EARNED',
-            amount,
-            note: `Reward from approved refurbishment return ${rr.publicId}`,
-          },
-        });
-        await prisma.returnRequest.update({
-          where: { id: rr.id },
-          data: { creditAwarded: amount },
-        });
+      const full = await prisma.returnRequest.findUnique({
+        where: { id: rr.id },
+        include: {
+          user: { select: { email: true, firstName: true, lastName: true } },
+          inspectionRecords: { orderBy: { createdAt: 'desc' }, take: 1 },
+        },
+      });
+      const grade = full?.inspectionRecords?.[0]?.grade || 'B';
+      await this.awardRefurbStoreCredit({ ...rr, ...full, ...updated }, grade);
+      const withJob = await prisma.returnRequest.findUnique({
+        where: { id: rr.id },
+        include: returnInclude,
+      });
+      if (withJob) {
         await emailService.sendTemplate({
           to: rr.user.email,
-          template: 'store-credit-update',
+          template: 'return-status',
           context: {
             name: [rr.user.firstName, rr.user.lastName].filter(Boolean).join(' '),
-            amount: `$${amount.toFixed(2)}`,
-            actionUrl: `${config.frontend.customerUrl}/dashboard/wallet`,
+            status,
+            actionUrl: `${config.frontend.customerUrl}/dashboard/returns/${returnPublicId}`,
           },
         });
-      } catch (error) {
-        if (!isMissingWalletTableError(error)) {
-          throw error;
-        }
+        return withJob;
       }
     }
 
@@ -297,11 +651,23 @@ export class ReturnsService {
       context: {
         name: [rr.user.firstName, rr.user.lastName].filter(Boolean).join(' '),
         status,
-        actionUrl: `${config.frontend.customerUrl}/dashboard/returns`,
+        actionUrl: `${config.frontend.customerUrl}/dashboard/returns/${returnPublicId}`,
       },
     });
 
     return updated;
+  }
+  async bulkMarkReceived(returnPublicIds, actor) {
+    const results = [];
+    for (const id of returnPublicIds) {
+      try {
+        const row = await this.updateStatus(id, { status: 'RECEIVED' }, actor);
+        results.push({ id, ok: true, return: row });
+      } catch (e) {
+        results.push({ id, ok: false, error: e.message });
+      }
+    }
+    return { results };
   }
 }
 
