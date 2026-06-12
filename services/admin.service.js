@@ -30,22 +30,26 @@ export async function getFinanceStats({ dateFrom, dateTo } = {}) {
     ...(createdAt ? { createdAt } : {}),
   };
 
-  const [totalAgg, refundedAgg, refurbishedRow] = await Promise.all([
-    prisma.order.aggregate({
-      where: basePaid,
-      _sum: { totalAmount: true },
-      _count: true,
-    }),
-    prisma.order.aggregate({
-      where: {
-        paymentStatus: 'REFUNDED',
-        ...(createdAt ? { createdAt } : {}),
-      },
-      _sum: { totalAmount: true },
-      _count: true,
-    }),
-    refurbishedSalesRaw(createdAt),
-  ]);
+  const [totalAgg, refundedAgg, refurbishedRow, newProductRow, refurbishedOrderCount, newProductOrderCount] =
+    await Promise.all([
+      prisma.order.aggregate({
+        where: basePaid,
+        _sum: { totalAmount: true },
+        _count: true,
+      }),
+      prisma.order.aggregate({
+        where: {
+          paymentStatus: 'REFUNDED',
+          ...(createdAt ? { createdAt } : {}),
+        },
+        _sum: { totalAmount: true },
+        _count: true,
+      }),
+      refurbishedSalesRaw(createdAt),
+      newProductSalesRaw(createdAt),
+      distinctOrderCountByProductType(createdAt, 'REFURBISHED'),
+      distinctOrderCountByProductType(createdAt, 'NEW'),
+    ]);
 
   const now = new Date();
   const activeMembers = await prisma.user.count({
@@ -57,11 +61,18 @@ export async function getFinanceStats({ dateFrom, dateTo } = {}) {
   const { getMembershipRevenueStats } = await import('./membership.service.js');
   const membershipStats = await getMembershipRevenueStats({ dateFrom, dateTo });
 
+  const totalRevenue = totalAgg._sum.totalAmount ?? 0;
+  const refundedTotal = refundedAgg._sum.totalAmount ?? 0;
+
   return {
-    totalRevenue: totalAgg._sum.totalAmount ?? 0,
+    totalRevenue,
     paidOrderCount: totalAgg._count,
     refurbishedSales: refurbishedRow,
-    refundedTotal: refundedAgg._sum.totalAmount ?? 0,
+    newProductSales: newProductRow,
+    refurbishedOrderCount,
+    newProductOrderCount,
+    netRevenue: Math.max(0, totalRevenue - refundedTotal),
+    refundedTotal,
     refundedOrderCount: refundedAgg._count,
     membershipRevenueInOrders: membershipStats.membershipRevenue,
     membershipPaymentCount: membershipStats.membershipPaymentCount,
@@ -71,9 +82,14 @@ export async function getFinanceStats({ dateFrom, dateTo } = {}) {
   };
 }
 
-async function refurbishedSalesRaw(createdAt) {
+function orderDateSqlParts(createdAt) {
   const gtePart = createdAt?.gte ? Prisma.sql`AND o."createdAt" >= ${createdAt.gte}` : Prisma.empty;
   const ltePart = createdAt?.lte ? Prisma.sql`AND o."createdAt" <= ${createdAt.lte}` : Prisma.empty;
+  return { gtePart, ltePart };
+}
+
+async function refurbishedSalesRaw(createdAt) {
+  const { gtePart, ltePart } = orderDateSqlParts(createdAt);
   const rows = await prisma.$queryRaw`
     SELECT COALESCE(SUM(oi."price" * oi."quantity"), 0)::float AS "sum"
     FROM "OrderItem" oi
@@ -86,6 +102,42 @@ async function refurbishedSalesRaw(createdAt) {
       ${ltePart}
   `;
   return rows[0]?.sum ?? 0;
+}
+
+async function newProductSalesRaw(createdAt) {
+  const { gtePart, ltePart } = orderDateSqlParts(createdAt);
+  const rows = await prisma.$queryRaw`
+    SELECT COALESCE(SUM(oi."price" * oi."quantity"), 0)::float AS "sum"
+    FROM "OrderItem" oi
+    INNER JOIN "Order" o ON oi."orderId" = o."id"
+    INNER JOIN "Product" p ON oi."productId" = p."id"
+    WHERE o."paymentStatus" = 'PAID'
+      AND o."status" <> 'CANCELLED'
+      AND p."productType" <> 'REFURBISHED'
+      ${gtePart}
+      ${ltePart}
+  `;
+  return rows[0]?.sum ?? 0;
+}
+
+async function distinctOrderCountByProductType(createdAt, productType) {
+  const { gtePart, ltePart } = orderDateSqlParts(createdAt);
+  const typeFilter =
+    productType === 'REFURBISHED'
+      ? Prisma.sql`AND p."productType" = 'REFURBISHED'`
+      : Prisma.sql`AND p."productType" <> 'REFURBISHED'`;
+  const rows = await prisma.$queryRaw`
+    SELECT COUNT(DISTINCT o."id")::int AS "count"
+    FROM "OrderItem" oi
+    INNER JOIN "Order" o ON oi."orderId" = o."id"
+    INNER JOIN "Product" p ON oi."productId" = p."id"
+    WHERE o."paymentStatus" = 'PAID'
+      AND o."status" <> 'CANCELLED'
+      ${typeFilter}
+      ${gtePart}
+      ${ltePart}
+  `;
+  return rows[0]?.count ?? 0;
 }
 
 export async function listCustomers(page = 1, limit = 20, { search, role } = {}) {
@@ -147,9 +199,28 @@ export async function getCustomerDetail(userPublicId) {
       phone: true,
       isActive: true,
       accessMemberUntil: true,
+      accessNumber: true,
+      babyName: true,
       createdAt: true,
       role: { select: { name: true } },
-      storeCreditWallet: { select: { balance: true, publicId: true } },
+      storeCreditWallet: {
+        select: {
+          balance: true,
+          publicId: true,
+          transactions: {
+            orderBy: { createdAt: 'desc' },
+            take: 20,
+            select: {
+              publicId: true,
+              type: true,
+              amount: true,
+              note: true,
+              orderPublicId: true,
+              createdAt: true,
+            },
+          },
+        },
+      },
     },
   });
   if (!user || !isStorefrontCustomerRole(user.role?.name)) {
@@ -161,49 +232,90 @@ export async function getCustomerDetail(userPublicId) {
     select: { id: true },
   });
 
-  const [orderAgg, orders, returns, cancellations] = await Promise.all([
-    prisma.order.aggregate({
-      where: { userId: uid.id, paymentStatus: 'PAID', status: { not: 'CANCELLED' } },
-      _sum: { totalAmount: true },
-      _count: true,
-    }),
-    prisma.order.findMany({
-      where: { userId: uid.id },
-      orderBy: { createdAt: 'desc' },
-      take: 50,
-      select: {
-        id: true,
-        publicId: true,
-        status: true,
-        paymentStatus: true,
-        totalAmount: true,
-        createdAt: true,
-      },
-    }),
-    prisma.returnRequest.findMany({
-      where: { userId: uid.id },
-      orderBy: { createdAt: 'desc' },
-      take: 50,
-      select: {
-        id: true,
-        publicId: true,
-        status: true,
-        type: true,
-        createdAt: true,
-      },
-    }),
-    prisma.order.count({
-      where: { userId: uid.id, status: 'CANCELLED' },
-    }),
-  ]);
+  const [orderAgg, orders, returns, returnsCount, cancellations, addresses, membershipPayments] =
+    await Promise.all([
+      prisma.order.aggregate({
+        where: { userId: uid.id, paymentStatus: 'PAID', status: { not: 'CANCELLED' } },
+        _sum: { totalAmount: true },
+        _count: true,
+      }),
+      prisma.order.findMany({
+        where: { userId: uid.id },
+        orderBy: { createdAt: 'desc' },
+        take: 50,
+        select: {
+          id: true,
+          publicId: true,
+          orderNumber: true,
+          status: true,
+          paymentStatus: true,
+          totalAmount: true,
+          createdAt: true,
+        },
+      }),
+      prisma.returnRequest.findMany({
+        where: { userId: uid.id },
+        orderBy: { createdAt: 'desc' },
+        take: 50,
+        select: {
+          id: true,
+          publicId: true,
+          status: true,
+          type: true,
+          createdAt: true,
+        },
+      }),
+      prisma.returnRequest.count({ where: { userId: uid.id } }),
+      prisma.order.count({
+        where: { userId: uid.id, status: 'CANCELLED' },
+      }),
+      prisma.address.findMany({
+        where: { userId: uid.id },
+        orderBy: [{ isDefault: 'desc' }, { updatedAt: 'desc' }],
+        take: 5,
+        select: {
+          publicId: true,
+          fullName: true,
+          addressLine1: true,
+          addressLine2: true,
+          street: true,
+          city: true,
+          state: true,
+          zipCode: true,
+          country: true,
+          phoneNumber: true,
+          isDefault: true,
+        },
+      }),
+      prisma.membershipPayment.findMany({
+        where: { userId: uid.id },
+        orderBy: { paidAt: 'desc' },
+        take: 10,
+        select: {
+          publicId: true,
+          type: true,
+          amount: true,
+          currency: true,
+          paidAt: true,
+          accessValidUntil: true,
+        },
+      }),
+    ]);
+
+  const { storeCreditWallet, ...userRest } = user;
 
   return {
-    user,
-    walletBalance: user.storeCreditWallet?.balance ?? 0,
+    user: userRest,
+    walletBalance: storeCreditWallet?.balance ?? 0,
+    walletPublicId: storeCreditWallet?.publicId ?? null,
+    storeCreditTransactions: storeCreditWallet?.transactions ?? [],
     totalSpend: orderAgg._sum.totalAmount ?? 0,
     orderCount: orderAgg._count,
     orders,
     returns,
+    returnsCount,
+    addresses,
+    membershipPayments,
     cancellationsCount: cancellations,
   };
 }
@@ -337,6 +449,9 @@ export async function createAdminTeamMember(actorPublicId, payload) {
   }
 
   const normalized = normalizeTeamPermissionModules(modules);
+  if (!normalized || normalized.length === 0) {
+    throw new AppError(400, 'At least one module permission is required');
+  }
 
   const hashed = await bcrypt.hash(tempPassword, 10);
   const created = await prisma.user.create({

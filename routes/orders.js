@@ -1,12 +1,13 @@
 import { Router } from 'express';
 import { orderController } from '../controllers/order.controller.js';
-import { authenticate, authorize } from '../middleware/auth.js';
+import { authenticate, authorize, requireFullAccount } from '../middleware/auth.js';
 import { requireConsoleModule } from '../middleware/admin-console.js';
 
 const router = Router();
 
-router.get('/', authenticate, (req, res, next) => orderController.getUserOrders(req, res).catch(next));
-router.get('/stats', authenticate, (req, res, next) => orderController.getUserOrderStats(req, res).catch(next));
+router.get('/track', (req, res, next) => orderController.trackOrder(req, res).catch(next));
+router.get('/', authenticate, requireFullAccount, (req, res, next) => orderController.getUserOrders(req, res).catch(next));
+router.get('/stats', authenticate, requireFullAccount, (req, res, next) => orderController.getUserOrderStats(req, res).catch(next));
 router.post('/', authenticate, (req, res, next) => orderController.createOrder(req, res).catch(next));
 router.post('/quote', authenticate, (req, res, next) => orderController.getCheckoutQuote(req, res).catch(next));
 
@@ -37,6 +38,13 @@ router.post(
   authorize('ADMIN', 'ADMIN_TEAM'),
   requireConsoleModule('orders'),
   (req, res, next) => orderController.createPickupList(req, res).catch(next)
+);
+router.get(
+  '/admin/pickup-lists/:publicId',
+  authenticate,
+  authorize('ADMIN', 'ADMIN_TEAM'),
+  requireConsoleModule('orders'),
+  (req, res, next) => orderController.getPickupListPrintData(req, res).catch(next)
 );
 router.get(
   '/admin/pickup-lists/:publicId/pdf',
@@ -116,6 +124,13 @@ router.post(
   (req, res, next) => orderController.generateAdminReturnLabel(req, res).catch(next)
 );
 router.get(
+  '/admin/:id/activity',
+  authenticate,
+  authorize('ADMIN', 'ADMIN_TEAM'),
+  requireConsoleModule('orders'),
+  (req, res, next) => orderController.getOrderActivity(req, res).catch(next)
+);
+router.get(
   '/admin/:id',
   authenticate,
   authorize('ADMIN', 'ADMIN_TEAM'),
@@ -160,7 +175,7 @@ router.patch(
   requireConsoleModule('orders'),
   (req, res, next) => orderController.updateTracking(req, res).catch(next)
 );
-router.get('/:id', authenticate, (req, res, next) =>
+router.get('/:id', authenticate, requireFullAccount, (req, res, next) =>
   orderController.getOrderById(req, res).catch(next)
 );
 

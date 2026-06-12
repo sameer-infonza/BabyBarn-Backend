@@ -64,6 +64,14 @@ export class OrderController {
     });
   }
 
+  async trackOrder(req, res) {
+    const token = req.query.token ? String(req.query.token) : undefined;
+    const orderNumber = req.query.orderNumber ? String(req.query.orderNumber) : undefined;
+    const email = req.query.email ? String(req.query.email) : undefined;
+    const data = await orderService.trackPublicOrder({ token, orderNumber, email });
+    res.status(200).json({ success: true, data: toPublicJson(data) });
+  }
+
   async createOrder(req, res) {
     const { config } = await import('../config/env.js');
     if (config.nodeEnv === 'production') {
@@ -163,15 +171,22 @@ export class OrderController {
   async updateAdminShipping(req, res) {
     const { id } = req.params;
     const body = await validate(adminShippingUpdateSchema, req.body);
-    const order = await orderService.updateAdminShipping(id, body);
+    const order = await orderService.updateAdminShipping(id, body, adminActor(req));
     res.status(200).json({ success: true, data: toPublicJson(order) });
   }
 
   async updateTracking(req, res) {
     const { id } = req.params;
     const body = await validate(trackingUpdateSchema, req.body);
-    const order = await orderService.addTracking(id, body);
+    const order = await orderService.addTracking(id, body, adminActor(req));
     res.status(200).json({ success: true, data: toPublicJson(order) });
+  }
+
+  async getOrderActivity(req, res) {
+    const { id } = req.params;
+    const { listOrderActivity } = await import('../services/audit.service.js');
+    const data = await listOrderActivity(id);
+    res.status(200).json({ success: true, data: toPublicJson(data) });
   }
 
   async getAdminShippingOptions(req, res) {
@@ -279,6 +294,12 @@ export class OrderController {
     const body = await validate(pickupListCreateSchema, req.body);
     const list = await orderService.createPickupList(body, adminActor(req));
     res.status(201).json({ success: true, data: toPublicJson(list) });
+  }
+
+  async getPickupListPrintData(req, res) {
+    const { publicId } = req.params;
+    const data = await orderService.getPickupListForPdf(publicId);
+    res.status(200).json({ success: true, data: toPublicJson(data) });
   }
 
   async getPickupListPdf(req, res, next) {
