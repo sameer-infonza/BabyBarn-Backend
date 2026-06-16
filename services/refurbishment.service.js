@@ -168,11 +168,7 @@ export class RefurbishmentService {
 
     let listedProduct = null;
     if (nextStatus === 'LISTED') {
-      const grade =
-        opts.grade ||
-        job.returnRequest.inspectionRecords?.[0]?.grade ||
-        'B';
-      listedProduct = await this.createListedRefurbProduct(job, grade);
+      listedProduct = await this.createListedRefurbProduct(job);
       data.listedAt = now;
       data.listedProductId = listedProduct.id;
     }
@@ -199,7 +195,7 @@ export class RefurbishmentService {
     return { job: updated, listedProduct: updated.listedProduct || listedProduct };
   }
 
-  async createListedRefurbProduct(job, grade = 'B') {
+  async createListedRefurbProduct(job) {
     const line = job.returnRequest.orderItem;
     const source = line?.product;
     if (!source) throw new AppError(400, 'Return has no product line to list');
@@ -250,7 +246,7 @@ export class RefurbishmentService {
 
         await tx.product.update({
           where: { id: existing.id },
-          data: { conditionGrade: grade },
+          data: { conditionGrade: null },
         });
 
         await writeInventoryLedger(tx, {
@@ -260,7 +256,7 @@ export class RefurbishmentService {
           eventType: 'RESTOCK',
           referenceType: 'refurbishment_job',
           referenceId: job.publicId,
-          note: `Refurbished unit restocked (${grade})`,
+          note: 'Refurbished unit restocked',
         });
 
         const units = await tx.productUnit.findMany({ where: { sourceReturnId: job.returnRequestId } });
@@ -325,7 +321,7 @@ export class RefurbishmentService {
           isActiveListing: true,
           sourceReturnId: job.returnRequestId,
           sourceProductId: sourceFull.id,
-          conditionGrade: grade,
+          conditionGrade: null,
           refurbishedAt: new Date(),
         },
       });

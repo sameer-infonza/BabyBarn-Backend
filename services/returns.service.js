@@ -18,10 +18,7 @@ import {
   evaluateRefurbQuestionnaire,
   initialReturnStatusForDecision,
 } from './refurb-eligibility.service.js';
-import {
-  REFURB_STORE_CREDIT_RATE,
-  refurbCreditMultiplierForGrade,
-} from '../config/refurb.config.js';
+import { computeRefurbStoreCredit } from '../config/refurb.config.js';
 
 function isMissingWalletTableError(error) {
   return Boolean(
@@ -480,7 +477,7 @@ export class ReturnsService {
     return record;
   }
 
-  async awardRefurbStoreCredit(rr, grade = 'B') {
+  async awardRefurbStoreCredit(rr) {
     try {
       const wallet = await prisma.storeCreditWallet.upsert({
         where: { userId: rr.userId },
@@ -499,8 +496,7 @@ export class ReturnsService {
         const settings = await getBusinessSettings();
         itemAccessPrice = Number(settings.accessMembershipPriceUsd ?? 50);
       }
-      const gradeMult = refurbCreditMultiplierForGrade(grade);
-      const amount = Math.round(itemAccessPrice * REFURB_STORE_CREDIT_RATE * gradeMult * 100) / 100;
+      const amount = computeRefurbStoreCredit(itemAccessPrice);
       await prisma.storeCreditWallet.update({
         where: { id: wallet.id },
         data: { balance: wallet.balance + amount },
@@ -625,8 +621,7 @@ export class ReturnsService {
           inspectionRecords: { orderBy: { createdAt: 'desc' }, take: 1 },
         },
       });
-      const grade = full?.inspectionRecords?.[0]?.grade || 'B';
-      await this.awardRefurbStoreCredit({ ...rr, ...full, ...updated }, grade);
+      await this.awardRefurbStoreCredit({ ...rr, ...full, ...updated });
       const withJob = await prisma.returnRequest.findUnique({
         where: { id: rr.id },
         include: returnInclude,

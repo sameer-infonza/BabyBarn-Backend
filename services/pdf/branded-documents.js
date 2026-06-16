@@ -110,6 +110,11 @@ export async function renderPackingSlipPdfBuffer(order) {
       );
   }
 
+  if (order.includeReturnEnvelope) {
+    doc.moveDown(0.5);
+    doc.fontSize(10).text('[ ] Include reusable return envelope (ACCESS member order)');
+  }
+
   doc.moveDown();
   doc.fontSize(10).text(
     `Method: ${order.selectedRateServiceLevel || '—'} | Carrier: ${order.shippingCarrier || 'UPS'}`

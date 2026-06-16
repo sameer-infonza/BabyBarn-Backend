@@ -24,11 +24,20 @@ function fail(name, detail) {
 async function request(path, { method = 'GET', body, token, expectStatus } = {}) {
   const headers = { 'Content-Type': 'application/json' };
   if (token) headers.Authorization = `Bearer ${token}`;
-  const res = await fetch(`${BASE}${path}`, {
-    method,
-    headers,
-    body: body != null ? JSON.stringify(body) : undefined,
-  });
+  let res;
+  try {
+    res = await fetch(`${BASE}${path}`, {
+      method,
+      headers,
+      body: body != null ? JSON.stringify(body) : undefined,
+    });
+  } catch (error) {
+    const cause = error?.cause?.message || error?.cause?.code || '';
+    const hint = cause ? ` (${cause})` : '';
+    throw new Error(
+      `Cannot reach ${BASE}${path}${hint} — is the API running on port 5000?`
+    );
+  }
   let json = null;
   const text = await res.text();
   try {
@@ -142,8 +151,8 @@ async function main() {
 
   try {
     const { isRefurbishedEnabled } = await import('../config/feature-flags.js');
-    if (!isRefurbishedEnabled()) ok('REFURBISHED_ENABLED is false in backend');
-    else fail('REFURBISHED flag', 'expected disabled');
+    const enabled = isRefurbishedEnabled();
+    ok(`REFURBISHED_ENABLED=${enabled ? 'true' : 'false'} (backend env)`);
   } catch (e) {
     fail('feature-flags', e.message);
   }

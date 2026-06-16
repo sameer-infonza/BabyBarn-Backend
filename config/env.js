@@ -90,4 +90,5 @@ export const config = {
   pendingOrderTtlMinutes: parseInt(process.env.PENDING_ORDER_TTL_MINUTES || '60', 10),
   /** When true, approving a STANDARD return restocks one unit to the original SKU. */
   standardReturnRestock: process.env.STANDARD_RETURN_RESTOCK !== 'false',
+  salesTaxRate: Number(process.env.SALES_TAX_RATE ?? 0.06),
 };

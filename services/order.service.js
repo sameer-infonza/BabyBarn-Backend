@@ -374,7 +374,16 @@ export class OrderService {
       0,
       Math.min(requestedStoreCredit, availableStoreCredit, subtotalApplied + shippingCost + accessMembershipFee)
     );
-    const totalPayable = Math.max(0, subtotalApplied + shippingCost + accessMembershipFee - storeCreditApplied);
+    const taxAmount =
+      Math.round(
+        Math.max(0, subtotalApplied + shippingCost + accessMembershipFee - storeCreditApplied) *
+          config.salesTaxRate *
+          100
+      ) / 100;
+    const totalPayable = Math.max(
+      0,
+      subtotalApplied + shippingCost + accessMembershipFee - storeCreditApplied + taxAmount
+    );
 
     const accessPricingLineCount = lines.filter((l) => l.pricingTier === 'ACCESS').length;
 
@@ -406,6 +415,7 @@ export class OrderService {
         shippingCost,
         storeCreditAvailable: availableStoreCredit,
         storeCreditApplied,
+        taxAmount,
         totalPayable,
       },
     };

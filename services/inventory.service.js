@@ -2,8 +2,14 @@ import { prisma } from '../lib/prisma.js';
 import { AppError } from '../utils/error-handler.js';
 import { productAvailableStock, variantAvailableStock } from './inventory-reservation.js';
 import { writeInventoryLedger } from './inventory-ledger.service.js';
+import {
+  DEFAULT_LOW_STOCK_THRESHOLD,
+  assertSellableStock,
+  lowStockThresholdFromPar,
+  stockStatusFromAvailable,
+} from '../lib/inventory-stock-rules.js';
 
-export const LOW_STOCK_THRESHOLD = parseInt(process.env.LOW_STOCK_THRESHOLD || '10', 10);
+export const LOW_STOCK_THRESHOLD = DEFAULT_LOW_STOCK_THRESHOLD;
 
 export function computeTotalStock(product) {
   const variants = product.variants ?? [];
@@ -19,16 +25,11 @@ export function computeAvailableStock(product) {
 
 /** Validates aggregate available stock without mutating (for unpaid checkout orders). */
 export function assertStockAvailable(product, quantity) {
-  const total = computeAvailableStock(product);
-  if (total < quantity) {
-    throw new AppError(400, `Insufficient stock for "${product.name}"`);
-  }
+  assertSellableStock(product, quantity);
 }
 
-export function stockStatusFromTotal(total) {
-  if (total <= 0) return 'out_of_stock';
-  if (total <= LOW_STOCK_THRESHOLD) return 'low_stock';
-  return 'in_stock';
+export function stockStatusFromTotal(total, reorderPoint, productType = 'NEW') {
+  return stockStatusFromAvailable(total, reorderPoint, productType);
 }
 
 export function combinationLabel(combination) {
@@ -192,7 +193,7 @@ function flattenProductToSkuLines(p) {
       const totalStock = v.stock;
       const reservedStock = v.reservedStock ?? 0;
       const availableStock = variantAvailableStock(v);
-      const stockStatus = stockStatusFromTotal(availableStock);
+      const stockStatus = stockStatusFromAvailable(availableStock, p.reorderPoint, p.productType);
       return {
         lineKey: `${p.publicId}:${v.publicId}`,
         productId: p.publicId,
@@ -202,7 +203,8 @@ function flattenProductToSkuLines(p) {
         sku: v.sku,
         category,
         productType: p.productType,
-        conditionGrade: p.conditionGrade ?? null,
+        reorderPoint: p.reorderPoint ?? null,
+        lowStockThreshold: lowStockThresholdFromPar(p.reorderPoint),
         sourceProduct: p.sourceProduct
           ? { id: p.sourceProduct.publicId, name: p.sourceProduct.name, sku: p.sourceProduct.sku }
           : null,
@@ -219,7 +221,7 @@ function flattenProductToSkuLines(p) {
   const totalStock = p.stock;
   const reservedStock = p.reservedStock ?? 0;
   const availableStock = productAvailableStock(p);
-  const stockStatus = stockStatusFromTotal(availableStock);
+  const stockStatus = stockStatusFromAvailable(availableStock, p.reorderPoint, p.productType);
   return [
     {
       lineKey: `${p.publicId}:simple`,
@@ -230,7 +232,8 @@ function flattenProductToSkuLines(p) {
       sku: p.sku,
       category,
       productType: p.productType,
-      conditionGrade: p.conditionGrade ?? null,
+      reorderPoint: p.reorderPoint ?? null,
+      lowStockThreshold: lowStockThresholdFromPar(p.reorderPoint),
       sourceProduct: p.sourceProduct
         ? { id: p.sourceProduct.publicId, name: p.sourceProduct.name, sku: p.sourceProduct.sku }
         : null,
@@ -264,9 +267,9 @@ export class InventoryService {
       const lines = flattenProductToSkuLines(p);
       for (const line of lines) {
         totalSkus += 1;
-        const t = line.totalStock;
-        if (t <= 0) outOfStock += 1;
-        else if (t <= LOW_STOCK_THRESHOLD) critical += 1;
+        const t = line.availableStock ?? line.totalStock;
+        if (t <= 0 || line.stockStatus === 'out_of_stock') outOfStock += 1;
+        else if (line.stockStatus === 'low_stock') critical += 1;
       }
     }
     return {

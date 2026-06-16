@@ -89,6 +89,7 @@ const createProductBodySchema = z.object({
   unitPriceReference: z.union([z.string(), z.null()]).optional(),
   fabric: z.union([z.string(), z.null()]).optional(),
   care: z.union([z.string(), z.null()]).optional(),
+  reorderPoint: z.number().int().min(1).nullable().optional(),
   sizeAgeGroup: z.union([z.string(), z.null()]).optional(),
   vendor: z.union([z.string(), z.null()]).optional(),
   tags: z.union([z.string(), z.null()]).optional(),
@@ -364,7 +365,7 @@ export const returnEligibilityReviewSchema = z.object({
 });
 
 export const refurbInspectionCreateSchema = z.object({
-  grade: z.enum(['A', 'B', 'C']),
+  grade: z.enum(['A', 'B', 'C']).optional(),
   notes: z.string().max(5000).optional().nullable(),
   photoUrls: z.record(z.string()).optional(),
   tasksCompleted: z

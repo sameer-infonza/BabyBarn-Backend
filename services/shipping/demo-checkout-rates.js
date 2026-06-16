@@ -49,19 +49,6 @@ export function buildDemoCheckoutRates({ hasAccess = false } = {}) {
       providerSlug: 'demo',
       externalRateId: 'demo-nextday',
     },
-    {
-      rateId: encodeDemoRateId({ code: 'pickup', a: 0 }),
-      provider: 'Baby Barn',
-      serviceLevel: 'Pick up at Baby Barn Hayes Valley',
-      serviceToken: 'demo-pickup',
-      currency: 'USD',
-      amount: 0,
-      estimatedDays: 1,
-      attributes: [],
-      durationTerms: DEMO_PICKUP_LINE,
-      providerSlug: 'demo',
-      externalRateId: 'demo-pickup',
-    },
   ];
 }
 

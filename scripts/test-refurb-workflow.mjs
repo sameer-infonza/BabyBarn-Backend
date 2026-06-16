@@ -3,10 +3,7 @@ import {
   movementTypeFromLedger,
 } from '../lib/inventory-movement-types.js';
 import { evaluateRefurbQuestionnaire } from '../services/refurb-eligibility.service.js';
-import {
-  REFURB_STORE_CREDIT_RATE,
-  refurbCreditMultiplierForGrade,
-} from '../config/refurb.config.js';
+import { computeRefurbStoreCredit } from '../config/refurb.config.js';
 import { ReturnsService } from '../services/returns.service.js';
 import {
   buildDemoReturnLabel,
@@ -60,10 +57,8 @@ const manual = evaluateRefurbQuestionnaire(
 );
 assert(manual.decision === 'MANUAL_REVIEW', 'Expected MANUAL_REVIEW for minor stains + odors');
 
-assert(refurbCreditMultiplierForGrade('C') === 0.8, 'Grade C multiplier');
-assert(refurbCreditMultiplierForGrade('A') === 1, 'Grade A multiplier');
-const credit = Math.round(50 * REFURB_STORE_CREDIT_RATE * refurbCreditMultiplierForGrade('C') * 100) / 100;
-assert(credit === 8, `Expected $8 credit for grade C, got ${credit}`);
+const credit = computeRefurbStoreCredit(50);
+assert(credit === 10, `Expected $10 flat credit for $50 item, got ${credit}`);
 
 const svc = new ReturnsService();
 assert(svc.validateTransition('APPROVED', 'LABEL_GENERATED', 'REFURBISHMENT'), 'Label after approval');

@@ -51,6 +51,7 @@ export const authenticate = async (req, res, next) => {
       id: dbUser.publicId,
       email: dbUser.email,
       role: ('role' in dbUser ? dbUser.role?.name : null) || decoded.role,
+      isGuest: 'isGuest' in dbUser ? Boolean(dbUser.isGuest) : false,
       adminModules: 'adminModules' in dbUser ? (dbUser.adminModules ?? null) : null,
     };
     next();

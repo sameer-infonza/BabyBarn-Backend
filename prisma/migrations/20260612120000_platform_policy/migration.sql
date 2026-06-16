@@ -1,0 +1,7 @@
+-- Platform policy: par level, tax, return envelope
+ALTER TABLE "Product" ADD COLUMN IF NOT EXISTS "reorderPoint" INTEGER;
+
+ALTER TABLE "CheckoutIntent" ADD COLUMN IF NOT EXISTS "taxAmount" DOUBLE PRECISION NOT NULL DEFAULT 0;
+
+ALTER TABLE "Order" ADD COLUMN IF NOT EXISTS "taxAmount" DOUBLE PRECISION NOT NULL DEFAULT 0;
+ALTER TABLE "Order" ADD COLUMN IF NOT EXISTS "includeReturnEnvelope" BOOLEAN NOT NULL DEFAULT false;

@@ -589,6 +589,7 @@ async function sendOrderConfirmationEmail(orderPublicId) {
       total: `$${Number(orderDetail.totalAmount).toFixed(2)}`,
       actionUrl: dashboardUrl,
       trackingUrl,
+      includeReturnEnvelope: Boolean(orderDetail.includeReturnEnvelope),
     },
   });
 }
@@ -911,8 +912,8 @@ export async function getCheckoutSessionSummary(userPublicId, sessionId) {
       currency: (session?.currency || 'usd').toUpperCase(),
       subtotal,
       shipping: Number(order.shippingCost || 0),
-      tax: 0,
-      total: Math.max(total, subtotal + Number(order.shippingCost || 0)),
+      tax: Number(order.taxAmount || 0),
+      total: Math.max(total, subtotal + Number(order.shippingCost || 0) + Number(order.taxAmount || 0)),
     },
     payment: {
       sessionStatus: session?.status || null,

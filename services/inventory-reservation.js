@@ -1,4 +1,5 @@
 import { AppError } from '../utils/error-handler.js';
+import { isSellableAvailable } from '../lib/inventory-stock-rules.js';
 import { syncParentStockFromVariants } from './inventory.service.js';
 import { writeInventoryLedger } from './inventory-ledger.service.js';
 
@@ -76,6 +77,9 @@ export async function reserveOrderLineStock(tx, product, variantDbId, quantity, 
     const v = await tx.productVariant.findUnique({ where: { id: variantDbId } });
     if (!v) throw new AppError(404, 'Variant not found');
     const available = variantAvailableStock(v);
+    if (!isSellableAvailable(available, product.productType)) {
+      throw new AppError(400, `"${product.name}" is out of stock`, 'INSUFFICIENT_STOCK');
+    }
     if (available < quantity) {
       throw new AppError(400, `Insufficient stock for "${product.name}"`, 'INSUFFICIENT_STOCK');
     }
@@ -102,6 +106,9 @@ export async function reserveOrderLineStock(tx, product, variantDbId, quantity, 
     include: { variants: { orderBy: { sortOrder: 'asc' } } },
   });
   const available = productAvailableStock(fresh);
+  if (!isSellableAvailable(available, fresh.productType)) {
+    throw new AppError(400, `"${product.name}" is out of stock`, 'INSUFFICIENT_STOCK');
+  }
   if (available < quantity) {
     throw new AppError(400, `Insufficient stock for "${product.name}"`, 'INSUFFICIENT_STOCK');
   }

@@ -91,6 +91,7 @@ export function renderBrandedEmailTemplate(template, context = {}, brand) {
       })}
       ${emailCtaButton(context.actionUrl, context.trackingUrl ? 'View order details' : 'View your order')}
       ${context.trackingUrl && context.trackingUrl !== context.actionUrl ? emailCtaButton(context.trackingUrl, 'Track your order') : ''}
+      ${context.includeReturnEnvelope ? emailMutedNote('As an ACCESS member, your package includes a reusable return envelope for eligible used product returns.') : ''}
     `;
     const { html } = doc(subject, `Order ${context.orderId || ''} confirmed`, bodyHtml, brand);
     const trackLine = context.trackingUrl ? ` Track: ${context.trackingUrl}` : '';
@@ -150,21 +151,36 @@ export function renderBrandedEmailTemplate(template, context = {}, brand) {
 
   if (template === 'return-status') {
     const subject = 'Update on your return request';
+    const statusRaw = String(context.status || '');
+    const statusLabels = {
+      REQUESTED: 'Requested',
+      RECEIVED: 'Received at warehouse',
+      UNDER_INSPECTION: 'Under inspection',
+      APPROVED: 'Approved',
+      REJECTED: 'Rejected',
+      ELIGIBILITY_REVIEW: 'Eligibility review',
+      ELIGIBILITY_REJECTED: 'Not eligible for used return',
+      LABEL_GENERATED: 'Return label ready',
+      IN_TRANSIT: 'In transit',
+      INSPECTION_APPROVED: 'Passed inspection',
+      INSPECTION_REJECTED: 'Cannot be reconditioned',
+    };
+    const statusLabel = statusLabels[statusRaw.toUpperCase()] || statusRaw.replace(/_/g, ' ');
     const tone =
-      String(context.status || '').toUpperCase() === 'APPROVED'
+      ['APPROVED', 'LABEL_GENERATED', 'INSPECTION_APPROVED'].includes(statusRaw.toUpperCase())
         ? 'success'
-        : String(context.status || '').toUpperCase() === 'REJECTED'
+        : ['REJECTED', 'ELIGIBILITY_REJECTED', 'INSPECTION_REJECTED'].includes(statusRaw.toUpperCase())
           ? 'danger'
           : 'info';
     const bodyHtml = `
       ${greet(name)}
       ${emailBodyParagraph('Your return request status has been updated:')}
-      <p style="margin:12px 0 20px;">${emailStatusBadge(context.status || 'Updated', tone)}</p>
+      <p style="margin:12px 0 20px;">${emailStatusBadge(statusLabel, tone)}</p>
       ${context.note ? emailMutedNote(context.note) : ''}
       ${emailCtaButton(context.actionUrl, 'View return details')}
     `;
     const { html } = doc(subject, 'Return status update', bodyHtml, brand);
-    return { subject, html, text: `Return status: ${context.status}. ${context.actionUrl}` };
+    return { subject, html, text: `Return status: ${statusLabel}. ${context.actionUrl}` };
   }
 
   if (template === 'store-credit-update') {

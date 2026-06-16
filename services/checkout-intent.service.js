@@ -1,11 +1,30 @@
 import { refreshPrismaClientIfNeeded } from '../lib/prisma.js';
 import { AppError } from '../utils/error-handler.js';
+import { config } from '../config/env.js';
+import { assertStockAvailable } from './inventory.service.js';
+import { isSellableAvailable } from '../lib/inventory-stock-rules.js';
 
 function db() {
   return refreshPrismaClientIfNeeded();
 }
-import { config } from '../config/env.js';
-import { assertStockAvailable } from './inventory.service.js';
+
+function computeCheckoutTaxAmount(subtotal, shippingCost, accessFee, storeCreditApplied) {
+  const taxable = Math.max(
+    0,
+    Number(subtotal || 0) + Number(shippingCost || 0) + Number(accessFee || 0) - Number(storeCreditApplied || 0)
+  );
+  return Math.round(taxable * config.salesTaxRate * 100) / 100;
+}
+
+function computeCheckoutTotal(subtotal, shippingCost, accessFee, storeCreditApplied) {
+  const taxable = Math.max(
+    0,
+    Number(subtotal || 0) + Number(shippingCost || 0) + Number(accessFee || 0) - Number(storeCreditApplied || 0)
+  );
+  const tax = computeCheckoutTaxAmount(subtotal, shippingCost, accessFee, storeCreditApplied);
+  return Math.round((taxable + tax) * 100) / 100;
+}
+
 import {
   commitOrderLineStock,
   releaseOrderLineStock,
@@ -245,6 +264,9 @@ export class CheckoutIntentService {
           if (!v) {
             throw new AppError(404, `Variant not found for item ${index + 1}`);
           }
+          if (!isSellableAvailable(variantAvailableStock(v), product.productType)) {
+            throw new AppError(400, `"${product.name}" is out of stock`);
+          }
           if (variantAvailableStock(v) < item.quantity) {
             throw new AppError(400, `Insufficient stock for "${product.name}"`);
           }
@@ -281,6 +303,7 @@ export class CheckoutIntentService {
           status: 'PENDING',
           subtotal,
           shippingCost: 0,
+          taxAmount: 0,
           totalAmount: subtotal + accessMembershipAmount,
           storeCreditApplied: 0,
           includeAccessMembership,
@@ -326,20 +349,7 @@ export class CheckoutIntentService {
       throw error;
     }
 
-    let totalAmount = subtotal + shippingCost + accessMembershipAmount;
-    await db().checkoutIntent.update({
-      where: { id: intent.id },
-      data: {
-        shippingCost,
-        totalAmount,
-        shippingCarrier: selectedRate?.provider || null,
-        ...selectedRateUpdateData(selectedRate, shipmentId),
-      },
-    });
-    intent.shippingCost = shippingCost;
-    intent.totalAmount = totalAmount;
-    intent.accessMembershipAmount = accessMembershipAmount;
-
+    let storeCreditApplied = 0;
     if (opts.storeCreditToApply && Number(opts.storeCreditToApply) > 0) {
       try {
         const held = await walletService.holdCredit(
@@ -348,12 +358,7 @@ export class CheckoutIntentService {
           intent.publicId
         );
         if (held > 0) {
-          totalAmount = Math.max(0, totalAmount - held);
-          await db().checkoutIntent.update({
-            where: { id: intent.id },
-            data: { totalAmount, storeCreditApplied: held },
-          });
-          intent.totalAmount = totalAmount;
+          storeCreditApplied = held;
           intent.storeCreditApplied = held;
         }
       } catch (error) {
@@ -367,6 +372,34 @@ export class CheckoutIntentService {
         throw error;
       }
     }
+
+    const taxAmount = computeCheckoutTaxAmount(
+      subtotal,
+      shippingCost,
+      accessMembershipAmount,
+      storeCreditApplied
+    );
+    const totalAmount = computeCheckoutTotal(
+      subtotal,
+      shippingCost,
+      accessMembershipAmount,
+      storeCreditApplied
+    );
+    await db().checkoutIntent.update({
+      where: { id: intent.id },
+      data: {
+        shippingCost,
+        taxAmount,
+        totalAmount,
+        storeCreditApplied,
+        shippingCarrier: selectedRate?.provider || null,
+        ...selectedRateUpdateData(selectedRate, shipmentId),
+      },
+    });
+    intent.shippingCost = shippingCost;
+    intent.taxAmount = taxAmount;
+    intent.totalAmount = totalAmount;
+    intent.accessMembershipAmount = accessMembershipAmount;
 
     return db().checkoutIntent.findUnique({
       where: { id: intent.id },
@@ -410,12 +443,21 @@ export class CheckoutIntentService {
           ? intent.shippingAddressJson.phoneNumber || intent.shippingAddressJson.phone || null
           : null;
 
+      const buyer = await tx.user.findUnique({
+        where: { id: intent.userId },
+        select: { accessMemberUntil: true, isGuest: true },
+      });
+      const hasAccess =
+        buyer?.accessMemberUntil != null && new Date(buyer.accessMemberUntil) > new Date();
+      const includeReturnEnvelope = Boolean(hasAccess && !intent.placedAsGuest);
+
       const created = await tx.order.create({
         data: {
           userId: intent.userId,
           orderNumber: placeholderOrderNumber(),
           totalAmount: intent.totalAmount,
           shippingCost: intent.shippingCost,
+          taxAmount: intent.taxAmount ?? 0,
           storeCreditApplied: intent.storeCreditApplied,
           paymentStatus: 'PAID',
           status: 'PROCESSING',
@@ -423,6 +465,7 @@ export class CheckoutIntentService {
           contactEmail,
           contactPhone,
           placedAsGuest: Boolean(intent.placedAsGuest),
+          includeReturnEnvelope,
           shippingAddressJson: intent.shippingAddressJson,
           billingAddressJson: intent.billingAddressJson,
           shippingCarrier: intent.shippingCarrier,

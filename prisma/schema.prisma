@@ -313,6 +313,7 @@ model Product {
   unitPriceReference   String?
   fabric               String?
   care                 String?
+  reorderPoint         Int?
   sizeAgeGroup         String?
   vendor               String?
   tags                 String?
@@ -397,6 +398,7 @@ model CheckoutIntent {
   checkoutSignature       String
   subtotal                Float
   shippingCost            Float                @default(0)
+  taxAmount               Float                @default(0)
   storeCreditApplied      Float                @default(0)
   totalAmount             Float
   shippingAddressJson     Json?
@@ -466,6 +468,7 @@ model Order {
   outboundShippedAt    DateTime?
   totalAmount Float
   shippingCost Float @default(0)
+  taxAmount    Float @default(0)
   shippingAddressJson Json?
   billingAddressJson Json?
   shippingCarrier String?
@@ -501,6 +504,7 @@ model Order {
   contactEmail             String?
   contactPhone             String?
   placedAsGuest            Boolean              @default(false)
+  includeReturnEnvelope    Boolean              @default(false)
 
   cancellationReviewStatus  CancellationReviewStatus @default(NONE)
   cancellationRequestedAt   DateTime?
