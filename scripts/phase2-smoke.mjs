@@ -168,6 +168,46 @@ async function main() {
     }
 
     try {
+      const product = await prisma.product.findFirst({
+        where: { price: { gt: 0 }, inventoryModel: 'simple', isActiveListing: true, isDraft: false, stock: { gt: 0 } },
+        select: { publicId: true, name: true },
+      });
+      if (!product) {
+        fail('orders/quote tax', 'no purchasable simple product found — run node scripts/seed.js');
+      } else {
+        const { status, json } = await request('/orders/quote', {
+          method: 'POST',
+          token,
+          body: { items: [{ productId: product.publicId, quantity: 1 }] },
+          expectStatus: 200,
+        });
+        const pricing = json?.data?.pricing;
+        if (status !== 200 || !pricing) {
+          fail('orders/quote tax', `status=${status} ${JSON.stringify(json).slice(0, 120)}`);
+        } else {
+          const {
+            subtotalApplied,
+            shippingCost = 0,
+            accessMembershipFee = 0,
+            storeCreditApplied = 0,
+            taxAmount,
+            totalPayable,
+          } = pricing;
+          const taxable = Math.max(0, subtotalApplied + shippingCost + accessMembershipFee - storeCreditApplied);
+          const expectedTotal = Math.round((taxable + taxAmount) * 100) / 100;
+          const mathOk = Math.abs(expectedTotal - totalPayable) < 0.01;
+          if (taxAmount > 0 && mathOk) {
+            ok(`POST /orders/quote tax (tax=${taxAmount}, total=${totalPayable})`);
+          } else {
+            fail('orders/quote tax', `taxAmount=${taxAmount} totalPayable=${totalPayable} expected=${expectedTotal}`);
+          }
+        }
+      }
+    } catch (e) {
+      fail('orders/quote tax', e.message);
+    }
+
+    try {
       const { completeMembershipPayment } = await import('../services/membership.service.js');
       const sessionId = `smoke_${Date.now()}`;
       const before = await prisma.user.findUnique({
