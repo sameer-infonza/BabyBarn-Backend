@@ -5,7 +5,7 @@ import { AppError } from '../utils/error-handler.js';
 import { orderService } from './order.service.js';
 import { checkoutIntentService } from './checkout-intent.service.js';
 import { emailService } from './email.service.js';
-import { buildOrderTrackingUrl } from '../lib/order-tracking-token.js';
+import { buildOrderTrackingUrl, buildGuestReturnUrl } from '../lib/order-tracking-token.js';
 
 async function getMembershipUnitAmountCents() {
   try {
@@ -569,6 +569,7 @@ async function sendOrderConfirmationEmail(orderPublicId) {
   );
   const orderRef = orderDetail.orderNumber || orderDetail.publicId;
   const trackingUrl = buildOrderTrackingUrl({ orderNumber: orderRef, email: recipientEmail });
+  const returnUrl = buildGuestReturnUrl({ orderNumber: orderRef, email: recipientEmail });
   const dashboardUrl = orderDetail.user?.isGuest
     ? trackingUrl
     : `${config.frontend.customerUrl}/dashboard/orders/${orderDetail.publicId}`;
@@ -589,6 +590,7 @@ async function sendOrderConfirmationEmail(orderPublicId) {
       total: `$${Number(orderDetail.totalAmount).toFixed(2)}`,
       actionUrl: dashboardUrl,
       trackingUrl,
+      returnUrl,
       includeReturnEnvelope: Boolean(orderDetail.includeReturnEnvelope),
     },
   });

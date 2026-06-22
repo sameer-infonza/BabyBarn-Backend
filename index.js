@@ -295,6 +295,16 @@ app.listen(PORT, () => {
       });
     });
   }, engagementMs);
+
+  const guestRetentionMs = 24 * 60 * 60 * 1000;
+  const runGuestRetention = () =>
+    import('./services/guest-retention.service.js').then(({ purgeExpiredGuestData }) =>
+      purgeExpiredGuestData().catch((err) => {
+        console.error('[jobs] guest data retention purge failed', err);
+      })
+    );
+  setInterval(runGuestRetention, guestRetentionMs);
+  setTimeout(runGuestRetention, 90 * 1000);
 });
 
 process.on('unhandledRejection', (reason) => {

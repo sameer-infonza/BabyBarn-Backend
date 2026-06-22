@@ -378,6 +378,24 @@ export const refurbInspectionCreateSchema = z.object({
   target: z.enum(['return', 'job']).optional().default('return'),
 });
 
+export const guestReturnCreateSchema = z
+  .object({
+    token: z.string().min(1).optional(),
+    orderNumber: z.string().min(1).optional(),
+    email: z.string().email().optional(),
+    orderItemId: z.string().min(1).optional(),
+    orderItemIds: z.array(z.string().min(1)).min(1).max(50).optional(),
+    reason: z.string().min(3).max(1000),
+  })
+  .refine((body) => Boolean(body.token) || (Boolean(body.orderNumber) && Boolean(body.email)), {
+    message: 'Provide a tracking token or both order number and email',
+    path: ['orderNumber'],
+  })
+  .refine((body) => Boolean(body.orderItemId) || (body.orderItemIds?.length ?? 0) > 0, {
+    message: 'At least one order item is required',
+    path: ['orderItemIds'],
+  });
+
 export const returnLabelGenerateSchema = z.object({
   rateId: z.string().min(1).optional(),
   shipmentId: z.string().optional(),

@@ -19,6 +19,7 @@ import {
   initialReturnStatusForDecision,
 } from './refurb-eligibility.service.js';
 import { computeRefurbStoreCredit } from '../config/refurb.config.js';
+import { verifyOrderTrackingToken } from '../lib/order-tracking-token.js';
 
 function isMissingWalletTableError(error) {
   return Boolean(
@@ -53,7 +54,7 @@ const REFURB_TRANSITIONS = {
 
 const returnInclude = {
   user: { select: { publicId: true, email: true, firstName: true, lastName: true } },
-  order: { select: { publicId: true, orderNumber: true, status: true, createdAt: true } },
+  order: { select: { id: true, publicId: true, orderNumber: true, status: true, createdAt: true } },
   orderItem: {
     include: {
       product: {
@@ -159,8 +160,10 @@ export class ReturnsService {
       }
       const targetItem = order.orderItems.find((i) => i.publicId === itemPublicIds[0]);
       if (!targetItem) throw new AppError(404, 'Order item not found');
-      if (targetItem.product?.productType === 'REFURBISHED') {
-        throw new AppError(400, 'Only new products are eligible for refurbishment returns');
+      const { ACCESS_USED_RETURN_WINDOW_DAYS } = await import('../config/refurb.config.js');
+      const usedAgeDays = (Date.now() - new Date(order.createdAt).getTime()) / (1000 * 60 * 60 * 24);
+      if (usedAgeDays > ACCESS_USED_RETURN_WINDOW_DAYS) {
+        throw new AppError(400, 'Used return window (12 months) has passed');
       }
     }
 
@@ -234,6 +237,45 @@ export class ReturnsService {
     return created.length === 1 ? created[0] : created;
   }
 
+  /**
+   * Guest self-service return: validate Order number + email (or a tracking token),
+   * then create a STANDARD return on the matched order. UPS only; the one-envelope
+   * rule applies when an admin issues the label.
+   */
+  async createForGuest(payload) {
+    let orderNumber = payload.orderNumber ? String(payload.orderNumber).trim() : '';
+    let email = payload.email ? String(payload.email).trim().toLowerCase() : '';
+
+    if (payload.token) {
+      const verified = verifyOrderTrackingToken(payload.token);
+      orderNumber = verified.orderNumber;
+      email = verified.email;
+    }
+
+    if (!orderNumber || !email) {
+      throw new AppError(400, 'Order number and email are required');
+    }
+
+    const order = await prisma.order.findFirst({
+      where: {
+        OR: [{ orderNumber }, { publicId: orderNumber }],
+        contactEmail: { equals: email, mode: 'insensitive' },
+      },
+      select: { publicId: true, user: { select: { publicId: true } } },
+    });
+    if (!order || !order.user) {
+      throw new AppError(404, 'Order not found for that email');
+    }
+
+    return this.createForUser(order.user.publicId, {
+      orderId: order.publicId,
+      orderItemId: payload.orderItemId,
+      orderItemIds: payload.orderItemIds,
+      type: 'STANDARD',
+      reason: payload.reason,
+    });
+  }
+
   async reviewEligibility(returnPublicId, { decision, notes }, actor) {
     const rr = await prisma.returnRequest.findUnique({
       where: { publicId: returnPublicId },
@@ -295,14 +337,19 @@ export class ReturnsService {
     const rr = await prisma.returnRequest.findUnique({
       where: { publicId: returnPublicId },
       include: {
-        order: { select: { shippingAddressJson: true } },
+        order: { select: { id: true, shippingAddressJson: true, returnEnvelopeUsed: true } },
         user: { select: { email: true, firstName: true, lastName: true } },
       },
     });
     if (!rr) throw new AppError(404, 'Return request not found');
-    if (rr.type !== 'REFURBISHMENT') throw new AppError(400, 'Labels are for refurbishment returns only');
-    if (!['APPROVED', 'LABEL_GENERATED'].includes(rr.status)) {
+    if (rr.type === 'REFURBISHMENT' && !['APPROVED', 'LABEL_GENERATED'].includes(rr.status)) {
       throw new AppError(400, 'Return must be eligibility-approved before generating a label');
+    }
+
+    // One prepaid return envelope per order. The first return (of any type) gets a
+    // prepaid UPS label; later returns on the same order require self-postage.
+    if (rr.order.returnEnvelopeUsed && !rr.returnLabelUrl) {
+      return { return: rr, label: null, selfPostageRequired: true };
     }
 
     const fromAddress = rr.order.shippingAddressJson;
@@ -316,18 +363,24 @@ export class ReturnsService {
           toAddress: shippingService.getConfiguredOriginAddress(),
         });
 
-    const updated = await prisma.returnRequest.update({
-      where: { id: rr.id },
-      data: {
-        status: 'LABEL_GENERATED',
-        returnLabelUrl: label.shippingLabelUrl || rr.returnLabelUrl,
-        returnTrackingNumber: label.trackingNumber || rr.returnTrackingNumber,
-        returnShippingCarrier: label.shippingCarrier || rr.returnShippingCarrier,
-        returnShipmentId: payload?.shipmentId ? String(payload.shipmentId) : rr.returnShipmentId,
-        returnTransactionId: label.transactionId || rr.returnTransactionId,
-        labelGeneratedAt: new Date(),
-      },
-      include: returnInclude,
+    const updated = await prisma.$transaction(async (tx) => {
+      await tx.order.update({
+        where: { id: rr.order.id },
+        data: { returnEnvelopeUsed: true },
+      });
+      return tx.returnRequest.update({
+        where: { id: rr.id },
+        data: {
+          status: 'LABEL_GENERATED',
+          returnLabelUrl: label.shippingLabelUrl || rr.returnLabelUrl,
+          returnTrackingNumber: label.trackingNumber || rr.returnTrackingNumber,
+          returnShippingCarrier: label.shippingCarrier || rr.returnShippingCarrier,
+          returnShipmentId: payload?.shipmentId ? String(payload.shipmentId) : rr.returnShipmentId,
+          returnTransactionId: label.transactionId || rr.returnTransactionId,
+          labelGeneratedAt: new Date(),
+        },
+        include: returnInclude,
+      });
     });
 
     await writeAdminAudit({
@@ -484,19 +537,26 @@ export class ReturnsService {
         update: {},
         create: { userId: rr.userId, balance: 0, heldBalance: 0 },
       });
-      let itemAccessPrice = 0;
+      let itemMemberPrice = 0;
+      let isRefurbishedItem = false;
       if (rr.orderItemId) {
         const line = await prisma.orderItem.findUnique({
           where: { id: rr.orderItemId },
-          select: { price: true },
+          select: {
+            price: true,
+            memberPriceSnapshot: true,
+            product: { select: { productType: true } },
+          },
         });
-        itemAccessPrice = Number(line?.price ?? 0);
+        itemMemberPrice = Number(line?.memberPriceSnapshot ?? line?.price ?? 0);
+        isRefurbishedItem = line?.product?.productType === 'REFURBISHED';
       }
-      if (itemAccessPrice <= 0) {
+      if (itemMemberPrice <= 0) {
         const settings = await getBusinessSettings();
-        itemAccessPrice = Number(settings.accessMembershipPriceUsd ?? 50);
+        itemMemberPrice = Number(settings.accessMembershipPriceUsd ?? 50);
       }
-      const amount = computeRefurbStoreCredit(itemAccessPrice);
+      // Refurbished items are returnable via the used path but earn no store credit.
+      const amount = isRefurbishedItem ? 0 : computeRefurbStoreCredit(itemMemberPrice);
       await prisma.storeCreditWallet.update({
         where: { id: wallet.id },
         data: { balance: wallet.balance + amount },

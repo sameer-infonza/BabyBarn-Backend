@@ -75,7 +75,7 @@ export class ProductService {
 
   /**
    * @param {object} [listFilters]
-   * **Public:** `search`, `sort` (newest | price_asc | price_desc | name_asc | name_desc), `productType` / `productTypes` (comma-separated NEW,REFURBISHED), `minPrice`, `maxPrice`, `sizeAgeGroup` (exact, legacy), `ageGroup` / `ageGroups` and `fitSize` / `fitSizes` (comma-separated substring match on `sizeAgeGroup`, OR within group, AND between groups), `categoryId` (comma-separated public ids)
+   * **Public:** `search`, `sort` (newest | price_asc | price_desc | name_asc | name_desc), `productType` / `productTypes` (comma-separated NEW,REFURBISHED), `minPrice`, `maxPrice`, `sizeAgeGroup` (exact, legacy single value), `ageGroup` / `ageGroups` (comma-separated canonical Age values, exact `in` match on `sizeAgeGroup`), `categoryId` (comma-separated public ids)
    * **Admin:** `search`, `sizeAgeGroup`, `status` (active | inactive | draft | low_stock | all)
    */
   async getAllProducts(page = 1, limit = 20, categoryPublicId, { admin = false, listFilters } = {}) {
@@ -147,29 +147,13 @@ export class ProductService {
           ...parseCsv(listFilters.ageGroups),
           ...(listFilters.ageGroup ? [listFilters.ageGroup] : []),
         ].filter(Boolean);
-        const fitSizes = [
-          ...parseCsv(listFilters.fitSizes),
-          ...(listFilters.fitSize ? [listFilters.fitSize] : []),
-        ].filter(Boolean);
 
         if (ageGroups.length > 0) {
-          where.AND = where.AND ?? [];
-          where.AND.push({
-            OR: ageGroups.map((age) => ({
-              sizeAgeGroup: { contains: age, mode: 'insensitive' },
-            })),
-          });
-        } else if (fitSizes.length === 0 && sizeAgeGroup && String(sizeAgeGroup).trim()) {
+          // Age values are canonical (e.g. "0-3M"), so match exactly against the
+          // product's stored sizeAgeGroup rather than a loose substring.
+          where.sizeAgeGroup = { in: ageGroups };
+        } else if (sizeAgeGroup && String(sizeAgeGroup).trim()) {
           where.sizeAgeGroup = String(sizeAgeGroup).trim();
-        }
-
-        if (fitSizes.length > 0) {
-          where.AND = where.AND ?? [];
-          where.AND.push({
-            OR: fitSizes.map((fit) => ({
-              sizeAgeGroup: { contains: fit, mode: 'insensitive' },
-            })),
-          });
         }
         if (search && String(search).trim()) {
           const q = String(search).trim();

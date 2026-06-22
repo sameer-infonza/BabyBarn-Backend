@@ -30,7 +30,6 @@ export class ProductController {
         ? String(req.query.sizeAgeGroup).trim()
         : undefined;
     const ageGroups = parseCsvQuery(req.query.ageGroup);
-    const fitSizes = parseCsvQuery(req.query.fitSize);
 
     const listFilters = {
       search,
@@ -41,7 +40,6 @@ export class ProductController {
       maxPrice: Number.isFinite(maxPrice) ? maxPrice : undefined,
       sizeAgeGroup,
       ageGroups,
-      fitSizes,
     };
 
     const result = await productService.getAllProducts(page, limit, undefined, {

@@ -188,6 +188,8 @@ model User {
   isGuest            Boolean  @default(false)
   guestCreatedAt     DateTime?
   convertedAt        DateTime?
+  /// Set when expired guest PII has been purged (retention policy). Prevents reprocessing.
+  guestPurgedAt      DateTime?
   // When false, customer cannot sign in.
   isActive           Boolean  @default(true)
   // JSON array of admin console module slugs; null = all modules (ADMIN_TEAM).
@@ -440,6 +442,7 @@ model CheckoutIntentLine {
   quantity         Int
   price            Float
   retailUnitPrice  Float?
+  memberPriceSnapshot Float?
   pricingTier      OrderItemPricingTier @default(STANDARD)
 
   checkoutIntent CheckoutIntent @relation(fields: [checkoutIntentId], references: [id], onDelete: Cascade)
@@ -505,6 +508,7 @@ model Order {
   contactPhone             String?
   placedAsGuest            Boolean              @default(false)
   includeReturnEnvelope    Boolean              @default(false)
+  returnEnvelopeUsed       Boolean              @default(false)
 
   cancellationReviewStatus  CancellationReviewStatus @default(NONE)
   cancellationRequestedAt   DateTime?
@@ -586,6 +590,7 @@ model OrderItem {
   price     Float
   pricingTier     OrderItemPricingTier @default(STANDARD)
   retailUnitPrice Float?
+  memberPriceSnapshot Float?
   pickedQuantity  Int      @default(0)
   pickedAt        DateTime?
   pickedByUserId  Int?

@@ -91,14 +91,16 @@ export function renderBrandedEmailTemplate(template, context = {}, brand) {
       })}
       ${emailCtaButton(context.actionUrl, context.trackingUrl ? 'View order details' : 'View your order')}
       ${context.trackingUrl && context.trackingUrl !== context.actionUrl ? emailCtaButton(context.trackingUrl, 'Track your order') : ''}
+      ${context.returnUrl ? emailMutedNote(`Need to start a return? Use this secure link: ${context.returnUrl}`) : ''}
       ${context.includeReturnEnvelope ? emailMutedNote('As an ACCESS member, your package includes a reusable return envelope for eligible used product returns.') : ''}
     `;
     const { html } = doc(subject, `Order ${context.orderId || ''} confirmed`, bodyHtml, brand);
     const trackLine = context.trackingUrl ? ` Track: ${context.trackingUrl}` : '';
+    const returnLine = context.returnUrl ? ` Start a return: ${context.returnUrl}` : '';
     return {
       subject,
       html,
-      text: `Order ${context.orderId} confirmed. Total ${context.total}. View: ${context.actionUrl}.${trackLine}`,
+      text: `Order ${context.orderId} confirmed. Total ${context.total}. View: ${context.actionUrl}.${trackLine}${returnLine}`,
     };
   }
 

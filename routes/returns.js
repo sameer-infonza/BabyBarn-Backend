@@ -78,6 +78,7 @@ router.post(
   returnsOrInspection,
   (req, res, next) => returnsController.bulkMarkReceived(req, res).catch(next)
 );
+router.post('/guest', (req, res, next) => returnsController.createGuest(req, res).catch(next));
 router.get('/', authenticate, requireFullAccount, (req, res, next) => returnsController.listMine(req, res).catch(next));
 router.post('/upload-photo', authenticate, requireFullAccount, (req, res, next) => {
   returnPhotoUpload.single('image')(req, res, (err) => {

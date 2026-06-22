@@ -311,8 +311,52 @@ export async function getAccessSavingsForUser(userPublicId) {
   if (!user) throw new AppError(401, 'Unauthorized');
 
   const hasAccess = user.accessMemberUntil != null && user.accessMemberUntil > new Date();
+
+  const wallet = await prisma.storeCreditWallet.findUnique({
+    where: { userId: user.id },
+    select: {
+      balance: true,
+      heldBalance: true,
+      transactions: {
+        orderBy: { createdAt: 'desc' },
+        take: 200,
+        select: { type: true, amount: true, note: true, createdAt: true },
+      },
+    },
+  });
+
+  const storeCreditBalance = Math.round(Number(wallet?.balance ?? 0) * 100) / 100;
+  const storeCreditEarned =
+    Math.round(
+      (wallet?.transactions ?? [])
+        .filter((t) => t.type === 'EARNED')
+        .reduce((sum, t) => sum + Number(t.amount), 0) * 100
+    ) / 100;
+  const storeCreditRedeemed =
+    Math.round(
+      (wallet?.transactions ?? [])
+        .filter((t) => t.type === 'REDEEMED')
+        .reduce((sum, t) => sum + Math.abs(Number(t.amount)), 0) * 100
+    ) / 100;
+  const recentCredits = (wallet?.transactions ?? [])
+    .filter((t) => t.type === 'EARNED')
+    .slice(0, 10)
+    .map((t) => ({
+      amount: Math.round(Number(t.amount) * 100) / 100,
+      note: t.note ?? 'Store credit',
+      createdAt: t.createdAt,
+    }));
+
   if (!hasAccess) {
-    return { savingsTotal: 0, orderCount: 0, channels: [] };
+    return {
+      savingsTotal: 0,
+      orderCount: 0,
+      channels: [],
+      storeCreditBalance,
+      storeCreditEarned,
+      storeCreditRedeemed,
+      recentCredits,
+    };
   }
 
   const items = await prisma.orderItem.findMany({
@@ -352,15 +396,26 @@ export async function getAccessSavingsForUser(userPublicId) {
     orderIds.add(item.orderId);
   }
 
+  const memberPricingSavingsRounded = Math.round(memberPricingSavings * 100) / 100;
+
   return {
-    savingsTotal: Math.round(savingsTotal * 100) / 100,
+    savingsTotal: Math.round((savingsTotal + storeCreditEarned) * 100) / 100,
+    memberPricingSavings: memberPricingSavingsRounded,
     orderCount: orderIds.size,
     channels: [
       {
         label: 'Member pricing',
-        amount: Math.round(memberPricingSavings * 100) / 100,
+        amount: memberPricingSavingsRounded,
+      },
+      {
+        label: 'Store credit earned',
+        amount: storeCreditEarned,
       },
     ],
+    storeCreditBalance,
+    storeCreditEarned,
+    storeCreditRedeemed,
+    recentCredits,
   };
 }
 

@@ -284,6 +284,7 @@ export class CheckoutIntentService {
           quantity: item.quantity,
           price: linePricing.price,
           retailUnitPrice: linePricing.retailUnitPrice,
+          memberPriceSnapshot: linePricing.memberPriceSnapshot,
           pricingTier: linePricing.pricingTier,
         });
 
@@ -487,6 +488,7 @@ export class CheckoutIntentService {
               quantity: line.quantity,
               price: line.price,
               retailUnitPrice: line.retailUnitPrice ?? line.price,
+              memberPriceSnapshot: line.memberPriceSnapshot ?? null,
               pricingTier: line.pricingTier || 'STANDARD',
             })),
           },

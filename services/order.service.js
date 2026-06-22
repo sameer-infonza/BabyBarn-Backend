@@ -137,10 +137,13 @@ function buildOrderLinePricing(product, variant, effectiveHasAccess) {
   const { unitRetail, unitApplied } = computeAppliedUnitPrice(product, variant, effectiveHasAccess);
   const pricingTier =
     effectiveHasAccess && unitApplied < unitRetail ? 'ACCESS' : 'STANDARD';
+  // Variant-aware Members Price at purchase — captured regardless of buyer's access state.
+  const memberPriceSnapshot = computeAppliedUnitPrice(product, variant, true).unitApplied;
   return {
     price: unitApplied,
     retailUnitPrice: unitRetail,
     pricingTier,
+    memberPriceSnapshot,
   };
 }
 
@@ -660,6 +663,7 @@ export class OrderService {
       placedAsGuest: Boolean(order.placedAsGuest),
       items: order.orderItems.map((item) => ({
         id: item.id,
+        publicId: item.publicId,
         quantity: item.quantity,
         unitPrice: Number(item.price),
         lineTotal: Number(item.price) * item.quantity,
@@ -910,6 +914,7 @@ export class OrderService {
           quantity: item.quantity,
           price: linePricing.price,
           retailUnitPrice: linePricing.retailUnitPrice,
+          memberPriceSnapshot: linePricing.memberPriceSnapshot,
           pricingTier: linePricing.pricingTier,
         });
 

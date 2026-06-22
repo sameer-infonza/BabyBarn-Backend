@@ -5,6 +5,7 @@ import {
   returnEligibilityReviewSchema,
   refurbInspectionCreateSchema,
   returnLabelGenerateSchema,
+  guestReturnCreateSchema,
   RETURN_STATUS_VALUES,
 } from '../schemas/index.js';
 import { returnsService } from '../services/returns.service.js';
@@ -38,6 +39,12 @@ export class ReturnsController {
   async create(req, res) {
     const body = await validate(returnRequestCreateSchema, req.body);
     const data = await returnsService.createForUser(req.user.id, body);
+    res.status(201).json({ success: true, data: toPublicJson(data) });
+  }
+
+  async createGuest(req, res) {
+    const body = await validate(guestReturnCreateSchema, req.body ?? {});
+    const data = await returnsService.createForGuest(body);
     res.status(201).json({ success: true, data: toPublicJson(data) });
   }
 
