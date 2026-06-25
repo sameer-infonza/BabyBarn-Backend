@@ -1,6 +1,7 @@
 import { prisma } from '../lib/prisma.js';
 import { AppError } from '../utils/error-handler.js';
 import { variantAvailableStock, productAvailableStock } from './inventory-reservation.js';
+import { isSellableAvailable } from '../lib/inventory-stock-rules.js';
 
 export class StockAlertService {
   async subscribe(userPublicId, productPublicId, variantPublicId = null) {
@@ -21,10 +22,10 @@ export class StockAlertService {
       const v = product.variants.find((x) => x.publicId === variantPublicId);
       if (!v) throw new AppError(404, 'Variant not found');
       variantDbId = v.id;
-      if (variantAvailableStock(v) > 0) {
+      if (isSellableAvailable(variantAvailableStock(v), product.productType)) {
         throw new AppError(400, 'This variant is already in stock');
       }
-    } else if (productAvailableStock(product) > 0) {
+    } else if (isSellableAvailable(productAvailableStock(product), product.productType)) {
       throw new AppError(400, 'This product is already in stock');
     }
 
