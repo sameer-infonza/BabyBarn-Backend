@@ -1,4 +1,23 @@
 import { z } from 'zod';
+import { AGE_AXIS_NAME, isCanonicalAge } from '../lib/age-groups.js';
+
+/** Reject non-canonical values on the Age variant axis (other axes stay free-form). */
+function validateVariantAgeValues(variants, ctx) {
+  if (!Array.isArray(variants)) return;
+  variants.forEach((variant, index) => {
+    const combo = variant?.combination;
+    if (!combo || typeof combo !== 'object') return;
+    const ageValue = combo[AGE_AXIS_NAME];
+    if (ageValue == null || ageValue === '') return;
+    if (!isCanonicalAge(ageValue)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: `Invalid age "${ageValue}". Use one of the standard age groups.`,
+        path: ['variants', index, 'combination', AGE_AXIS_NAME],
+      });
+    }
+  });
+}
 
 const passwordComplexityMessage =
   'Password must be at least 8 characters and include uppercase, lowercase, number, and special character';
@@ -97,7 +116,7 @@ const createProductBodySchema = z.object({
   description: z.union([z.string(), z.null()]).optional(),
   price: z.number().min(0, 'Price must be positive'),
   stock: z.number().int().min(0, 'Stock must be non-negative'),
-  categoryId: z.string().min(1, 'Category is required'),
+  categoryId: z.string().min(1).optional(),
   sku: z.string().min(1).optional(),
   imageUrl: z.union([z.string(), z.null()]).optional(),
   memberPrice: z.number().min(0).nullable().optional(),
@@ -127,10 +146,15 @@ export const createProductSchema = createProductBodySchema.superRefine((data, ct
       path: ['variants'],
     });
   }
+  validateVariantAgeValues(data.variants, ctx);
 });
 
 /** Partial updates: `.partial()` must run on `ZodObject`, not on `ZodEffects` from `.superRefine()`. */
-export const updateProductSchema = createProductBodySchema.partial();
+export const updateProductSchema = createProductBodySchema
+  .partial()
+  .superRefine((data, ctx) => {
+    validateVariantAgeValues(data.variants, ctx);
+  });
 
 const checkoutAddressPayloadSchema = z.object({
   fullName: z.string().optional(),

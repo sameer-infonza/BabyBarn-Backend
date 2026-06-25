@@ -325,6 +325,7 @@ model Product {
   care                 String?
   reorderPoint         Int?
   sizeAgeGroup         String?
+  ageGroups            String[]    @default([])
   vendor               String?
   tags                 String?
   isDraft              Boolean  @default(false)
@@ -361,6 +362,7 @@ model Product {
   @@index([productType])
   @@index([sourceReturnId])
   @@index([sourceProductId])
+  @@index([ageGroups])
 }
 
 model ProductVariant {

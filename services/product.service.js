@@ -4,6 +4,43 @@ import { AppError } from '../utils/error-handler.js';
 import { slugifyName } from '../utils/slug.js';
 import { config } from '../config/env.js';
 import { prisma } from '../lib/prisma.js';
+import { AGE_AXIS_NAME, ageOrderIndex, isCanonicalAge } from '../lib/age-groups.js';
+
+/**
+ * Denormalized age list for fast PLP filtering. For variant products it is the
+ * distinct canonical Age values across variant combinations; for simple products
+ * it is the single sizeAgeGroup (when set). Returned in canonical display order.
+ */
+/**
+ * Find-or-create the reserved root "Uncategorized" category used when a product
+ * is saved without a category. Root-level uniqueness allows NULLs, so we query
+ * by slug first and create only when missing.
+ */
+async function ensureUncategorizedCategory(tx) {
+  const found = await tx.category.findFirst({
+    where: { parentId: null, slug: 'uncategorized' },
+    select: { id: true },
+  });
+  if (found) return found;
+  return tx.category.create({
+    data: { name: 'Uncategorized', slug: 'uncategorized', isActive: true },
+    select: { id: true },
+  });
+}
+
+function computeAgeGroups(isVariantProduct, variants, sizeAgeGroup) {
+  const set = new Set();
+  if (isVariantProduct && Array.isArray(variants)) {
+    for (const v of variants) {
+      const combo = v?.combination;
+      const age = combo && typeof combo === 'object' ? combo[AGE_AXIS_NAME] : null;
+      if (isCanonicalAge(age)) set.add(String(age).trim());
+    }
+  } else if (sizeAgeGroup && String(sizeAgeGroup).trim()) {
+    set.add(String(sizeAgeGroup).trim());
+  }
+  return Array.from(set).sort((a, b) => ageOrderIndex(a) - ageOrderIndex(b));
+}
 
 function normalizeMediaUrl(url) {
   if (!url) return null;
@@ -148,12 +185,21 @@ export class ProductService {
           ...(listFilters.ageGroup ? [listFilters.ageGroup] : []),
         ].filter(Boolean);
 
-        if (ageGroups.length > 0) {
-          // Age values are canonical (e.g. "0-3M"), so match exactly against the
-          // product's stored sizeAgeGroup rather than a loose substring.
-          where.sizeAgeGroup = { in: ageGroups };
-        } else if (sizeAgeGroup && String(sizeAgeGroup).trim()) {
-          where.sizeAgeGroup = String(sizeAgeGroup).trim();
+        const ageMatch =
+          ageGroups.length > 0
+            ? ageGroups
+            : sizeAgeGroup && String(sizeAgeGroup).trim()
+              ? [String(sizeAgeGroup).trim()]
+              : [];
+
+        if (ageMatch.length > 0) {
+          // Age is a variant axis (denormalized into Product.ageGroups). Match the
+          // array first, falling back to the legacy single sizeAgeGroup for products
+          // that predate the backfill or use the simple inventory model.
+          where.AND = where.AND ?? [];
+          where.AND.push({
+            OR: [{ ageGroups: { hasSome: ageMatch } }, { sizeAgeGroup: { in: ageMatch } }],
+          });
         }
         if (search && String(search).trim()) {
           const q = String(search).trim();
@@ -185,7 +231,11 @@ export class ProductService {
         where.productType = 'NEW';
       }
       if (sizeAgeGroup && String(sizeAgeGroup).trim()) {
-        where.sizeAgeGroup = String(sizeAgeGroup).trim();
+        const ageValue = String(sizeAgeGroup).trim();
+        where.AND = where.AND ?? [];
+        where.AND.push({
+          OR: [{ ageGroups: { has: ageValue } }, { sizeAgeGroup: ageValue }],
+        });
       }
       const st = status && String(status).trim() ? String(status).trim() : 'all';
       if (st === 'active') {
@@ -392,12 +442,15 @@ export class ProductService {
       );
     }
 
-    const category = await prisma.category.findUnique({
-      where: { publicId: categoryPublicId },
-      select: { id: true },
-    });
-    if (!category) {
-      throw new AppError(404, 'Category not found');
+    let category = null;
+    if (categoryPublicId) {
+      category = await prisma.category.findUnique({
+        where: { publicId: categoryPublicId },
+        select: { id: true },
+      });
+      if (!category) {
+        throw new AppError(404, 'Category not found');
+      }
     }
 
     const isVariantProduct = inventoryModel === 'variant_matrix' && variants.length > 0;
@@ -409,6 +462,7 @@ export class ProductService {
 
     return prisma.$transaction(async (tx) => {
       const slug = await ensureUniqueSlug(tx, slugBase);
+      const categoryId = category ? category.id : (await ensureUncategorizedCategory(tx)).id;
 
       let sku = incomingSku?.trim();
       if (isVariantProduct) {
@@ -468,7 +522,7 @@ export class ProductService {
           description: description ?? null,
           price,
           stock: totalStock,
-          categoryId: category.id,
+          categoryId,
           imageUrl: normalizedImageUrl,
           sku,
           memberPrice: memberPrice ?? null,
@@ -479,6 +533,7 @@ export class ProductService {
           care: care ?? null,
           reorderPoint: reorderPoint ?? null,
           sizeAgeGroup: sizeAgeGroup ?? null,
+          ageGroups: computeAgeGroups(isVariantProduct, variants, sizeAgeGroup),
           vendor: vendor ?? null,
           tags: tags ?? null,
           isDraft,
@@ -650,6 +705,7 @@ export class ProductService {
             });
           }
           delete updatePayload.stock;
+          updatePayload.ageGroups = computeAgeGroups(true, product.variants);
           return tx.product.update({
             where: { id: product.id },
             data: updatePayload,
@@ -680,6 +736,7 @@ export class ProductService {
 
           updatePayload.stock = incomingVariants.reduce((sum, v) => sum + v.stock, 0);
           updatePayload.inventoryModel = 'variant_matrix';
+          updatePayload.ageGroups = computeAgeGroups(true, incomingVariants);
 
           if (!wasVariant) {
             updatePayload.sku = await ensureUniqueParentSku(tx);
@@ -708,6 +765,11 @@ export class ProductService {
         if (data.stock !== undefined) {
           updatePayload.stock = data.stock;
         }
+        updatePayload.ageGroups = computeAgeGroups(
+          false,
+          [],
+          updatePayload.sizeAgeGroup !== undefined ? updatePayload.sizeAgeGroup : product.sizeAgeGroup
+        );
 
         return tx.product.update({
           where: { id: product.id },
@@ -715,6 +777,18 @@ export class ProductService {
           include: { category: true, variants: { orderBy: { sortOrder: 'asc' } } },
         });
       }
+
+      const existingIsVariant =
+        product.inventoryModel === 'variant_matrix' && product.variants.length > 0;
+      updatePayload.ageGroups = existingIsVariant
+        ? computeAgeGroups(true, product.variants)
+        : computeAgeGroups(
+            false,
+            [],
+            updatePayload.sizeAgeGroup !== undefined
+              ? updatePayload.sizeAgeGroup
+              : product.sizeAgeGroup
+          );
 
       return tx.product.update({
         where: { id: product.id },

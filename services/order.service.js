@@ -1,5 +1,13 @@
 import { prisma } from '../lib/prisma.js';
 import { AppError } from '../utils/error-handler.js';
+import { AGE_AXIS_NAME, isCanonicalAge } from '../lib/age-groups.js';
+
+/** Canonical Age from a variant's combination, or null when absent/invalid. */
+function variantAgeGroup(variant) {
+  const combo = variant?.combination;
+  const age = combo && typeof combo === 'object' ? combo[AGE_AXIS_NAME] : null;
+  return isCanonicalAge(age) ? String(age).trim() : null;
+}
 import {
   assertAndDecrementOrderStock,
   assertStockAvailable,
@@ -309,7 +317,7 @@ export class OrderService {
         pricingTier: linePricing.pricingTier,
         lineTotal: linePricing.price * quantity,
         condition: product.productType,
-        sizeAgeGroup: product.sizeAgeGroup || null,
+        sizeAgeGroup: variantAgeGroup(variant) || product.sizeAgeGroup || null,
       });
     }
 
