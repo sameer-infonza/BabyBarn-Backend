@@ -26,6 +26,7 @@ Thumbs.db
 .idea/
 *.pem
 *.ppk
+*.stackdump
 
 # Local-only
 config.bat
