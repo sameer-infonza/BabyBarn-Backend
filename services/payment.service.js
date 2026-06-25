@@ -65,6 +65,7 @@ async function ensureCheckoutPaymentIntent(stripe, checkoutIntent, user, opts = 
       publicId: true,
       stripePaymentIntentId: true,
       includeAccessMembership: true,
+      accessMembershipAmount: true,
       contactEmail: true,
     },
   });
@@ -75,6 +76,16 @@ async function ensureCheckoutPaymentIntent(stripe, checkoutIntent, user, opts = 
   }
 
   const checkoutIntentPublicId = refreshed?.publicId ?? checkoutIntent.publicId;
+  const includeAccessMembership = Boolean(
+    refreshed?.includeAccessMembership ?? checkoutIntent.includeAccessMembership
+  );
+  const membershipAmount = Number(
+    refreshed?.accessMembershipAmount ?? checkoutIntent.accessMembershipAmount ?? 0
+  );
+  // Bundled orders (products + ACCESS membership) are charged on the platform and
+  // split afterwards via Stripe transfers, so the membership fee reaches the dedicated
+  // membership account instead of the store account.
+  const splitTransfers = includeAccessMembership && membershipAmount > 0;
   const basePayload = {
     amount: amountCents,
     currency: 'usd',
@@ -83,9 +94,12 @@ async function ensureCheckoutPaymentIntent(stripe, checkoutIntent, user, opts = 
     metadata: {
       flow: 'order',
       checkoutIntentPublicId,
-      includeAccessMembership:
-        refreshed?.includeAccessMembership || checkoutIntent.includeAccessMembership ? 'true' : 'false',
+      includeAccessMembership: includeAccessMembership ? 'true' : 'false',
+      ...(splitTransfers
+        ? { splitTransfers: 'true', membershipAmountCents: String(Math.round(membershipAmount * 100)) }
+        : {}),
     },
+    ...(splitTransfers ? { transfer_group: checkoutIntentPublicId } : {}),
     ...(opts.saveCard ? { setup_future_usage: 'off_session' } : {}),
   };
 
@@ -133,11 +147,11 @@ async function ensureCheckoutPaymentIntent(stripe, checkoutIntent, user, opts = 
 
   let paymentIntent;
   try {
-    paymentIntent = await createPaymentIntentWithOptionalTransfer(
-      stripe,
-      basePayload,
-      config.stripe.connectStore
-    );
+    paymentIntent = splitTransfers
+      ? // Charge on the platform; funds are split to the membership/store accounts
+        // via transfers once the payment succeeds (see applyOrderTransferSplit).
+        await stripe.paymentIntents.create(basePayload)
+      : await createPaymentIntentWithOptionalTransfer(stripe, basePayload, config.stripe.connectStore);
   } catch (error) {
     throw toStripeAppError(error, 'STRIPE_PAYMENT_INTENT_FAILED', 'order');
   }
@@ -189,6 +203,156 @@ async function createPaymentIntentWithOptionalTransfer(stripe, basePayload, dest
       return stripe.paymentIntents.create(basePayload);
     }
     throw error;
+  }
+}
+
+/**
+ * Split a bundled order charge between the membership and store Connect accounts.
+ * The membership fee goes to the dedicated membership account; the remainder
+ * (products + shipping + tax) goes to the store account. Uses `source_transaction`
+ * so transfers draw from the specific charge, and per-leg idempotency keys so
+ * duplicate webhooks never double-transfer.
+ */
+async function applyOrderTransferSplit(stripe, { chargeId, checkoutIntentPublicId, totalCents, membershipCents }) {
+  if (!chargeId || !checkoutIntentPublicId) return;
+  const total = Math.max(0, Math.round(Number(totalCents) || 0));
+  const membership = Math.min(Math.max(0, Math.round(Number(membershipCents) || 0)), total);
+  const store = Math.max(0, total - membership);
+
+  const transferLeg = async (destinationAccount, amountCents, leg) => {
+    if (amountCents <= 0) return;
+    if (!hasValidConnectAccountId(destinationAccount)) {
+      console.warn('[payments] skipping transfer leg — destination not configured', {
+        leg,
+        checkoutIntentPublicId,
+      });
+      return;
+    }
+    try {
+      await stripe.transfers.create(
+        {
+          amount: amountCents,
+          currency: 'usd',
+          destination: destinationAccount.trim(),
+          source_transaction: chargeId,
+          transfer_group: checkoutIntentPublicId,
+          metadata: { flow: 'order', checkoutIntentPublicId, leg },
+        },
+        { idempotencyKey: `${checkoutIntentPublicId}:${leg}` }
+      );
+    } catch (error) {
+      console.error('[payments] order transfer split failed', {
+        leg,
+        destinationAccount,
+        checkoutIntentPublicId,
+        message: error?.message,
+      });
+    }
+  };
+
+  await transferLeg(config.stripe.connectMembership, membership, 'membership');
+  await transferLeg(config.stripe.connectStore, store, 'store');
+}
+
+/**
+ * After a bundled order is paid, split the charge across the membership and store
+ * accounts. Resolves the charge id and membership amount from the PaymentIntent
+ * metadata, falling back to the persisted checkout intent. No-op for non-bundled orders.
+ */
+async function splitOrderTransfersIfBundled(stripe, checkoutIntentPublicId, paymentIntentOrId) {
+  if (!stripe || !checkoutIntentPublicId || !paymentIntentOrId) return;
+
+  let paymentIntent =
+    typeof paymentIntentOrId === 'string' ? null : paymentIntentOrId;
+  const paymentIntentId =
+    typeof paymentIntentOrId === 'string' ? paymentIntentOrId : paymentIntentOrId.id;
+
+  if (!paymentIntent && paymentIntentId) {
+    try {
+      paymentIntent = await stripe.paymentIntents.retrieve(paymentIntentId);
+    } catch (error) {
+      console.error('[payments] could not retrieve PI for transfer split', paymentIntentId, error?.message);
+      return;
+    }
+  }
+  if (!paymentIntent) return;
+
+  let bundled = paymentIntent.metadata?.splitTransfers === 'true';
+  let membershipCents = Number(paymentIntent.metadata?.membershipAmountCents || 0);
+  if (!bundled || membershipCents <= 0) {
+    const ci = await prisma.checkoutIntent.findUnique({
+      where: { publicId: checkoutIntentPublicId },
+      select: { includeAccessMembership: true, accessMembershipAmount: true },
+    });
+    bundled = Boolean(ci?.includeAccessMembership) && Number(ci?.accessMembershipAmount) > 0;
+    membershipCents = bundled ? Math.round(Number(ci.accessMembershipAmount) * 100) : 0;
+  }
+  if (!bundled || membershipCents <= 0) return;
+
+  let chargeId =
+    typeof paymentIntent.latest_charge === 'string'
+      ? paymentIntent.latest_charge
+      : paymentIntent.latest_charge?.id || null;
+  if (!chargeId) {
+    try {
+      const charges = await stripe.charges.list({ payment_intent: paymentIntent.id, limit: 1 });
+      chargeId = charges?.data?.[0]?.id || null;
+    } catch {
+      chargeId = null;
+    }
+  }
+  if (!chargeId) {
+    console.error('[payments] cannot split transfers: no charge for PI', paymentIntent.id);
+    return;
+  }
+
+  const totalCents = Number(paymentIntent.amount_received || paymentIntent.amount || 0);
+  await applyOrderTransferSplit(stripe, {
+    chargeId,
+    checkoutIntentPublicId,
+    totalCents,
+    membershipCents,
+  });
+}
+
+/**
+ * Reverse split transfers for a refunded charge. Reversals are proportional to the
+ * cumulative refunded amount: a full refund fully reverses each leg, a partial refund
+ * reverses the matching share. Idempotency keys are derived from the target cumulative
+ * reversal so repeated/partial refund events never over-reverse.
+ */
+async function reverseOrderTransfersForCharge(stripe, charge) {
+  const transferGroup = charge?.transfer_group;
+  if (!transferGroup) return;
+  const chargeAmount = Number(charge.amount || 0);
+  const refunded = Number(charge.amount_refunded || 0);
+  if (chargeAmount <= 0 || refunded <= 0) return;
+
+  let transfers;
+  try {
+    transfers = await stripe.transfers.list({ transfer_group: transferGroup, limit: 100 });
+  } catch (error) {
+    console.error('[payments] could not list transfers for reversal', transferGroup, error?.message);
+    return;
+  }
+
+  for (const transfer of transfers?.data || []) {
+    const targetReversed = Math.min(
+      transfer.amount,
+      Math.round((transfer.amount * refunded) / chargeAmount)
+    );
+    const alreadyReversed = Number(transfer.amount_reversed || 0);
+    const delta = targetReversed - alreadyReversed;
+    if (delta <= 0) continue;
+    try {
+      await stripe.transfers.createReversal(
+        transfer.id,
+        { amount: delta, metadata: { reason: 'charge.refunded', transferGroup } },
+        { idempotencyKey: `${transfer.id}:reversal:${targetReversed}` }
+      );
+    } catch (error) {
+      console.error('[payments] transfer reversal failed', transfer.id, error?.message);
+    }
   }
 }
 
@@ -303,7 +467,11 @@ async function handleOrderCheckoutCompleted(session) {
         data: { stripePaymentIntentId: paymentIntentId },
       });
     }
-    return handleCheckoutIntentPaymentCompleted(checkoutIntentPublicId);
+    const result = await handleCheckoutIntentPaymentCompleted(checkoutIntentPublicId);
+    if (paymentIntentId) {
+      await splitOrderTransfersIfBundled(getStripe(), checkoutIntentPublicId, paymentIntentId);
+    }
+    return result;
   }
 
   const orderPublicId = getOrderPublicId(session.metadata);
@@ -324,7 +492,9 @@ async function handleOrderPaymentIntentSucceeded(paymentIntent) {
       where: { publicId: checkoutIntentPublicId },
       data: { stripePaymentIntentId: paymentIntent.id },
     });
-    return handleCheckoutIntentPaymentCompleted(checkoutIntentPublicId);
+    const result = await handleCheckoutIntentPaymentCompleted(checkoutIntentPublicId);
+    await splitOrderTransfersIfBundled(getStripe(), checkoutIntentPublicId, paymentIntent);
+    return result;
   }
   return handleOrderPaymentCompleted(getOrderPublicId(paymentIntent.metadata));
 }
@@ -525,6 +695,14 @@ export async function createOrderCheckoutSession(userPublicId, items, opts = {})
     });
   }
 
+  // Bundled orders are charged on the platform and split via transfers afterwards, so
+  // the membership fee reaches the membership account (see applyOrderTransferSplit).
+  const splitTransfers =
+    Boolean(checkoutIntent.includeAccessMembership) && Number(checkoutIntent.accessMembershipAmount) > 0;
+  const membershipAmountCents = splitTransfers
+    ? String(Math.round(Number(checkoutIntent.accessMembershipAmount) * 100))
+    : null;
+
   const session = await createCheckoutSessionWithOptionalTransfer(
     stripe,
     {
@@ -536,11 +714,27 @@ export async function createOrderCheckoutSession(userPublicId, items, opts = {})
       flow: 'order',
       checkoutIntentPublicId: checkoutIntent.publicId,
       includeAccessMembership: checkoutIntent.includeAccessMembership ? 'true' : 'false',
+      ...(splitTransfers ? { splitTransfers: 'true', membershipAmountCents } : {}),
     },
+    ...(splitTransfers
+      ? {
+          payment_intent_data: {
+            transfer_group: checkoutIntent.publicId,
+            metadata: {
+              flow: 'order',
+              checkoutIntentPublicId: checkoutIntent.publicId,
+              splitTransfers: 'true',
+              membershipAmountCents,
+            },
+          },
+        }
+      : {}),
     success_url: successUrl,
     cancel_url: cancelUrl,
     },
-    config.stripe.connectStore,
+    // Skip the destination charge for bundled orders so funds land on the platform
+    // and can be split between the membership and store accounts.
+    splitTransfers ? null : config.stripe.connectStore,
     'order'
   );
 
@@ -1112,6 +1306,9 @@ export async function processStripeWebhook(rawBody, signatureHeader) {
 
   if (event.type === 'charge.refunded') {
     const charge = event.data.object;
+    // Reverse any split transfers proportionally to the refunded amount so the
+    // membership/store accounts give back their share. Safe for partial/duplicate events.
+    await reverseOrderTransfersForCharge(stripe, charge);
     const paymentIntentId = typeof charge.payment_intent === 'string' ? charge.payment_intent : null;
     const sessionId = await getCheckoutSessionIdFromPaymentIntent(stripe, paymentIntentId);
     return markOrderRefundedBySessionId(sessionId, event.type);
