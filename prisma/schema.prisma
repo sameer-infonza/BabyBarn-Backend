@@ -179,6 +179,14 @@ model User {
   stripeCustomerId   String?
   accessNumber       String?   @unique
   babyName           String?
+  /// Relative path or URL to the customer's profile photo.
+  avatarUrl          String?
+  /// Optional date of birth — used for ACCESS birthday credit.
+  dateOfBirth        DateTime?
+  /// JSON array of "little ones": [{ id, name, birthday, stage }].
+  children           Json?
+  /// JSON map of notification toggles: { returnReminders, restockAlerts, accessDrops }.
+  notificationPrefs  Json?
   membershipShippingAddressJson Json?
   accessRenewalReminderSentAt DateTime?
   accessExpiredNoticeSentAt   DateTime?

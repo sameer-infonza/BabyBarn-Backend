@@ -110,6 +110,23 @@ export class AuthController {
     res.status(200).json({ success: true, message: 'Profile updated', data: result });
   }
 
+  async uploadAvatar(req, res) {
+    const file = req.file;
+    if (!file) {
+      return res.status(400).json({
+        success: false,
+        message: 'No image file received (use field name "image").',
+      });
+    }
+    const relative = `/uploads/avatars/${file.filename}`;
+    const result = await authService.updateProfile(req.user.id, { avatarUrl: relative });
+    res.status(201).json({
+      success: true,
+      message: 'Photo updated',
+      data: { url: relative, user: result },
+    });
+  }
+
   async changePassword(req, res) {
     const data = await validate(changePasswordSchema, req.body);
     const result = await authService.changePassword(req.user.id, data.currentPassword, data.newPassword);

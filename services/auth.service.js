@@ -33,6 +33,41 @@ async function issueRefreshToken(userId) {
   }
 }
 
+function normalizeDateOfBirth(value) {
+  if (value === null || value === undefined) return null;
+  const str = String(value).trim();
+  if (!str) return null;
+  const parsed = new Date(str);
+  return Number.isNaN(parsed.getTime()) ? null : parsed;
+}
+
+function normalizeChildren(value) {
+  if (!Array.isArray(value)) return [];
+  return value
+    .map((child) => {
+      const name = typeof child?.name === 'string' ? child.name.trim() : '';
+      const birthday = typeof child?.birthday === 'string' ? child.birthday.trim() : '';
+      const stage = typeof child?.stage === 'string' ? child.stage.trim() : '';
+      if (!name && !birthday && !stage) return null;
+      const id =
+        typeof child?.id === 'string' && child.id.trim()
+          ? child.id.trim()
+          : crypto.randomUUID();
+      return { id, name, birthday, stage };
+    })
+    .filter(Boolean)
+    .slice(0, 12);
+}
+
+function normalizeNotificationPrefs(value) {
+  const source = value && typeof value === 'object' ? value : {};
+  return {
+    returnReminders: source.returnReminders !== false,
+    restockAlerts: source.restockAlerts !== false,
+    accessDrops: source.accessDrops === true,
+  };
+}
+
 function toPublicUser(user) {
   const accessUntil = user.accessMemberUntil ?? null;
   const accessActive = accessUntil != null && accessUntil > new Date();
@@ -47,6 +82,10 @@ function toPublicUser(user) {
     accessMemberActive: Boolean(accessActive),
     accessNumber: user.accessNumber ?? undefined,
     babyName: user.babyName ?? undefined,
+    avatarUrl: user.avatarUrl ?? null,
+    dateOfBirth: user.dateOfBirth ? new Date(user.dateOfBirth).toISOString() : null,
+    children: normalizeChildren(user.children),
+    notificationPrefs: normalizeNotificationPrefs(user.notificationPrefs),
     membershipShippingAddressJson: user.membershipShippingAddressJson ?? undefined,
     isGuest: Boolean(user.isGuest),
   };
@@ -281,6 +320,10 @@ export class AuthService {
         accessMemberUntil: true,
         accessNumber: true,
         babyName: true,
+        avatarUrl: true,
+        dateOfBirth: true,
+        children: true,
+        notificationPrefs: true,
         membershipShippingAddressJson: true,
         adminModules: true,
         role: { select: { name: true } },
@@ -304,6 +347,10 @@ export class AuthService {
         user.accessMemberUntil != null && user.accessMemberUntil > new Date(),
       accessNumber: user.accessNumber ?? undefined,
       babyName: user.babyName ?? undefined,
+      avatarUrl: user.avatarUrl ?? null,
+      dateOfBirth: user.dateOfBirth ? user.dateOfBirth.toISOString() : null,
+      children: normalizeChildren(user.children),
+      notificationPrefs: normalizeNotificationPrefs(user.notificationPrefs),
       membershipShippingAddressJson: user.membershipShippingAddressJson ?? undefined,
     };
     if (user.role.name === 'ADMIN' || user.role.name === 'ADMIN_TEAM') {
@@ -313,19 +360,36 @@ export class AuthService {
   }
 
   async updateProfile(publicId, payload) {
+    const data = {
+      ...(payload.firstName !== undefined ? { firstName: payload.firstName } : {}),
+      ...(payload.lastName !== undefined ? { lastName: payload.lastName } : {}),
+      ...(payload.phone !== undefined ? { phone: payload.phone } : {}),
+      ...(payload.avatarUrl !== undefined ? { avatarUrl: payload.avatarUrl || null } : {}),
+    };
+
+    if (payload.dateOfBirth !== undefined) {
+      data.dateOfBirth = normalizeDateOfBirth(payload.dateOfBirth);
+    }
+    if (payload.children !== undefined) {
+      data.children = normalizeChildren(payload.children);
+    }
+    if (payload.notificationPrefs !== undefined) {
+      data.notificationPrefs = normalizeNotificationPrefs(payload.notificationPrefs);
+    }
+
     const updated = await prisma.user.update({
       where: { publicId },
-      data: {
-        ...(payload.firstName !== undefined ? { firstName: payload.firstName } : {}),
-        ...(payload.lastName !== undefined ? { lastName: payload.lastName } : {}),
-        ...(payload.phone !== undefined ? { phone: payload.phone } : {}),
-      },
+      data,
       select: {
         publicId: true,
         email: true,
         firstName: true,
         lastName: true,
         phone: true,
+        avatarUrl: true,
+        dateOfBirth: true,
+        children: true,
+        notificationPrefs: true,
         role: { select: { name: true } },
       },
     });
@@ -336,6 +400,10 @@ export class AuthService {
       firstName: updated.firstName ?? undefined,
       lastName: updated.lastName ?? undefined,
       phone: updated.phone ?? undefined,
+      avatarUrl: updated.avatarUrl ?? null,
+      dateOfBirth: updated.dateOfBirth ? updated.dateOfBirth.toISOString() : null,
+      children: normalizeChildren(updated.children),
+      notificationPrefs: normalizeNotificationPrefs(updated.notificationPrefs),
       role: updated.role.name,
     };
   }

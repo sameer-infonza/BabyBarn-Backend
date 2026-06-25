@@ -1,6 +1,7 @@
 import { Router } from 'express';
 import { authController } from '../controllers/auth.controller.js';
 import { authenticate, requireFullAccount } from '../middleware/auth.js';
+import { avatarImageUpload } from '../utils/product-upload.js';
 
 const router = Router();
 
@@ -25,6 +26,12 @@ router.get('/me', authenticate, requireFullAccount, (req, res, next) =>
 router.patch('/me', authenticate, requireFullAccount, (req, res, next) =>
   authController.updateProfile(req, res).catch(next)
 );
+router.post('/me/avatar', authenticate, requireFullAccount, (req, res, next) => {
+  avatarImageUpload.single('image')(req, res, (err) => {
+    if (err) return next(err);
+    authController.uploadAvatar(req, res).catch(next);
+  });
+});
 router.post('/change-password', authenticate, requireFullAccount, (req, res, next) =>
   authController.changePassword(req, res).catch(next)
 );

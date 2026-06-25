@@ -36,10 +36,27 @@ export const verifyEmailSchema = z.object({
   token: z.string().min(1, 'Verification token is required'),
 });
 
+export const profileChildSchema = z.object({
+  id: z.string().max(64).optional(),
+  name: z.string().max(60).optional().nullable(),
+  birthday: z.string().max(20).optional().nullable(),
+  stage: z.string().max(40).optional().nullable(),
+});
+
+export const notificationPrefsSchema = z.object({
+  returnReminders: z.boolean().optional(),
+  restockAlerts: z.boolean().optional(),
+  accessDrops: z.boolean().optional(),
+});
+
 export const updateProfileSchema = z.object({
   firstName: z.string().min(1).optional(),
   lastName: z.string().min(1).optional(),
   phone: z.string().min(6).max(30).optional().nullable(),
+  dateOfBirth: z.string().max(40).optional().nullable(),
+  avatarUrl: z.string().max(2048).optional().nullable(),
+  children: z.array(profileChildSchema).max(12).optional(),
+  notificationPrefs: notificationPrefsSchema.optional(),
 });
 
 export const changePasswordSchema = z.object({
