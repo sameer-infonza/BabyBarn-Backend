@@ -73,6 +73,39 @@ export async function listOrderActivity(orderPublicId, limit = 100) {
   return { logs: rows };
 }
 
+async function attachActorNames(rows) {
+  const actorIds = [...new Set(rows.map((row) => row.actorId).filter(Boolean))];
+  if (actorIds.length === 0) {
+    return rows.map((row) => ({
+      ...row,
+      actorFirstName: null,
+      actorLastName: null,
+      actorRole: null,
+    }));
+  }
+
+  const actors = await prisma.user.findMany({
+    where: { publicId: { in: actorIds } },
+    select: {
+      publicId: true,
+      firstName: true,
+      lastName: true,
+      role: { select: { name: true } },
+    },
+  });
+  const actorById = new Map(actors.map((actor) => [actor.publicId, actor]));
+
+  return rows.map((row) => {
+    const actor = row.actorId ? actorById.get(row.actorId) : null;
+    return {
+      ...row,
+      actorFirstName: actor?.firstName ?? null,
+      actorLastName: actor?.lastName ?? null,
+      actorRole: actor?.role?.name ?? null,
+    };
+  });
+}
+
 export async function listAuditLogs(page = 1, limit = 50, filters = {}) {
   const skip = (page - 1) * limit;
   const where = buildAuditWhere(filters);
@@ -85,8 +118,9 @@ export async function listAuditLogs(page = 1, limit = 50, filters = {}) {
     }),
     prisma.adminAuditLog.count({ where }),
   ]);
+  const logs = await attachActorNames(rows);
   return {
-    logs: rows,
+    logs,
     pagination: { total, page, limit, pages: Math.max(1, Math.ceil(total / limit) || 1) },
   };
 }

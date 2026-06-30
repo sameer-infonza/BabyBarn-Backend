@@ -407,9 +407,21 @@ export class InventoryService {
     });
   }
 
-  async listHistory({ page = 1, limit = 20, productPublicId = null, productType = null }) {
+  async listHistory({
+    page = 1,
+    limit = 20,
+    productPublicId = null,
+    productType = null,
+    search = null,
+  }) {
     const { listLedgerHistory } = await import('./inventory-ledger.service.js');
-    const ledger = await listLedgerHistory({ page, limit, productPublicId, productType });
+    const ledger = await listLedgerHistory({
+      page,
+      limit,
+      productPublicId,
+      productType,
+      search,
+    });
     return {
       entries: ledger.entries.map((e) => ({
         id: e.id,
@@ -421,7 +433,7 @@ export class InventoryService {
         createdAt: e.createdAt,
         product: e.product,
         variant: e.variant,
-        user: null,
+        user: e.actor ?? null,
       })),
       pagination: ledger.pagination,
     };

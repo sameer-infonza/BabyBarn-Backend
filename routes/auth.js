@@ -35,6 +35,15 @@ router.post('/me/avatar', authenticate, requireFullAccount, (req, res, next) => 
 router.post('/change-password', authenticate, requireFullAccount, (req, res, next) =>
   authController.changePassword(req, res).catch(next)
 );
+router.post('/verify-password', authenticate, requireFullAccount, (req, res, next) =>
+  authController.verifyPassword(req, res).catch(next)
+);
+router.post('/change-email', authenticate, requireFullAccount, (req, res, next) =>
+  authController.changeEmail(req, res).catch(next)
+);
+router.post('/pause-account', authenticate, requireFullAccount, (req, res, next) =>
+  authController.pauseAccount(req, res).catch(next)
+);
 router.get('/addresses', authenticate, requireFullAccount, (req, res, next) =>
   authController.listAddresses(req, res).catch(next)
 );

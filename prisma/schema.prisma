@@ -189,6 +189,7 @@ model User {
   notificationPrefs  Json?
   membershipShippingAddressJson Json?
   accessRenewalReminderSentAt DateTime?
+  accessExpiryDayReminderSentAt DateTime?
   accessExpiredNoticeSentAt   DateTime?
   accessMemberUntil  DateTime?
   emailVerifiedAt    DateTime?
@@ -322,6 +323,8 @@ model Product {
   unitPriceAmount      Float?
   unitPriceReference   String?
   fabric               String?
+  feel                 String?
+  fit                  String?
   care                 String?
   reorderPoint         Int?
   sizeAgeGroup         String?
@@ -628,6 +631,7 @@ model ReturnRequest {
   orderItemId Int?
   type ReturnType @default(STANDARD)
   status ReturnStatus @default(REQUESTED)
+  quantity Int @default(1)
   reason String?
   notes String?
   creditAwarded Float @default(0)

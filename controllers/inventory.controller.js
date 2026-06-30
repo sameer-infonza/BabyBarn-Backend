@@ -71,12 +71,14 @@ export class InventoryController {
     const limit = parseInt(String(req.query.limit), 10) || 20;
     const productId = req.query.productId ? String(req.query.productId) : undefined;
     const productType = req.query.productType ? String(req.query.productType) : undefined;
+    const search = req.query.search ? String(req.query.search).trim() : undefined;
     const result = await inventoryService.listHistory({
       page,
       limit,
       productPublicId: productId,
       productType:
         productType === 'NEW' || productType === 'REFURBISHED' ? productType : undefined,
+      search: search || undefined,
     });
     res.status(200).json({
       success: true,

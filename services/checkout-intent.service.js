@@ -8,21 +8,24 @@ function db() {
   return refreshPrismaClientIfNeeded();
 }
 
+// Tax is charged on the product cost only — shipping and the ACCESS membership
+// fee are not taxable. Store credit reduces the taxable product base.
 function computeCheckoutTaxAmount(subtotal, shippingCost, accessFee, storeCreditApplied) {
-  const taxable = Math.max(
-    0,
-    Number(subtotal || 0) + Number(shippingCost || 0) + Number(accessFee || 0) - Number(storeCreditApplied || 0)
-  );
+  const taxable = Math.max(0, Number(subtotal || 0) - Number(storeCreditApplied || 0));
   return Math.round(taxable * config.salesTaxRate * 100) / 100;
 }
 
 function computeCheckoutTotal(subtotal, shippingCost, accessFee, storeCreditApplied) {
-  const taxable = Math.max(
-    0,
-    Number(subtotal || 0) + Number(shippingCost || 0) + Number(accessFee || 0) - Number(storeCreditApplied || 0)
-  );
   const tax = computeCheckoutTaxAmount(subtotal, shippingCost, accessFee, storeCreditApplied);
-  return Math.round((taxable + tax) * 100) / 100;
+  const total = Math.max(
+    0,
+    Number(subtotal || 0) +
+      Number(shippingCost || 0) +
+      Number(accessFee || 0) -
+      Number(storeCreditApplied || 0) +
+      tax
+  );
+  return Math.round(total * 100) / 100;
 }
 
 import {

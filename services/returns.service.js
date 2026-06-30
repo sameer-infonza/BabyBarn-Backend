@@ -201,6 +201,15 @@ export class ReturnsService {
           ? initialReturnStatusForDecision(eligibilityEval.decision)
           : 'REQUESTED';
 
+      // Partial returns: clamp the requested quantity to what was purchased.
+      // Refurb returns are always one unit at a time.
+      const purchasedQty = Math.max(1, Number(orderItem.quantity || 1));
+      const requestedQty =
+        payload.type === 'REFURBISHMENT'
+          ? 1
+          : Number(payload.quantities?.[publicId] ?? payload.quantity ?? 1);
+      const quantity = Math.min(purchasedQty, Math.max(1, Number.isFinite(requestedQty) ? requestedQty : 1));
+
       const row = await prisma.$transaction(async (tx) => {
         const rr = await tx.returnRequest.create({
           data: {
@@ -210,6 +219,7 @@ export class ReturnsService {
             type: payload.type,
             reason: payload.reason,
             status: initialStatus,
+            quantity,
           },
         });
 
@@ -653,6 +663,7 @@ export class ReturnsService {
         include: { orderItem: true },
       });
       if (full?.orderItem) {
+        const restockQty = Math.max(1, Number(full.quantity || 1));
         await prisma.$transaction(async (tx) => {
           const product = await tx.product.findUnique({
             where: { id: full.orderItem.productId },
@@ -663,7 +674,7 @@ export class ReturnsService {
               tx,
               product,
               full.orderItem.productVariantId,
-              1,
+              restockQty,
               { referenceType: 'return', referenceId: returnPublicId, note: 'Standard return approved' },
               'RESTOCK'
             );

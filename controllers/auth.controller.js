@@ -9,6 +9,8 @@ import {
   verifyEmailSchema,
   updateProfileSchema,
   changePasswordSchema,
+  changeEmailSchema,
+  pauseAccountSchema,
   addressCreateSchema,
   addressUpdateSchema,
 } from '../schemas/index.js';
@@ -130,6 +132,24 @@ export class AuthController {
   async changePassword(req, res) {
     const data = await validate(changePasswordSchema, req.body);
     const result = await authService.changePassword(req.user.id, data.currentPassword, data.newPassword);
+    res.status(200).json({ success: true, message: result.message, data: result });
+  }
+
+  async verifyPassword(req, res) {
+    const currentPassword = typeof req.body?.currentPassword === 'string' ? req.body.currentPassword : '';
+    const result = await authService.verifyCurrentPassword(req.user.id, currentPassword);
+    res.status(200).json({ success: true, data: result });
+  }
+
+  async changeEmail(req, res) {
+    const data = await validate(changeEmailSchema, req.body);
+    const result = await authService.changeEmail(req.user.id, data.newEmail, data.currentPassword);
+    res.status(200).json({ success: true, message: result.message, data: result });
+  }
+
+  async pauseAccount(req, res) {
+    const data = await validate(pauseAccountSchema, req.body);
+    const result = await authService.pauseAccount(req.user.id, data.currentPassword);
     res.status(200).json({ success: true, message: result.message, data: result });
   }
 

@@ -42,6 +42,51 @@ function computeAgeGroups(isVariantProduct, variants, sizeAgeGroup) {
   return Array.from(set).sort((a, b) => ageOrderIndex(a) - ageOrderIndex(b));
 }
 
+/** Block catalog activation until required listing fields are complete. */
+function assertProductCanActivate(product, variants = product?.variants ?? []) {
+  const errors = [];
+  if (product.isDraft) {
+    errors.push('Save and publish the product before activating the listing.');
+  }
+  if (!(product.name ?? '').trim()) {
+    errors.push('Product title is required.');
+  }
+  if (product.price == null || Number(product.price) < 0 || Number.isNaN(Number(product.price))) {
+    errors.push('A valid retail price is required.');
+  }
+  const hasImage =
+    Boolean((product.imageUrl ?? '').trim()) ||
+    (Array.isArray(product.gallery) && product.gallery.length > 0);
+  if (!hasImage) {
+    errors.push('Add at least one product image before activating.');
+  }
+
+  const isVariant =
+    product.inventoryModel === 'variant_matrix' && Array.isArray(variants) && variants.length > 0;
+
+  if (isVariant) {
+    const stocked = variants.some((v) => Number(v.stock) > 0);
+    if (!stocked) {
+      errors.push('Assign stock to at least one variant before activating.');
+    }
+    const ages = computeAgeGroups(true, variants);
+    if (ages.length === 0) {
+      errors.push('Each variant must include a valid age group.');
+    }
+  } else {
+    if (!(product.sizeAgeGroup ?? '').trim()) {
+      errors.push('Select an age group before activating.');
+    }
+    if (Number(product.stock) <= 0) {
+      errors.push('Set inventory stock above zero before activating.');
+    }
+  }
+
+  if (errors.length > 0) {
+    throw new AppError(400, errors.join(' '), 'PRODUCT_ACTIVATION_INCOMPLETE', { errors });
+  }
+}
+
 function normalizeMediaUrl(url) {
   if (!url) return null;
   const u = String(url).trim();
@@ -425,6 +470,8 @@ export class ProductService {
       unitPriceAmount,
       unitPriceReference,
       fabric,
+      feel,
+      fit,
       care,
       reorderPoint,
       sizeAgeGroup,
@@ -530,6 +577,8 @@ export class ProductService {
           unitPriceAmount: unitPriceAmount ?? null,
           unitPriceReference: unitPriceReference ?? null,
           fabric: fabric ?? null,
+          feel: feel ?? null,
+          fit: fit ?? null,
           care: care ?? null,
           reorderPoint: reorderPoint ?? null,
           sizeAgeGroup: sizeAgeGroup ?? null,
@@ -789,6 +838,13 @@ export class ProductService {
               ? updatePayload.sizeAgeGroup
               : product.sizeAgeGroup
           );
+
+      if (updatePayload.isActiveListing === true && product.isActiveListing !== true) {
+        const preview = { ...product, ...updatePayload };
+        const variantRows =
+          hasVariantsKey && incomingVariants !== null ? incomingVariants : product.variants;
+        assertProductCanActivate(preview, variantRows);
+      }
 
       return tx.product.update({
         where: { id: product.id },

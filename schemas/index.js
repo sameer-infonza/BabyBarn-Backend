@@ -1,12 +1,28 @@
 import { z } from 'zod';
-import { AGE_AXIS_NAME, isCanonicalAge } from '../lib/age-groups.js';
+import { AGE_AXIS_NAME, isAgeAxisKey, isCanonicalAge } from '../lib/age-groups.js';
 
-/** Reject non-canonical values on the Age variant axis (other axes stay free-form). */
+/** Age (and Color) are the only buyable variant axes. "Size" and other free-form keys are rejected. */
+function isAllowedAxisKey(key) {
+  if (typeof key !== 'string') return false;
+  const k = key.trim().toLowerCase();
+  return isAgeAxisKey(key) || k === 'color' || k === 'colour';
+}
+
+/** Reject non-canonical Age values and disallowed (e.g. Size) variant axes. */
 function validateVariantAgeValues(variants, ctx) {
   if (!Array.isArray(variants)) return;
   variants.forEach((variant, index) => {
     const combo = variant?.combination;
     if (!combo || typeof combo !== 'object') return;
+    for (const key of Object.keys(combo)) {
+      if (!isAllowedAxisKey(key)) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: `Unsupported variant attribute "${key}". Only Age (and Color) are allowed.`,
+          path: ['variants', index, 'combination', key],
+        });
+      }
+    }
     const ageValue = combo[AGE_AXIS_NAME];
     if (ageValue == null || ageValue === '') return;
     if (!isCanonicalAge(ageValue)) {
@@ -18,6 +34,32 @@ function validateVariantAgeValues(variants, ctx) {
     }
   });
 }
+
+/** Reject disallowed variant axis names (e.g. "Size") at the axis-definition level. */
+function validateVariantAxisNames(variantAxes, ctx) {
+  if (!Array.isArray(variantAxes)) return;
+  variantAxes.forEach((axis, index) => {
+    if (axis?.name && !isAllowedAxisKey(axis.name)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: `Unsupported variant attribute "${axis.name}". Only Age (and Color) are allowed.`,
+        path: ['variantAxes', index, 'name'],
+      });
+    }
+  });
+}
+
+const phoneInvalidMessage = 'Enter a valid phone number (at least 10 digits)';
+/** Accepts formatted phone strings; requires a plausible number of digits. */
+const requiredPhoneSchema = z
+  .string()
+  .min(6)
+  .max(30)
+  .refine((v) => v.replace(/\D+/g, '').length >= 10, phoneInvalidMessage);
+const optionalPhoneSchema = z
+  .string()
+  .max(30)
+  .refine((v) => v.trim() === '' || v.replace(/\D+/g, '').length >= 10, phoneInvalidMessage);
 
 const passwordComplexityMessage =
   'Password must be at least 8 characters and include uppercase, lowercase, number, and special character';
@@ -66,12 +108,17 @@ export const notificationPrefsSchema = z.object({
   returnReminders: z.boolean().optional(),
   restockAlerts: z.boolean().optional(),
   accessDrops: z.boolean().optional(),
+  lowStockAlerts: z.boolean().optional(),
+  newOrders: z.boolean().optional(),
+  returnRequests: z.boolean().optional(),
+  teamDigest: z.boolean().optional(),
+  accessRenewals: z.boolean().optional(),
 });
 
 export const updateProfileSchema = z.object({
   firstName: z.string().min(1).optional(),
   lastName: z.string().min(1).optional(),
-  phone: z.string().min(6).max(30).optional().nullable(),
+  phone: optionalPhoneSchema.optional().nullable(),
   dateOfBirth: z.string().max(40).optional().nullable(),
   avatarUrl: z.string().max(2048).optional().nullable(),
   children: z.array(profileChildSchema).max(12).optional(),
@@ -83,6 +130,15 @@ export const changePasswordSchema = z.object({
   newPassword: passwordSchema,
 });
 
+export const changeEmailSchema = z.object({
+  newEmail: z.string().email('Invalid email address'),
+  currentPassword: z.string().min(1, 'Current password is required'),
+});
+
+export const pauseAccountSchema = z.object({
+  currentPassword: z.string().min(1, 'Current password is required'),
+});
+
 export const addressCreateSchema = z.object({
   fullName: z.string().min(1, 'Full name is required'),
   addressLine1: z.string().min(1, 'Address line 1 is required'),
@@ -91,7 +147,7 @@ export const addressCreateSchema = z.object({
   state: z.string().min(1, 'State is required'),
   zipCode: z.string().min(1, 'ZIP code is required'),
   country: z.string().min(1, 'Country is required'),
-  phoneNumber: z.string().min(6).max(30),
+  phoneNumber: requiredPhoneSchema,
   isDefault: z.boolean().optional(),
 });
 
@@ -124,6 +180,8 @@ const createProductBodySchema = z.object({
   unitPriceAmount: z.number().min(0).nullable().optional(),
   unitPriceReference: z.union([z.string(), z.null()]).optional(),
   fabric: z.union([z.string(), z.null()]).optional(),
+  feel: z.union([z.string(), z.null()]).optional(),
+  fit: z.union([z.string(), z.null()]).optional(),
   care: z.union([z.string(), z.null()]).optional(),
   reorderPoint: z.number().int().min(1).nullable().optional(),
   sizeAgeGroup: z.union([z.string(), z.null()]).optional(),
@@ -147,6 +205,7 @@ export const createProductSchema = createProductBodySchema.superRefine((data, ct
     });
   }
   validateVariantAgeValues(data.variants, ctx);
+  validateVariantAxisNames(data.variantAxes, ctx);
 });
 
 /** Partial updates: `.partial()` must run on `ZodObject`, not on `ZodEffects` from `.superRefine()`. */
@@ -154,6 +213,7 @@ export const updateProductSchema = createProductBodySchema
   .partial()
   .superRefine((data, ctx) => {
     validateVariantAgeValues(data.variants, ctx);
+    validateVariantAxisNames(data.variantAxes, ctx);
   });
 
 const checkoutAddressPayloadSchema = z.object({
@@ -340,6 +400,10 @@ export const returnRequestCreateSchema = z
     orderItemIds: z.array(z.string().min(1)).min(1).max(50).optional(),
     type: z.enum(['STANDARD', 'REFURBISHMENT']).optional().default('STANDARD'),
     reason: z.string().min(3).max(1000),
+    // Partial returns: a single quantity (applies to all selected items) and/or a
+    // per-item map of orderItemId -> quantity. Server clamps to purchased qty.
+    quantity: z.number().int().min(1).max(99).optional(),
+    quantities: z.record(z.string().min(1), z.number().int().min(1).max(99)).optional(),
     questionnaire: refurbQuestionnaireSchema.optional(),
     photoUrls: refurbPhotoUrlsSchema.optional(),
   })

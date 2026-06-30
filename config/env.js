@@ -91,4 +91,30 @@ export const config = {
   /** When true, approving a STANDARD return restocks one unit to the original SKU. */
   standardReturnRestock: process.env.STANDARD_RETURN_RESTOCK !== 'false',
   salesTaxRate: Number(process.env.SALES_TAX_RATE ?? 0.06),
+  /** Days before ACCESS expiry to send the pre-expiry reminder email (comma-separated for multiple, e.g. "14,0"). */
+  accessRenewalReminderDays: (process.env.ACCESS_RENEWAL_REMINDER_DAYS || '14,0')
+    .split(',')
+    .map((s) => parseInt(s.trim(), 10))
+    .filter((n) => !Number.isNaN(n) && n >= 0),
+  /**
+   * Address verification. Provider is auto-selected from configured credentials.
+   * - USPS: set USPS_CLIENT_ID + USPS_CLIENT_SECRET (USPS APIs v3, OAuth).
+   * - UPS:  set UPS_CLIENT_ID + UPS_CLIENT_SECRET (UPS OAuth + Address Validation).
+   * When no credentials are set the service no-ops (addresses save unchanged).
+   * Set ADDRESS_VERIFY_STRICT=true to reject undeliverable addresses instead of warning.
+   */
+  addressVerification: {
+    provider: (process.env.ADDRESS_VERIFY_PROVIDER || 'auto').trim().toLowerCase(),
+    strict: process.env.ADDRESS_VERIFY_STRICT === 'true',
+    usps: {
+      clientId: (process.env.USPS_CLIENT_ID || '').trim(),
+      clientSecret: (process.env.USPS_CLIENT_SECRET || '').trim(),
+      baseUrl: (process.env.USPS_API_BASE_URL || 'https://apis.usps.com').replace(/\/$/, ''),
+    },
+    ups: {
+      clientId: (process.env.UPS_CLIENT_ID || '').trim(),
+      clientSecret: (process.env.UPS_CLIENT_SECRET || '').trim(),
+      baseUrl: (process.env.UPS_API_BASE_URL || 'https://onlinetools.ups.com').replace(/\/$/, ''),
+    },
+  },
 };

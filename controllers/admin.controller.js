@@ -1,6 +1,7 @@
 import { listAuditLogs, exportAuditLogs, auditLogsToCsv } from '../services/audit.service.js';
 import {
   getFinanceStats,
+  listFinanceTransactions,
   listCustomers,
   getCustomerDetail,
   setUserActive,
@@ -34,6 +35,8 @@ const teamMemberCreateSchema = z.object({
 });
 
 const teamMemberUpdateSchema = z.object({
+  firstName: z.string().min(1).max(80).optional().nullable(),
+  lastName: z.string().min(1).max(80).optional().nullable(),
   roleTitle: z.string().min(1).max(80).optional().nullable(),
   modules: z.union([z.array(z.string()), z.null()]).optional(),
   isActive: z.boolean().optional(),
@@ -44,6 +47,15 @@ export class AdminController {
     const dateFrom = req.query.dateFrom ? String(req.query.dateFrom) : undefined;
     const dateTo = req.query.dateTo ? String(req.query.dateTo) : undefined;
     const data = await getFinanceStats({ dateFrom, dateTo });
+    res.status(200).json({ success: true, data: toPublicJson(data) });
+  }
+
+  async listFinanceTransactions(req, res) {
+    const page = parseInt(String(req.query.page), 10) || 1;
+    const limit = Math.min(parseInt(String(req.query.limit), 10) || 20, 100);
+    const dateFrom = req.query.dateFrom ? String(req.query.dateFrom) : undefined;
+    const dateTo = req.query.dateTo ? String(req.query.dateTo) : undefined;
+    const data = await listFinanceTransactions(page, limit, { dateFrom, dateTo });
     res.status(200).json({ success: true, data: toPublicJson(data) });
   }
 

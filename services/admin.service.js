@@ -140,6 +140,101 @@ async function distinctOrderCountByProductType(createdAt, productType) {
   return rows[0]?.count ?? 0;
 }
 
+export async function listFinanceTransactions(page = 1, limit = 20, { dateFrom, dateTo } = {}) {
+  const skip = (page - 1) * limit;
+  const range = dateRangeWhere(dateFrom, dateTo);
+  const gteOrder = range?.gte ? Prisma.sql`AND o."createdAt" >= ${range.gte}` : Prisma.empty;
+  const lteOrder = range?.lte ? Prisma.sql`AND o."createdAt" <= ${range.lte}` : Prisma.empty;
+  const gteMembership = range?.gte ? Prisma.sql`AND mp."paidAt" >= ${range.gte}` : Prisma.empty;
+  const lteMembership = range?.lte ? Prisma.sql`AND mp."paidAt" <= ${range.lte}` : Prisma.empty;
+
+  const [countRows, rows] = await Promise.all([
+    prisma.$queryRaw`
+      SELECT COUNT(*)::int AS "count"
+      FROM (
+        SELECT o."id"
+        FROM "Order" o
+        WHERE o."paymentStatus" IN ('PAID', 'REFUNDED')
+          AND o."status" <> 'CANCELLED'
+          ${gteOrder}
+          ${lteOrder}
+        UNION ALL
+        SELECT mp."id"
+        FROM "MembershipPayment" mp
+        WHERE 1 = 1
+          ${gteMembership}
+          ${lteMembership}
+      ) combined
+    `,
+    prisma.$queryRaw`
+      SELECT *
+      FROM (
+        SELECT
+          'order'::text AS "kind",
+          o."publicId" AS "publicId",
+          o."orderNumber" AS "reference",
+          o."totalAmount"::float AS "amount",
+          o."paymentStatus"::text AS "status",
+          o."createdAt" AS "occurredAt",
+          u."email" AS "customerEmail",
+          u."firstName" AS "customerFirstName",
+          u."lastName" AS "customerLastName",
+          u."publicId" AS "userPublicId",
+          NULL::text AS "stripeSessionId"
+        FROM "Order" o
+        INNER JOIN "User" u ON o."userId" = u."id"
+        WHERE o."paymentStatus" IN ('PAID', 'REFUNDED')
+          AND o."status" <> 'CANCELLED'
+          ${gteOrder}
+          ${lteOrder}
+        UNION ALL
+        SELECT
+          'membership'::text AS "kind",
+          mp."publicId" AS "publicId",
+          mp."type"::text AS "reference",
+          mp."amount"::float AS "amount",
+          'PAID'::text AS "status",
+          mp."paidAt" AS "occurredAt",
+          u."email" AS "customerEmail",
+          u."firstName" AS "customerFirstName",
+          u."lastName" AS "customerLastName",
+          u."publicId" AS "userPublicId",
+          mp."stripeSessionId" AS "stripeSessionId"
+        FROM "MembershipPayment" mp
+        INNER JOIN "User" u ON mp."userId" = u."id"
+        WHERE 1 = 1
+          ${gteMembership}
+          ${lteMembership}
+      ) combined
+      ORDER BY "occurredAt" DESC
+      LIMIT ${limit} OFFSET ${skip}
+    `,
+  ]);
+
+  const total = countRows[0]?.count ?? 0;
+
+  return {
+    transactions: rows.map((row) => ({
+      kind: row.kind,
+      publicId: row.publicId,
+      reference: row.reference,
+      amount: row.amount,
+      status: row.status,
+      occurredAt: row.occurredAt,
+      customerEmail: row.customerEmail,
+      customerName: [row.customerFirstName, row.customerLastName].filter(Boolean).join(' ') || null,
+      userPublicId: row.userPublicId ?? null,
+      stripeSessionId: row.stripeSessionId ?? null,
+    })),
+    pagination: {
+      total,
+      page,
+      limit,
+      pages: Math.ceil(total / limit) || 1,
+    },
+  };
+}
+
 export async function listCustomers(page = 1, limit = 20, { search, role } = {}) {
   const skip = (page - 1) * limit;
   const and = [];
@@ -564,6 +659,12 @@ export async function updateTeamMember(actorPublicId, targetPublicId, payload) {
   if (!target || target.roleId !== teamRole.id) throw new AppError(404, 'Team member not found');
 
   const data = {};
+  if (payload.firstName !== undefined) {
+    data.firstName = payload.firstName ? String(payload.firstName).trim() : null;
+  }
+  if (payload.lastName !== undefined) {
+    data.lastName = payload.lastName ? String(payload.lastName).trim() : null;
+  }
   if (payload.roleTitle !== undefined) data.phone = payload.roleTitle ? String(payload.roleTitle).trim() : null;
   if (payload.isActive !== undefined) data.isActive = Boolean(payload.isActive);
   if (payload.modules !== undefined) data.adminModules = normalizeTeamPermissionModules(payload.modules);
@@ -588,6 +689,8 @@ export async function updateTeamMember(actorPublicId, targetPublicId, payload) {
     entityType: 'User',
     entityId: updated.publicId,
     meta: {
+      firstName: updated.firstName,
+      lastName: updated.lastName,
       roleTitle: updated.phone || null,
       isActive: updated.isActive,
       modules: updated.adminModules,

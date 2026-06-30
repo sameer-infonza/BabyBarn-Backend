@@ -34,20 +34,37 @@ export async function listLedgerHistory({
   limit = 20,
   productPublicId = null,
   productType = null,
+  search = null,
 }) {
   const { prisma } = await import('../lib/prisma.js');
   const skip = (page - 1) * limit;
-  const where = {};
+  const and = [];
+
   if (productPublicId) {
     const product = await prisma.product.findUnique({
       where: { publicId: productPublicId },
       select: { id: true },
     });
     if (!product) return { entries: [], pagination: { total: 0, page, limit, pages: 1 } };
-    where.productId = product.id;
+    and.push({ productId: product.id });
   } else if (productType === 'NEW' || productType === 'REFURBISHED') {
-    where.product = { productType };
+    and.push({ product: { productType } });
   }
+
+  const q = search ? String(search).trim() : '';
+  if (q) {
+    and.push({
+      OR: [
+        { product: { name: { contains: q, mode: 'insensitive' } } },
+        { product: { sku: { contains: q, mode: 'insensitive' } } },
+        { productVariant: { sku: { contains: q, mode: 'insensitive' } } },
+        { note: { contains: q, mode: 'insensitive' } },
+        { referenceId: { contains: q, mode: 'insensitive' } },
+      ],
+    });
+  }
+
+  const where = and.length ? { AND: and } : {};
 
   const [rows, total] = await Promise.all([
     prisma.inventoryLedgerEvent.findMany({
@@ -63,30 +80,57 @@ export async function listLedgerHistory({
     prisma.inventoryLedgerEvent.count({ where }),
   ]);
 
+  const actorIds = [...new Set(rows.map((row) => row.actorUserId).filter(Boolean))];
+  const actors =
+    actorIds.length > 0
+      ? await prisma.user.findMany({
+          where: { id: { in: actorIds } },
+          select: {
+            id: true,
+            publicId: true,
+            email: true,
+            firstName: true,
+            lastName: true,
+          },
+        })
+      : [];
+  const actorById = new Map(actors.map((actor) => [actor.id, actor]));
+
   const { combinationLabel } = await import('./inventory.service.js');
 
   return {
-    entries: rows.map((r) => ({
-      id: r.publicId,
-      eventType: r.eventType,
-      quantityDelta: r.quantityDelta,
-      referenceType: r.referenceType,
-      referenceId: r.referenceId,
-      note: r.note,
-      createdAt: r.createdAt,
-      product: {
-        id: r.product.publicId,
-        name: r.product.name,
-        sku: r.product.sku,
-      },
-      variant: r.productVariant
-        ? {
-            id: r.productVariant.publicId,
-            sku: r.productVariant.sku,
-            combinationLabel: combinationLabel(r.productVariant.combination),
-          }
-        : null,
-    })),
+    entries: rows.map((r) => {
+      const actor = r.actorUserId ? actorById.get(r.actorUserId) : null;
+      return {
+        id: r.publicId,
+        eventType: r.eventType,
+        quantityDelta: r.quantityDelta,
+        referenceType: r.referenceType,
+        referenceId: r.referenceId,
+        note: r.note,
+        createdAt: r.createdAt,
+        product: {
+          id: r.product.publicId,
+          name: r.product.name,
+          sku: r.product.sku,
+        },
+        variant: r.productVariant
+          ? {
+              id: r.productVariant.publicId,
+              sku: r.productVariant.sku,
+              combinationLabel: combinationLabel(r.productVariant.combination),
+            }
+          : null,
+        actor: actor
+          ? {
+              id: actor.publicId,
+              email: actor.email,
+              firstName: actor.firstName,
+              lastName: actor.lastName,
+            }
+          : null,
+      };
+    }),
     pagination: {
       total,
       page,

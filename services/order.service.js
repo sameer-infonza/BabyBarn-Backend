@@ -385,11 +385,11 @@ export class OrderService {
       0,
       Math.min(requestedStoreCredit, availableStoreCredit, subtotalApplied + shippingCost + accessMembershipFee)
     );
+    // Tax applies to the product cost only — shipping and the ACCESS membership
+    // fee are excluded from the taxable base.
     const taxAmount =
       Math.round(
-        Math.max(0, subtotalApplied + shippingCost + accessMembershipFee - storeCreditApplied) *
-          config.salesTaxRate *
-          100
+        Math.max(0, subtotalApplied - storeCreditApplied) * config.salesTaxRate * 100
       ) / 100;
     const totalPayable = Math.max(
       0,
@@ -577,7 +577,17 @@ export class OrderService {
     const [order, viewer] = await Promise.all([
       prisma.order.findUnique({
         where: { publicId: orderPublicId },
-        include: { orderItems: { include: { product: true } } },
+        include: {
+          orderItems: {
+            include: {
+              product: true,
+              returnRequests: {
+                select: { publicId: true, status: true, type: true, createdAt: true },
+                orderBy: { createdAt: 'desc' },
+              },
+            },
+          },
+        },
       }),
       prisma.user.findUnique({
         where: { publicId: userPublicId },

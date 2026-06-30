@@ -4,6 +4,7 @@ import { prisma } from '../lib/prisma.js';
 import { generateToken } from '../utils/jwt.js';
 import { AppError } from '../utils/error-handler.js';
 import { emailService } from './email.service.js';
+import { addressVerificationService } from './address-verification.service.js';
 import { config } from '../config/env.js';
 
 const RESET_TOKEN_BYTES = 32;
@@ -65,6 +66,11 @@ function normalizeNotificationPrefs(value) {
     returnReminders: source.returnReminders !== false,
     restockAlerts: source.restockAlerts !== false,
     accessDrops: source.accessDrops === true,
+    lowStockAlerts: source.lowStockAlerts !== false,
+    newOrders: source.newOrders !== false,
+    returnRequests: source.returnRequests !== false,
+    teamDigest: source.teamDigest === true,
+    accessRenewals: source.accessRenewals !== false,
   };
 }
 
@@ -417,6 +423,76 @@ export class AuthService {
     return { message: 'Password changed successfully' };
   }
 
+  /** Side-effect-free check used by the security page to validate the current password live. */
+  async verifyCurrentPassword(publicId, currentPassword) {
+    const user = await this.getUserByPublicId(publicId);
+    const valid = await bcrypt.compare(currentPassword || '', user.password);
+    return { valid };
+  }
+
+  async changeEmail(publicId, newEmail, currentPassword) {
+    const user = await this.getUserByPublicId(publicId);
+    const ok = await bcrypt.compare(currentPassword || '', user.password);
+    if (!ok) throw new AppError(400, 'Current password is incorrect');
+
+    const normalizedEmail = String(newEmail || '').trim().toLowerCase();
+    if (!normalizedEmail || !normalizedEmail.includes('@')) {
+      throw new AppError(400, 'Enter a valid email address');
+    }
+    if (normalizedEmail === user.email.toLowerCase()) {
+      throw new AppError(400, 'That is already your email address');
+    }
+    const existing = await prisma.user.findUnique({ where: { email: normalizedEmail } });
+    if (existing && existing.id !== user.id) {
+      throw new AppError(400, 'That email is already in use');
+    }
+
+    const updated = await prisma.user.update({
+      where: { id: user.id },
+      data: { email: normalizedEmail, emailVerifiedAt: null },
+      include: { role: true },
+    });
+
+    // Send a verification link to the new address (best-effort).
+    try {
+      const verifyToken = await this.createEmailVerificationToken(user.id);
+      const actionUrl = `${config.frontend.customerUrl}/verify-email?token=${verifyToken}`;
+      await this.sendAuthEmail({
+        to: updated.email,
+        template: 'verify-email',
+        context: {
+          name: [updated.firstName, updated.lastName].filter(Boolean).join(' ').trim(),
+          actionUrl,
+        },
+      });
+    } catch (err) {
+      console.error('[auth] change-email verification send failed', err);
+    }
+
+    return {
+      user: toPublicUser(updated),
+      message: 'Email updated. Please check your inbox to verify the new address.',
+    };
+  }
+
+  async pauseAccount(publicId, currentPassword) {
+    const user = await this.getUserByPublicId(publicId);
+    const ok = await bcrypt.compare(currentPassword || '', user.password);
+    if (!ok) throw new AppError(400, 'Current password is incorrect');
+
+    await prisma.user.update({ where: { id: user.id }, data: { isActive: false } });
+    // Revoke refresh tokens so the paused account is signed out everywhere.
+    try {
+      await prisma.refreshToken.deleteMany({ where: { userId: user.id } });
+    } catch (err) {
+      console.error('[auth] pause-account token revoke failed', err);
+    }
+    return {
+      message:
+        'Your account is paused and you have been signed out. Contact support when you would like to reactivate it.',
+    };
+  }
+
   async listAddresses(publicId) {
     const user = await this.getUserByPublicId(publicId);
     const items = await prisma.address.findMany({
@@ -437,22 +513,70 @@ export class AuthService {
     }));
   }
 
+  /**
+   * Run carrier address validation (no-op unless USPS/UPS credentials are set).
+   * Returns the (possibly standardized) address fields to persist. In strict mode
+   * an undeliverable address is rejected; otherwise we save what the user entered.
+   */
+  async _applyAddressVerification(payload) {
+    const result = await addressVerificationService.verifyAddress({
+      addressLine1: payload.addressLine1,
+      addressLine2: payload.addressLine2 ?? null,
+      city: payload.city,
+      state: payload.state,
+      zipCode: payload.zipCode,
+      country: payload.country,
+    });
+
+    if (
+      result.status === 'unverified' &&
+      result.deliverable === false &&
+      config.addressVerification.strict
+    ) {
+      throw new AppError(
+        400,
+        result.messages[0] || 'We could not verify this address. Please check it and try again.'
+      );
+    }
+
+    if (result.normalized && (result.status === 'corrected' || result.status === 'verified')) {
+      return {
+        addressLine1: result.normalized.addressLine1 ?? payload.addressLine1,
+        addressLine2: result.normalized.addressLine2 ?? payload.addressLine2 ?? null,
+        city: result.normalized.city ?? payload.city,
+        state: result.normalized.state ?? payload.state,
+        zipCode: result.normalized.zipCode ?? payload.zipCode,
+        country: result.normalized.country ?? payload.country,
+      };
+    }
+
+    return {
+      addressLine1: payload.addressLine1,
+      addressLine2: payload.addressLine2 ?? null,
+      city: payload.city,
+      state: payload.state,
+      zipCode: payload.zipCode,
+      country: payload.country,
+    };
+  }
+
   async createAddress(publicId, payload) {
     const user = await this.getUserByPublicId(publicId);
     if (payload.isDefault) {
       await prisma.address.updateMany({ where: { userId: user.id }, data: { isDefault: false } });
     }
+    const verified = await this._applyAddressVerification(payload);
     const created = await prisma.address.create({
       data: {
         userId: user.id,
         fullName: payload.fullName,
-        addressLine1: payload.addressLine1,
-        addressLine2: payload.addressLine2 ?? null,
-        street: payload.addressLine1,
-        city: payload.city,
-        state: payload.state,
-        zipCode: payload.zipCode,
-        country: payload.country,
+        addressLine1: verified.addressLine1,
+        addressLine2: verified.addressLine2,
+        street: verified.addressLine1,
+        city: verified.city,
+        state: verified.state,
+        zipCode: verified.zipCode,
+        country: verified.country,
         phoneNumber: payload.phoneNumber,
         isDefault: Boolean(payload.isDefault),
       },

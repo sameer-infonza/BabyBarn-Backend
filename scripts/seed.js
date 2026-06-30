@@ -90,6 +90,7 @@ async function seedUsers() {
         firstName: seedUser.firstName,
         lastName: seedUser.lastName,
         roleId: role.id,
+        emailVerifiedAt: new Date(),
       },
     });
 

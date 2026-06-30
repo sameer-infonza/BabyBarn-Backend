@@ -12,7 +12,9 @@
     "prisma:generate": "prisma generate",
     "prisma:migrate": "prisma migrate dev",
     "prisma:seed": "node scripts/seed.js",
-    "smoke:phase2": "node scripts/phase2-smoke.mjs"
+    "smoke:phase2": "node scripts/phase2-smoke.mjs",
+    "access:reminders": "node scripts/send-access-reminders.mjs",
+    "access:reminders:dry": "node scripts/send-access-reminders.mjs --dry-run"
   },
   "prisma": {
     "seed": "node scripts/seed.js"

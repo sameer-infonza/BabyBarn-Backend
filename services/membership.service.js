@@ -443,60 +443,123 @@ export async function getMembershipRevenueStats({ dateFrom, dateTo } = {}) {
   };
 }
 
-/** Send renewal reminders ~12 days before expiry (once per term). */
+/** Send renewal reminders before expiry (once per term). Days-before list from ACCESS_RENEWAL_REMINDER_DAYS (default 14,0). */
 export async function sendAccessRenewalReminders() {
   const now = new Date();
-  const in12 = new Date(now);
-  in12.setUTCDate(in12.getUTCDate() + 12);
-  const in13 = new Date(now);
-  in13.setUTCDate(in13.getUTCDate() + 13);
-
-  const users = await prisma.user.findMany({
-    where: {
-      accessMemberUntil: { gt: now, gte: in12, lt: in13 },
-      accessRenewalReminderSentAt: null,
-      accessNumber: { not: null },
-    },
-    select: {
-      id: true,
-      email: true,
-      firstName: true,
-      lastName: true,
-      accessNumber: true,
-      accessMemberUntil: true,
-    },
-    take: 100,
-  });
+  const daysBeforeList = (config.accessRenewalReminderDays || [14, 0]).filter((d) => d >= 0);
+  if (daysBeforeList.length === 0) return { sent: 0, checked: 0 };
 
   let sent = 0;
-  for (const user of users) {
-    const name = [user.firstName, user.lastName].filter(Boolean).join(' ') || 'there';
-    try {
-      await emailService.sendTemplate({
-        to: user.email,
-        template: 'access-renewal-reminder',
-        context: {
-          name,
-          accessNumber: user.accessNumber,
-          validUntil: user.accessMemberUntil.toLocaleDateString('en-US', {
-            month: 'long',
-            day: 'numeric',
-            year: 'numeric',
-          }),
-          actionUrl: `${config.frontend.customerUrl}/dashboard/access/renew`,
+  let checked = 0;
+
+  for (const daysBefore of daysBeforeList) {
+    if (daysBefore === 0) {
+      const dayStart = new Date(now);
+      dayStart.setUTCHours(0, 0, 0, 0);
+      const dayEnd = new Date(dayStart);
+      dayEnd.setUTCDate(dayEnd.getUTCDate() + 1);
+
+      const users = await prisma.user.findMany({
+        where: {
+          accessMemberUntil: { gte: dayStart, lt: dayEnd },
+          accessExpiryDayReminderSentAt: null,
+          accessNumber: { not: null },
         },
+        select: {
+          id: true,
+          email: true,
+          firstName: true,
+          lastName: true,
+          accessNumber: true,
+          accessMemberUntil: true,
+        },
+        take: 100,
       });
-      await prisma.user.update({
-        where: { id: user.id },
-        data: { accessRenewalReminderSentAt: now },
-      });
-      sent += 1;
-    } catch (err) {
-      console.error('[membership] renewal reminder failed', user.email, err);
+      checked += users.length;
+
+      for (const user of users) {
+        const name = [user.firstName, user.lastName].filter(Boolean).join(' ') || 'there';
+        try {
+          await emailService.sendTemplate({
+            to: user.email,
+            template: 'access-renewal-reminder',
+            context: {
+              name,
+              accessNumber: user.accessNumber,
+              daysUntilExpiry: 0,
+              validUntil: user.accessMemberUntil.toLocaleDateString('en-US', {
+                month: 'long',
+                day: 'numeric',
+                year: 'numeric',
+              }),
+              actionUrl: `${config.frontend.customerUrl}/dashboard/access/renew`,
+            },
+          });
+          await prisma.user.update({
+            where: { id: user.id },
+            data: { accessExpiryDayReminderSentAt: now },
+          });
+          sent += 1;
+        } catch (err) {
+          console.error('[membership] expiry-day reminder failed', user.email, err);
+        }
+      }
+      continue;
+    }
+
+    const windowStart = new Date(now);
+    windowStart.setUTCDate(windowStart.getUTCDate() + daysBefore);
+    const windowEnd = new Date(windowStart);
+    windowEnd.setUTCDate(windowEnd.getUTCDate() + 1);
+
+    const users = await prisma.user.findMany({
+      where: {
+        accessMemberUntil: { gt: now, gte: windowStart, lt: windowEnd },
+        accessRenewalReminderSentAt: null,
+        accessNumber: { not: null },
+      },
+      select: {
+        id: true,
+        email: true,
+        firstName: true,
+        lastName: true,
+        accessNumber: true,
+        accessMemberUntil: true,
+      },
+      take: 100,
+    });
+    checked += users.length;
+
+    for (const user of users) {
+      const name = [user.firstName, user.lastName].filter(Boolean).join(' ') || 'there';
+      try {
+        await emailService.sendTemplate({
+          to: user.email,
+          template: 'access-renewal-reminder',
+          context: {
+            name,
+            accessNumber: user.accessNumber,
+            daysUntilExpiry: daysBefore,
+            validUntil: user.accessMemberUntil.toLocaleDateString('en-US', {
+              month: 'long',
+              day: 'numeric',
+              year: 'numeric',
+            }),
+            actionUrl: `${config.frontend.customerUrl}/dashboard/access/renew`,
+          },
+        });
+        await prisma.user.update({
+          where: { id: user.id },
+          data: { accessRenewalReminderSentAt: now },
+        });
+        sent += 1;
+      } catch (err) {
+        console.error('[membership] renewal reminder failed', user.email, err);
+      }
     }
   }
 
-  return { sent, checked: users.length };
+  return { sent, checked };
 }
 
 /** Notify members whose ACCESS expired in the last 24h (once). */

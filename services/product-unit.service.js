@@ -66,7 +66,8 @@ export async function markUnitsReturnedForReturn(tx, returnRequestId) {
 
   const units = await tx.productUnit.findMany({
     where: { sourceOrderItemId: rr.orderItemId, status: { in: ['SOLD', 'WITH_CUSTOMER'] } },
-    take: rr.orderItem?.quantity ?? 10,
+    // Only mark the number of units actually being returned (partial returns).
+    take: rr.quantity ?? rr.orderItem?.quantity ?? 10,
   });
 
   const now = new Date();
