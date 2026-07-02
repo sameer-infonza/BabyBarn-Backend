@@ -1,7 +1,7 @@
 import { productService } from '../services/product.service.js';
 import { categoryService } from '../services/category.service.js';
 import { validate } from '../utils/validation.js';
-import { createProductSchema, updateProductSchema } from '../schemas/index.js';
+import { createProductSchema, updateProductSchema, refurbFromSourceSchema, refurbStandaloneCreateSchema } from '../schemas/index.js';
 import { toPublicJson } from '../utils/serialize.js';
 
 /** Parse comma-separated query values (multi-select filters). */
@@ -50,6 +50,36 @@ export class ProductController {
     res.status(200).json({
       success: true,
       data: toPublicJson(result),
+    });
+  }
+
+  async getRefurbSourceCandidates(req, res) {
+    const page = parseInt(String(req.query.page), 10) || 1;
+    const limit = parseInt(String(req.query.limit), 10) || 20;
+    const search = req.query.search ? String(req.query.search) : undefined;
+    const data = await productService.getRefurbSourceCandidates({ page, limit, search });
+    res.status(200).json({ success: true, data: toPublicJson(data) });
+  }
+
+  async createRefurbFromSource(req, res) {
+    const body = await validate(refurbFromSourceSchema, req.body);
+    const actor = { id: req.user?.id, email: req.user?.email };
+    const data = await productService.createRefurbFromSource(body, actor);
+    res.status(201).json({
+      success: true,
+      message: data.restocked ? 'Refurb listing restocked' : 'Refurb listing created',
+      data: toPublicJson(data),
+    });
+  }
+
+  async createStandaloneRefurb(req, res) {
+    const body = await validate(refurbStandaloneCreateSchema, req.body);
+    const actor = { id: req.user?.id, email: req.user?.email };
+    const product = await productService.createStandaloneRefurbProduct(body, actor);
+    res.status(201).json({
+      success: true,
+      message: 'Standalone refurb product created',
+      data: toPublicJson(product),
     });
   }
 

@@ -468,7 +468,9 @@ async function handleOrderCheckoutCompleted(session) {
         data: { stripePaymentIntentId: paymentIntentId },
       });
     }
-    const result = await handleCheckoutIntentPaymentCompleted(checkoutIntentPublicId);
+    const result = await handleCheckoutIntentPaymentCompleted(checkoutIntentPublicId, {
+      paymentIntentId: paymentIntentId || undefined,
+    });
     if (result && typeof result === 'object' && result.orderPublicId) {
       await prisma.order.updateMany({
         where: { publicId: result.orderPublicId },
@@ -503,7 +505,9 @@ async function handleOrderPaymentIntentSucceeded(paymentIntent) {
       where: { publicId: checkoutIntentPublicId },
       data: { stripePaymentIntentId: paymentIntent.id },
     });
-    const result = await handleCheckoutIntentPaymentCompleted(checkoutIntentPublicId);
+    const result = await handleCheckoutIntentPaymentCompleted(checkoutIntentPublicId, {
+      paymentIntentId: paymentIntent.id,
+    });
     await splitOrderTransfersIfBundled(getStripe(), checkoutIntentPublicId, paymentIntent);
     return result;
   }
@@ -801,7 +805,42 @@ async function sendOrderConfirmationEmail(orderPublicId) {
   });
 }
 
-async function handleCheckoutIntentPaymentCompleted(checkoutIntentPublicId) {
+async function resolvePaymentSucceededForIntent(checkoutIntentPublicId, paymentIntentId) {
+  const intent = await prisma.checkoutIntent.findUnique({
+    where: { publicId: checkoutIntentPublicId },
+    select: { stripePaymentIntentId: true },
+  });
+  if (!intent) return false;
+
+  const stripe = getStripe();
+  if (!stripe) return false;
+
+  const piId = paymentIntentId || intent.stripePaymentIntentId;
+  if (!piId) return false;
+
+  try {
+    const pi = await stripe.paymentIntents.retrieve(piId);
+    return pi.status === 'succeeded';
+  } catch {
+    return false;
+  }
+}
+
+async function loadPaidOrderFromConsumedIntent(checkoutIntentPublicId) {
+  const intent = await prisma.checkoutIntent.findUnique({
+    where: { publicId: checkoutIntentPublicId },
+    select: { status: true, orderPublicId: true },
+  });
+  if (intent?.status !== 'CONSUMED' || !intent.orderPublicId) {
+    return null;
+  }
+  return prisma.order.findUnique({
+    where: { publicId: intent.orderPublicId },
+    include: { orderItems: { include: { product: true } } },
+  });
+}
+
+async function handleCheckoutIntentPaymentCompleted(checkoutIntentPublicId, opts = {}) {
   if (!checkoutIntentPublicId) {
     return { handled: true, error: 'missing checkoutIntentPublicId' };
   }
@@ -814,20 +853,31 @@ async function handleCheckoutIntentPaymentCompleted(checkoutIntentPublicId) {
     return { handled: true, flow: 'order', error: 'missing checkout intent' };
   }
   const alreadyConsumed = intentBefore.status === 'CONSUMED' && intentBefore.orderPublicId;
+  const paymentSucceeded = await resolvePaymentSucceededForIntent(
+    checkoutIntentPublicId,
+    opts.paymentIntentId
+  );
 
   let paidOrder = null;
   try {
-    paidOrder = await checkoutIntentService.createPaidOrderFromCheckoutIntent(checkoutIntentPublicId);
+    paidOrder = await checkoutIntentService.createPaidOrderFromCheckoutIntent(checkoutIntentPublicId, {
+      paymentSucceeded,
+    });
   } catch (err) {
-    console.error('[stripe webhook] create order from checkout intent failed', checkoutIntentPublicId, err);
-    await checkoutIntentService.releaseIntentResources(checkoutIntentPublicId).catch((releaseErr) => {
-      console.error('[stripe webhook] release checkout intent failed', checkoutIntentPublicId, releaseErr);
-    });
-    await prisma.checkoutIntent.updateMany({
-      where: { publicId: checkoutIntentPublicId, status: 'PENDING' },
-      data: { status: 'FAILED' },
-    });
-    return { handled: true, flow: 'order', error: String(err?.message || err) };
+    paidOrder = await loadPaidOrderFromConsumedIntent(checkoutIntentPublicId);
+    if (!paidOrder) {
+      console.error('[stripe webhook] create order from checkout intent failed', checkoutIntentPublicId, err);
+      if (!paymentSucceeded) {
+        await checkoutIntentService.releaseIntentResources(checkoutIntentPublicId).catch((releaseErr) => {
+          console.error('[stripe webhook] release checkout intent failed', checkoutIntentPublicId, releaseErr);
+        });
+        await prisma.checkoutIntent.updateMany({
+          where: { publicId: checkoutIntentPublicId, status: 'PENDING' },
+          data: { status: 'FAILED' },
+        });
+      }
+      return { handled: true, flow: 'order', error: String(err?.message || err) };
+    }
   }
 
   if (!alreadyConsumed && paidOrder?.publicId) {
@@ -992,8 +1042,14 @@ export async function getCheckoutSessionSummary(userPublicId, sessionId) {
     }
 
     const sessionIntentId = getCheckoutIntentPublicId(session?.metadata);
+    const sessionPiId =
+      typeof session?.payment_intent === 'string'
+        ? session.payment_intent
+        : session?.payment_intent?.id;
     if (sessionIntentId && (session?.payment_status === 'paid' || session?.status === 'complete')) {
-      await handleCheckoutIntentPaymentCompleted(sessionIntentId);
+      await handleCheckoutIntentPaymentCompleted(sessionIntentId, {
+        paymentIntentId: sessionPiId || ref,
+      });
       order = await prisma.order.findFirst({
         where: { userId: user.id, stripePaymentIntentId: ref },
         include: orderInclude,
@@ -1033,7 +1089,7 @@ export async function getCheckoutSessionSummary(userPublicId, sessionId) {
       const pi = await stripe.paymentIntents.retrieve(ref);
       const intentId = getCheckoutIntentPublicId(pi.metadata);
       if (intentId && pi.status === 'succeeded') {
-        await handleCheckoutIntentPaymentCompleted(intentId);
+        await handleCheckoutIntentPaymentCompleted(intentId, { paymentIntentId: ref });
         order = await prisma.order.findFirst({
           where: { userId: user.id, stripePaymentIntentId: ref },
           include: orderInclude,
@@ -1053,6 +1109,19 @@ export async function getCheckoutSessionSummary(userPublicId, sessionId) {
       }
     } catch {
       /* fall through */
+    }
+  }
+
+  if (!order && ref.startsWith('pi_')) {
+    const intentByPi = await prisma.checkoutIntent.findFirst({
+      where: { stripePaymentIntentId: ref, userId: user.id },
+      select: { orderPublicId: true },
+    });
+    if (intentByPi?.orderPublicId) {
+      order = await prisma.order.findUnique({
+        where: { publicId: intentByPi.orderPublicId, userId: user.id },
+        include: orderInclude,
+      });
     }
   }
 

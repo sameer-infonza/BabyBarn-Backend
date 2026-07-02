@@ -450,8 +450,9 @@ export class ProductService {
     return product;
   }
 
-  async createProduct(data) {
+  async createProduct(data, options = {}) {
     const { isRefurbishedEnabled } = await import('../config/feature-flags.js');
+    const allowRefurbished = Boolean(options.allowRefurbished);
     const {
       categoryId: categoryPublicId,
       variants = [],
@@ -482,12 +483,16 @@ export class ProductService {
       productType = 'NEW',
     } = data;
 
-    if (productType === 'REFURBISHED') {
+    if (productType === 'REFURBISHED' && !allowRefurbished) {
       throw new AppError(
         400,
         'Refurbished products are created automatically when a refurb return is listed. Use the inspection queue.',
         'REFURBISHED_MANUAL_CREATE_BLOCKED'
       );
+    }
+
+    if (productType === 'REFURBISHED' && allowRefurbished && !isRefurbishedEnabled()) {
+      throw new AppError(403, 'Refurbished catalog is not enabled', 'REFURBISHED_DISABLED');
     }
 
     let category = null;
@@ -607,6 +612,7 @@ export class ProductService {
           isActiveListing: listingActive,
           inventoryModel,
           productType,
+          refurbishedAt: productType === 'REFURBISHED' ? new Date() : undefined,
           gallery: normalizedGallery,
           variants: isVariantProduct
             ? {
@@ -639,7 +645,15 @@ export class ProductService {
       throw new AppError(404, 'Product not found');
     }
 
-    const isPipelineRefurb = product.productType === 'REFURBISHED' && product.sourceProductId != null;
+    const isPipelineRefurb =
+      product.productType === 'REFURBISHED' &&
+      product.sourceProductId != null &&
+      product.sourceReturnId != null;
+    const isManualLinkedRefurb =
+      product.productType === 'REFURBISHED' &&
+      product.sourceProductId != null &&
+      product.sourceReturnId == null;
+    const isSkuCategoryLockedRefurb = isPipelineRefurb || isManualLinkedRefurb;
 
     if (data.productType === 'REFURBISHED') {
       throw new AppError(
@@ -649,15 +663,15 @@ export class ProductService {
       );
     }
 
-    if (isPipelineRefurb) {
+    if (isSkuCategoryLockedRefurb) {
       if (data.productType !== undefined && data.productType !== product.productType) {
-        throw new AppError(400, 'Cannot change product type on a pipeline refurb SKU.', 'REFURB_LOCKED');
+        throw new AppError(400, 'Cannot change product type on a refurb listing.', 'REFURB_LOCKED');
       }
       if (data.sku !== undefined && data.sku !== product.sku) {
-        throw new AppError(400, 'Cannot change SKU on a pipeline refurb listing.', 'REFURB_LOCKED');
+        throw new AppError(400, 'Cannot change SKU on a refurb listing.', 'REFURB_LOCKED');
       }
       if (data.categoryId !== undefined) {
-        throw new AppError(400, 'Cannot change category on a pipeline refurb listing.', 'REFURB_LOCKED');
+        throw new AppError(400, 'Cannot change category on a refurb listing.', 'REFURB_LOCKED');
       }
     }
 
@@ -676,7 +690,7 @@ export class ProductService {
     return prisma.$transaction(async (tx) => {
       const updatePayload = { ...rest };
 
-      if (isPipelineRefurb) {
+      if (isSkuCategoryLockedRefurb) {
         delete updatePayload.productType;
         delete updatePayload.sku;
         delete updatePayload.categoryId;
@@ -873,6 +887,148 @@ export class ProductService {
         include: { category: true, variants: { orderBy: { sortOrder: 'asc' } } },
       });
     });
+  }
+
+  async assertRefurbFeatureEnabled() {
+    const { isRefurbishedEnabled } = await import('../config/feature-flags.js');
+    if (!isRefurbishedEnabled()) {
+      throw new AppError(403, 'Refurbished catalog is not enabled', 'REFURBISHED_DISABLED');
+    }
+  }
+
+  async getRefurbSourceCandidates({ page = 1, limit = 20, search } = {}) {
+    await this.assertRefurbFeatureEnabled();
+    const take = Math.min(Math.max(Number(limit) || 20, 1), 50);
+    const skip = (Math.max(Number(page) || 1, 1) - 1) * take;
+    const where = {
+      productType: 'NEW',
+      isActiveListing: true,
+      isDraft: false,
+    };
+    const q = search ? String(search).trim() : '';
+    if (q) {
+      where.OR = [
+        { name: { contains: q, mode: 'insensitive' } },
+        { sku: { contains: q, mode: 'insensitive' } },
+      ];
+    }
+
+    const [products, total] = await Promise.all([
+      prisma.product.findMany({
+        where,
+        skip,
+        take,
+        orderBy: { name: 'asc' },
+        include: {
+          category: { select: { publicId: true, name: true } },
+          variants: {
+            select: { publicId: true, sku: true, combination: true },
+            orderBy: { sortOrder: 'asc' },
+          },
+        },
+      }),
+      prisma.product.count({ where }),
+    ]);
+
+    const sourceIds = products.map((p) => p.id);
+    const refurbListings =
+      sourceIds.length > 0
+        ? await prisma.product.findMany({
+            where: {
+              productType: 'REFURBISHED',
+              sourceProductId: { in: sourceIds },
+              isActiveListing: true,
+            },
+            select: { publicId: true, sourceProductId: true, stock: true, sku: true },
+          })
+        : [];
+    const refurbBySource = new Map(refurbListings.map((r) => [r.sourceProductId, r]));
+
+    return {
+      items: products.map((p) => {
+        const refurb = refurbBySource.get(p.id);
+        return {
+          id: p.publicId,
+          name: p.name,
+          sku: p.sku,
+          stock: p.stock,
+          imageUrl: p.imageUrl,
+          inventoryModel: p.inventoryModel,
+          category: p.category ? { id: p.category.publicId, name: p.category.name } : null,
+          variants: p.variants.map((v) => ({
+            id: v.publicId,
+            sku: v.sku,
+            combination: v.combination,
+          })),
+          hasActiveRefurbListing: Boolean(refurb),
+          refurbListingId: refurb?.publicId ?? null,
+          refurbListingSku: refurb?.sku ?? null,
+          refurbListingStock: refurb?.stock ?? null,
+        };
+      }),
+      pagination: {
+        page: Math.max(Number(page) || 1, 1),
+        limit: take,
+        total,
+        pages: Math.ceil(total / take) || 1,
+      },
+    };
+  }
+
+  async createRefurbFromSource(payload, actor) {
+    await this.assertRefurbFeatureEnabled();
+    const { resolveActorUserId } = await import('../lib/resolve-actor-user-id.js');
+    const { listOrRestockRefurbForSource } = await import('./refurb-product-listing.service.js');
+    const { writeAdminAudit } = await import('./audit.service.js');
+
+    const actorUserId = await resolveActorUserId(actor);
+    const result = await listOrRestockRefurbForSource({
+      sourceProductPublicId: payload.sourceProductId,
+      sourceVariantPublicId: payload.sourceVariantId,
+      initialStock: payload.initialStock ?? 1,
+      conditionGrade: payload.conditionGrade ?? null,
+      actorUserId,
+      ledgerReference: {
+        type: 'manual_refurb',
+        id: payload.sourceProductId,
+        note: 'Manual refurb from source',
+      },
+    });
+
+    await writeAdminAudit({
+      actorId: actor?.id,
+      actorEmail: actor?.email,
+      action: 'REFURB_MANUAL_FROM_SOURCE',
+      entityType: 'Product',
+      entityId: result.product.publicId,
+      meta: {
+        sourceProductId: payload.sourceProductId,
+        restocked: result.restocked,
+        initialStock: payload.initialStock ?? 1,
+      },
+    });
+
+    return result;
+  }
+
+  async createStandaloneRefurbProduct(data, actor) {
+    await this.assertRefurbFeatureEnabled();
+    const { writeAdminAudit } = await import('./audit.service.js');
+    const product = await this.createProduct(
+      { ...data, productType: 'REFURBISHED' },
+      { allowRefurbished: true }
+    );
+
+    await writeAdminAudit({
+      actorId: actor?.id,
+      actorEmail: actor?.email,
+      action: 'REFURB_MANUAL_STANDALONE',
+      entityType: 'Product',
+      entityId: product.publicId,
+      meta: { sku: product.sku, name: product.name },
+    });
+
+    return product;
   }
 
   async deleteProduct(publicId) {

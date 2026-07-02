@@ -62,6 +62,31 @@ const orderItemAdminInclude = {
   },
 };
 
+const orderItemCustomerInclude = {
+  product: {
+    select: {
+      publicId: true,
+      name: true,
+      slug: true,
+      sku: true,
+      productType: true,
+      sizeAgeGroup: true,
+      imageUrl: true,
+      price: true,
+      memberPrice: true,
+      compareAtPrice: true,
+    },
+  },
+  productVariant: {
+    select: {
+      publicId: true,
+      sku: true,
+      combination: true,
+      imageUrl: true,
+    },
+  },
+};
+
 async function resolveActorUserId(actor) {
   if (!actor?.id) return null;
   const user = await prisma.user.findUnique({
@@ -505,7 +530,7 @@ export class OrderService {
         where,
         skip,
         take: limit,
-        include: { orderItems: { include: { product: true } } },
+        include: { orderItems: { include: orderItemCustomerInclude } },
         orderBy: { createdAt: 'desc' },
       }),
       prisma.order.count({ where }),
@@ -585,7 +610,7 @@ export class OrderService {
         include: {
           orderItems: {
             include: {
-              product: true,
+              ...orderItemCustomerInclude,
               returnRequests: {
                 select: {
                   publicId: true,

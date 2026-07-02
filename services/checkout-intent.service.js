@@ -119,6 +119,25 @@ export class CheckoutIntentService {
     }
   }
 
+  async reReserveIntentLinesInTx(tx, intent) {
+    for (const line of intent.lines) {
+      const product = await tx.product.findUnique({
+        where: { id: line.productId },
+        include: { variants: { orderBy: { sortOrder: 'asc' } } },
+      });
+      if (!product) {
+        throw new AppError(404, 'Product not found');
+      }
+      if (product.isDraft || !product.isActiveListing) {
+        throw new AppError(400, `Product "${product.name}" is not available`);
+      }
+      await reserveOrderLineStock(tx, product, line.productVariantId, line.quantity, {
+        referenceType: 'checkout_intent',
+        referenceId: intent.publicId,
+      });
+    }
+  }
+
   async releaseIntentResources(intentPublicId) {
     await db().$transaction(async (tx) => {
       const intent = await tx.checkoutIntent.findUnique({
@@ -412,7 +431,8 @@ export class CheckoutIntentService {
   }
 
   /** Create a paid Order from a consumed checkout intent (idempotent). */
-  async createPaidOrderFromCheckoutIntent(checkoutIntentPublicId) {
+  async createPaidOrderFromCheckoutIntent(checkoutIntentPublicId, options = {}) {
+    const { paymentSucceeded = false } = options;
     const existing = await db().checkoutIntent.findUnique({
       where: { publicId: checkoutIntentPublicId },
       include: intentInclude,
@@ -428,8 +448,22 @@ export class CheckoutIntentService {
       });
     }
 
-    if (existing.status !== 'PENDING') {
+    const recoverableFailed =
+      paymentSucceeded && (existing.status === 'FAILED' || existing.status === 'EXPIRED');
+    const canFulfill = existing.status === 'PENDING' || recoverableFailed;
+
+    if (!canFulfill) {
       throw new AppError(409, 'Checkout is no longer valid', 'CHECKOUT_INTENT_INVALID');
+    }
+
+    if (recoverableFailed) {
+      if (Number(existing.storeCreditApplied || 0) > 0) {
+        await walletService.holdCredit(
+          existing.userId,
+          existing.storeCreditApplied,
+          existing.publicId
+        );
+      }
     }
 
     const order = await db().$transaction(async (tx) => {
@@ -437,8 +471,29 @@ export class CheckoutIntentService {
         where: { publicId: checkoutIntentPublicId },
         include: { lines: true },
       });
-      if (!intent || intent.status !== 'PENDING') {
+      if (!intent) {
+        throw new AppError(404, 'Checkout not found');
+      }
+
+      if (intent.status === 'CONSUMED' && intent.orderPublicId) {
+        return tx.order.findUnique({
+          where: { publicId: intent.orderPublicId },
+          include: { orderItems: { include: { product: true } } },
+        });
+      }
+
+      const intentRecoverable =
+        paymentSucceeded && (intent.status === 'FAILED' || intent.status === 'EXPIRED');
+      if (intent.status !== 'PENDING' && !intentRecoverable) {
         throw new AppError(409, 'Checkout already processed', 'CHECKOUT_INTENT_INVALID');
+      }
+
+      if (intentRecoverable) {
+        await this.reReserveIntentLinesInTx(tx, intent);
+        await tx.checkoutIntent.update({
+          where: { id: intent.id },
+          data: { status: 'PENDING' },
+        });
       }
 
       const contactEmail = intent.contactEmail || null;

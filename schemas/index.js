@@ -209,6 +209,27 @@ export const createProductSchema = createProductBodySchema.superRefine((data, ct
   validateVariantAxisNames(data.variantAxes, ctx);
 });
 
+export const refurbFromSourceSchema = z.object({
+  sourceProductId: z.string().min(1, 'Source product is required'),
+  sourceVariantId: z.string().min(1).optional(),
+  initialStock: z.number().int().min(1).max(99).optional().default(1),
+  conditionGrade: z.enum(['A', 'B', 'C']).nullable().optional(),
+});
+
+export const refurbStandaloneCreateSchema = createProductBodySchema
+  .omit({ productType: true })
+  .superRefine((data, ctx) => {
+    if (data.inventoryModel === 'variant_matrix' && !data.isDraft && data.variants.length < 1) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: 'At least one variant is required for variant products',
+        path: ['variants'],
+      });
+    }
+    validateVariantAgeValues(data.variants, ctx);
+    validateVariantAxisNames(data.variantAxes, ctx);
+  });
+
 /** Partial updates: `.partial()` must run on `ZodObject`, not on `ZodEffects` from `.superRefine()`. */
 export const updateProductSchema = createProductBodySchema
   .partial()

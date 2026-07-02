@@ -18,6 +18,27 @@ router.get(
   (req, res, next) => productController.getAllProductsAdmin(req, res).catch(next)
 );
 router.get(
+  '/admin/refurbished/source-candidates',
+  authenticate,
+  authorize('ADMIN', 'ADMIN_TEAM'),
+  requireConsoleModule('refurbished'),
+  (req, res, next) => productController.getRefurbSourceCandidates(req, res).catch(next)
+);
+router.post(
+  '/admin/refurbished/from-source',
+  authenticate,
+  authorize('ADMIN', 'ADMIN_TEAM'),
+  requireConsoleModule('refurbished'),
+  (req, res, next) => productController.createRefurbFromSource(req, res).catch(next)
+);
+router.post(
+  '/admin/refurbished/standalone',
+  authenticate,
+  authorize('ADMIN', 'ADMIN_TEAM'),
+  requireConsoleModule('refurbished'),
+  (req, res, next) => productController.createStandaloneRefurb(req, res).catch(next)
+);
+router.get(
   '/admin/:id',
   authenticate,
   authorize('ADMIN', 'ADMIN_TEAM'),
