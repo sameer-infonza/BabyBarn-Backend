@@ -3,8 +3,11 @@ import { authenticate, authorize } from '../middleware/auth.js';
 import { requireConsoleModule } from '../middleware/admin-console.js';
 import { adminController } from '../controllers/admin.controller.js';
 import { shippingAdminController } from '../controllers/shipping-admin.controller.js';
+import adminNotificationsRoutes from './admin-notifications.js';
 
 const router = Router();
+
+router.use('/notifications', adminNotificationsRoutes);
 
 router.get(
   '/finance/stats',

@@ -19,6 +19,7 @@ import { toPublicJson } from '../utils/serialize.js';
 
 const businessSettingsPatchSchema = z.object({
   accessMembershipPriceUsd: z.number().min(0).max(99999).optional(),
+  accessUsedReturnWindowDays: z.number().int().min(30).max(730).optional(),
 });
 
 const teamModulesPatchSchema = z.object({

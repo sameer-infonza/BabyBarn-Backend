@@ -8,6 +8,11 @@ import { restockOrderLineStock } from './inventory-reservation.js';
 import { refurbishmentService } from './refurbishment.service.js';
 import { markUnitsReturnedForReturn } from './product-unit.service.js';
 import { shippingService } from './shipping.service.js';
+import { notifyEligibilityReview, notifyInspectionQueued, notifyReturnRequest } from './admin-notification.service.js';
+import {
+  returnableQuantityForLine,
+  TERMINAL_RETURN_REJECT_STATUSES,
+} from '../lib/return-quantity-policy.js';
 import {
   buildDemoReturnLabel,
   demoTrackingNextStatus,
@@ -18,8 +23,13 @@ import {
   evaluateRefurbQuestionnaire,
   initialReturnStatusForDecision,
 } from './refurb-eligibility.service.js';
-import { computeRefurbStoreCredit } from '../config/refurb.config.js';
+import { computeRefurbStoreCredit, getAccessUsedReturnWindowDays } from '../config/refurb.config.js';
 import { verifyOrderTrackingToken } from '../lib/order-tracking-token.js';
+import { appendReturnStatusEvent, listReturnStatusEvents, appendReturnActionNote } from './return-status-events.service.js';
+import {
+  computeStandardReturnRefundAmount,
+  processStandardReturnRefund,
+} from './return-refund.service.js';
 
 function isMissingWalletTableError(error) {
   return Boolean(
@@ -54,7 +64,19 @@ const REFURB_TRANSITIONS = {
 
 const returnInclude = {
   user: { select: { publicId: true, email: true, firstName: true, lastName: true } },
-  order: { select: { id: true, publicId: true, orderNumber: true, status: true, createdAt: true } },
+  order: {
+    select: {
+      id: true,
+      publicId: true,
+      orderNumber: true,
+      status: true,
+      createdAt: true,
+      deliveredAt: true,
+      returnEnvelopeUsed: true,
+      shippingCost: true,
+      totalAmount: true,
+    },
+  },
   orderItem: {
     include: {
       product: {
@@ -76,6 +98,21 @@ async function resolveActorUserId(actor) {
   if (!actor?.id) return null;
   const user = await prisma.user.findUnique({ where: { publicId: actor.id }, select: { id: true } });
   return user?.id ?? null;
+}
+
+export function resolveStandardReturnWindowStart(order) {
+  if (order?.deliveredAt) return new Date(order.deliveredAt);
+  if (String(order?.status || '').toUpperCase().includes('DELIVER')) {
+    return new Date(order.createdAt);
+  }
+  return null;
+}
+
+export function standardReturnWindowDaysLeft(order, windowDays = 14) {
+  const start = resolveStandardReturnWindowStart(order);
+  if (!start) return 0;
+  const end = start.getTime() + windowDays * 24 * 60 * 60 * 1000;
+  return Math.max(0, Math.ceil((end - Date.now()) / (24 * 60 * 60 * 1000)));
 }
 
 export class ReturnsService {
@@ -113,7 +150,12 @@ export class ReturnsService {
       include: returnInclude,
     });
     if (!row || row.userId !== user.id) throw new AppError(404, 'Return request not found');
-    return row;
+    const statusEvents = await listReturnStatusEvents(row.id);
+    const refundPreview =
+      row.type === 'STANDARD' && row.orderItem
+        ? computeStandardReturnRefundAmount(row.orderItem, row.quantity)
+        : null;
+    return { ...row, statusEvents, refundPreview };
   }
 
   async getById(returnPublicId) {
@@ -122,7 +164,29 @@ export class ReturnsService {
       include: returnInclude,
     });
     if (!row) throw new AppError(404, 'Return request not found');
-    return row;
+    const statusEvents = await listReturnStatusEvents(row.id);
+    const refundPreview =
+      row.type === 'STANDARD' && row.orderItem
+        ? computeStandardReturnRefundAmount(row.orderItem, row.quantity)
+        : null;
+    return { ...row, statusEvents, refundPreview };
+  }
+
+  async trackGuestReturn({ returnId, email }) {
+    const normalizedEmail = String(email || '').trim().toLowerCase();
+    if (!normalizedEmail) throw new AppError(400, 'Email is required');
+    const row = await prisma.returnRequest.findUnique({
+      where: { publicId: returnId },
+      include: {
+        ...returnInclude,
+        user: { select: { email: true } },
+      },
+    });
+    if (!row || String(row.user?.email || '').toLowerCase() !== normalizedEmail) {
+      throw new AppError(404, 'Return not found');
+    }
+    const statusEvents = await listReturnStatusEvents(row.id);
+    return { ...row, statusEvents };
   }
 
   resolveOrderItemIds(payload, order) {
@@ -160,30 +224,99 @@ export class ReturnsService {
       }
       const targetItem = order.orderItems.find((i) => i.publicId === itemPublicIds[0]);
       if (!targetItem) throw new AppError(404, 'Order item not found');
-      const { ACCESS_USED_RETURN_WINDOW_DAYS } = await import('../config/refurb.config.js');
+      const windowDays = await getAccessUsedReturnWindowDays();
       const usedAgeDays = (Date.now() - new Date(order.createdAt).getTime()) / (1000 * 60 * 60 * 24);
-      if (usedAgeDays > ACCESS_USED_RETURN_WINDOW_DAYS) {
-        throw new AppError(400, 'Used return window (12 months) has passed');
+      if (usedAgeDays > windowDays) {
+        throw new AppError(400, `Used return window (${windowDays} days) has passed`);
       }
     }
 
     if (payload.type === 'STANDARD') {
-      const ageDays = (Date.now() - new Date(order.createdAt).getTime()) / (1000 * 60 * 60 * 24);
-      if (ageDays > 14) throw new AppError(400, 'Standard return window (14 days) has passed');
+      if (!resolveStandardReturnWindowStart(order)) {
+        throw new AppError(400, 'Standard returns become available after delivery');
+      }
+      if (standardReturnWindowDaysLeft(order) <= 0) {
+        throw new AppError(400, 'Standard return window (14 days from delivery) has passed');
+      }
     }
 
     const existing = await prisma.returnRequest.findMany({
       where: {
         orderId: order.id,
         orderItem: { publicId: { in: itemPublicIds } },
-        status: { notIn: ['REJECTED', 'ELIGIBILITY_REJECTED', 'INSPECTION_REJECTED'] },
+        status: { notIn: [...TERMINAL_RETURN_REJECT_STATUSES] },
       },
-      select: { orderItem: { select: { publicId: true } } },
+      select: {
+        publicId: true,
+        status: true,
+        type: true,
+        quantity: true,
+        orderItem: { select: { publicId: true, quantity: true } },
+      },
     });
-    const blocked = new Set(existing.map((r) => r.orderItem?.publicId).filter(Boolean));
-    const pendingIds = itemPublicIds.filter((id) => !blocked.has(id));
+
+    const existingByItemId = new Map();
+    for (const row of existing) {
+      const itemId = row.orderItem?.publicId;
+      if (!itemId) continue;
+      if (!existingByItemId.has(itemId)) existingByItemId.set(itemId, []);
+      existingByItemId.get(itemId).push(row);
+    }
+
+    const insufficient = [];
+    const pendingIds = [];
+    for (const publicId of itemPublicIds) {
+      const orderItem = order.orderItems.find((i) => i.publicId === publicId);
+      if (!orderItem) continue;
+      const lineReturns = existingByItemId.get(publicId) ?? [];
+      const returnable = returnableQuantityForLine({
+        quantity: orderItem.quantity,
+        returnRequests: lineReturns,
+      });
+      const requestedQty =
+        payload.type === 'REFURBISHMENT'
+          ? 1
+          : Number(payload.quantities?.[publicId] ?? payload.quantity ?? 1);
+      const qty = Math.max(1, Number.isFinite(requestedQty) ? requestedQty : 1);
+
+      if (returnable <= 0) {
+        insufficient.push({ orderItemId: publicId, openReturns: lineReturns });
+        continue;
+      }
+      if (qty > returnable) {
+        throw new AppError(
+          400,
+          `You can return at most ${returnable} unit${returnable === 1 ? '' : 's'} for this line item`,
+          'RETURN_QUANTITY_EXCEEDED',
+          { orderItemId: publicId, returnable, requested: qty }
+        );
+      }
+      pendingIds.push(publicId);
+    }
+
     if (pendingIds.length === 0) {
-      throw new AppError(400, 'Selected items already have an open return request');
+      const flatExisting = insufficient.flatMap((entry) => entry.openReturns);
+      const summary = flatExisting
+        .map((r) => `${r.orderItem?.publicId}: ${r.status} (${r.publicId})`)
+        .join(', ');
+      throw new AppError(
+        409,
+        'Selected items on this order already have an open return request',
+        'RETURN_ALREADY_OPEN',
+        {
+          orderId: order.publicId,
+          orderNumber: order.orderNumber,
+          existingReturns: flatExisting.map((r) => ({
+            returnId: r.publicId,
+            status: r.status,
+            type: r.type,
+            orderItemId: r.orderItem?.publicId,
+            orderId: order.publicId,
+            orderNumber: order.orderNumber,
+          })),
+          summary,
+        }
+      );
     }
 
     let eligibilityEval = null;
@@ -195,6 +328,9 @@ export class ReturnsService {
     for (const publicId of pendingIds) {
       const orderItem = order.orderItems.find((i) => i.publicId === publicId);
       if (!orderItem) throw new AppError(404, 'Order item not found');
+      if (payload.type === 'STANDARD' && orderItem.product?.productType === 'REFURBISHED') {
+        throw new AppError(400, 'Standard returns are only available for eligible new items');
+      }
 
       const initialStatus =
         payload.type === 'REFURBISHMENT'
@@ -218,9 +354,19 @@ export class ReturnsService {
             orderItemId: orderItem.id,
             type: payload.type,
             reason: payload.reason,
+            notes: payload.notes ? String(payload.notes).trim() : null,
+            photoUrlsJson:
+              payload.type === 'STANDARD' && payload.photoUrls ? payload.photoUrls : undefined,
             status: initialStatus,
             quantity,
           },
+        });
+
+        await appendReturnStatusEvent(tx, {
+          returnRequestId: rr.id,
+          fromStatus: null,
+          toStatus: initialStatus,
+          note: 'Return submitted',
         });
 
         if (payload.type === 'REFURBISHMENT' && eligibilityEval) {
@@ -242,6 +388,30 @@ export class ReturnsService {
       });
 
       created.push(row);
+      try {
+        if (row.status === 'ELIGIBILITY_REVIEW') {
+          notifyEligibilityReview(row);
+        } else {
+          notifyReturnRequest(row);
+        }
+      } catch (err) {
+        console.error('[returns] admin notification failed', row.publicId, err);
+      }
+      if (row.user?.email) {
+        try {
+          await emailService.sendTemplate({
+            to: row.user.email,
+            template: 'return-requested',
+            context: {
+              name: [row.user.firstName, row.user.lastName].filter(Boolean).join(' '),
+              returnType: payload.type === 'REFURBISHMENT' ? 'Used product return' : 'Standard return',
+              actionUrl: `${config.frontend.customerUrl}/dashboard/returns/${row.publicId}`,
+            },
+          });
+        } catch (err) {
+          console.error('[returns] customer return-requested email failed', row.publicId, err);
+        }
+      }
     }
 
     return created.length === 1 ? created[0] : created;
@@ -311,7 +481,7 @@ export class ReturnsService {
           },
         });
       }
-      return tx.returnRequest.update({
+      const row = await tx.returnRequest.update({
         where: { id: rr.id },
         data: {
           status: nextStatus,
@@ -319,6 +489,14 @@ export class ReturnsService {
         },
         include: returnInclude,
       });
+      await appendReturnStatusEvent(tx, {
+        returnRequestId: rr.id,
+        fromStatus: rr.status,
+        toStatus: nextStatus,
+        actorUserId: reviewerId,
+        note: notes ? String(notes).trim() : `Eligibility ${decision}`,
+      });
+      return row;
     });
 
     await writeAdminAudit({
@@ -378,7 +556,7 @@ export class ReturnsService {
         where: { id: rr.order.id },
         data: { returnEnvelopeUsed: true },
       });
-      return tx.returnRequest.update({
+      const row = await tx.returnRequest.update({
         where: { id: rr.id },
         data: {
           status: 'LABEL_GENERATED',
@@ -391,6 +569,15 @@ export class ReturnsService {
         },
         include: returnInclude,
       });
+      const actorUserId = await resolveActorUserId(actor);
+      await appendReturnStatusEvent(tx, {
+        returnRequestId: rr.id,
+        fromStatus: rr.status,
+        toStatus: 'LABEL_GENERATED',
+        actorUserId,
+        note: label.trackingNumber ? `Label generated · ${label.trackingNumber}` : 'Return label generated',
+      });
+      return row;
     });
 
     await writeAdminAudit({
@@ -444,17 +631,23 @@ export class ReturnsService {
       const data = { status: nextStatus };
       if (nextStatus === 'RECEIVED') data.receivedAt = new Date();
 
-      const updated = await prisma.returnRequest.update({
-        where: { id: rr.id },
-        data,
-        include: returnInclude,
-      });
-
-      if (nextStatus === 'RECEIVED') {
-        await prisma.$transaction(async (tx) => {
-          await markUnitsReturnedForReturn(tx, rr.id);
+      const updated = await prisma.$transaction(async (tx) => {
+        const row = await tx.returnRequest.update({
+          where: { id: rr.id },
+          data,
+          include: returnInclude,
         });
-      }
+        await appendReturnStatusEvent(tx, {
+          returnRequestId: rr.id,
+          fromStatus: rr.status,
+          toStatus: nextStatus,
+          note: `Tracking sync (demo) · ${nextStatus}`,
+        });
+        if (nextStatus === 'RECEIVED') {
+          await markUnitsReturnedForReturn(tx, rr.id);
+        }
+        return row;
+      });
 
       return updated;
     }
@@ -470,17 +663,23 @@ export class ReturnsService {
     const data = { status: nextStatus };
     if (nextStatus === 'RECEIVED') data.receivedAt = new Date();
 
-    const updated = await prisma.returnRequest.update({
-      where: { id: rr.id },
-      data,
-      include: returnInclude,
-    });
-
-    if (nextStatus === 'RECEIVED') {
-      await prisma.$transaction(async (tx) => {
-        await markUnitsReturnedForReturn(tx, rr.id);
+    const updated = await prisma.$transaction(async (tx) => {
+      const row = await tx.returnRequest.update({
+        where: { id: rr.id },
+        data,
+        include: returnInclude,
       });
-    }
+      await appendReturnStatusEvent(tx, {
+        returnRequestId: rr.id,
+        fromStatus: rr.status,
+        toStatus: nextStatus,
+        note: `Tracking sync · ${t.status || nextStatus}`,
+      });
+      if (nextStatus === 'RECEIVED') {
+        await markUnitsReturnedForReturn(tx, rr.id);
+      }
+      return row;
+    });
 
     return updated;
   }
@@ -515,17 +714,28 @@ export class ReturnsService {
     if (!rr) throw new AppError(404, 'Return request not found');
 
     const inspectorUserId = await resolveActorUserId(actor);
-    const record = await prisma.refurbInspectionRecord.create({
-      data: {
-        returnRequestId: body.target === 'job' ? null : rr.id,
-        refurbishmentJobId:
-          body.target === 'job' ? rr.refurbishmentJob?.id ?? null : rr.refurbishmentJob?.id ?? null,
-        inspectorUserId,
-        grade: body.grade,
-        notes: body.notes ? String(body.notes).trim() : null,
-        photoUrlsJson: body.photoUrls ?? undefined,
-        tasksCompletedJson: body.tasksCompleted ?? undefined,
-      },
+    const record = await prisma.$transaction(async (tx) => {
+      const created = await tx.refurbInspectionRecord.create({
+        data: {
+          returnRequestId: body.target === 'job' ? null : rr.id,
+          refurbishmentJobId:
+            body.target === 'job' ? rr.refurbishmentJob?.id ?? null : rr.refurbishmentJob?.id ?? null,
+          inspectorUserId,
+          grade: body.grade,
+          notes: body.notes ? String(body.notes).trim() : null,
+          photoUrlsJson: body.photoUrls ?? undefined,
+          tasksCompletedJson: body.tasksCompleted ?? undefined,
+        },
+      });
+      if (body.target !== 'job') {
+        await appendReturnActionNote(tx, {
+          returnRequestId: rr.id,
+          status: rr.status,
+          actorUserId: inspectorUserId,
+          note: `Physical inspection recorded${body.grade ? ` · grade ${body.grade}` : ''}`,
+        });
+      }
+      return created;
     });
 
     await writeAdminAudit({
@@ -583,6 +793,13 @@ export class ReturnsService {
         where: { id: rr.id },
         data: { creditAwarded: amount },
       });
+      if (amount > 0) {
+        await appendReturnActionNote(prisma, {
+          returnRequestId: rr.id,
+          status: rr.status,
+          note: `Store credit awarded · $${amount.toFixed(2)}`,
+        });
+      }
       await emailService.sendTemplate({
         to: rr.user.email,
         template: 'store-credit-update',
@@ -599,7 +816,9 @@ export class ReturnsService {
     }
   }
 
-  async updateStatus(returnPublicId, { status, notes }, actor) {
+  async updateStatus(returnPublicId, body, actor) {
+    const { status, notes, rejectionReason, inspectionChecklist, manualCarrier, manualTrackingNumber, manualShippedAt } =
+      body;
     const rr = await prisma.returnRequest.findUnique({
       where: { publicId: returnPublicId },
       include: {
@@ -609,8 +828,27 @@ export class ReturnsService {
     });
     if (!rr) throw new AppError(404, 'Return request not found');
 
-    if (rr.status === status) {
-      if (notes === undefined) return rr;
+    if (
+      manualCarrier !== undefined ||
+      manualTrackingNumber !== undefined ||
+      manualShippedAt !== undefined
+    ) {
+      await prisma.returnRequest.update({
+        where: { id: rr.id },
+        data: {
+          ...(manualCarrier !== undefined ? { manualCarrier: manualCarrier || null } : {}),
+          ...(manualTrackingNumber !== undefined
+            ? { manualTrackingNumber: manualTrackingNumber || null }
+            : {}),
+          ...(manualShippedAt !== undefined
+            ? { manualShippedAt: manualShippedAt ? new Date(manualShippedAt) : null }
+            : {}),
+        },
+      });
+    }
+
+    if (!status) {
+      if (notes === undefined) return this.getById(returnPublicId);
       const updatedNotes = await prisma.returnRequest.update({
         where: { id: rr.id },
         data: { notes: notes ? String(notes).trim() : null },
@@ -624,7 +862,25 @@ export class ReturnsService {
         entityId: returnPublicId,
         meta: { notes: updatedNotes.notes },
       });
-      return updatedNotes;
+      return this.getById(returnPublicId);
+    }
+
+    if (rr.status === status) {
+      if (notes === undefined) return this.getById(returnPublicId);
+      const updatedNotes = await prisma.returnRequest.update({
+        where: { id: rr.id },
+        data: { notes: notes ? String(notes).trim() : null },
+        include: returnInclude,
+      });
+      await writeAdminAudit({
+        actorId: actor?.id,
+        actorEmail: actor?.email,
+        action: 'RETURN_NOTES',
+        entityType: 'ReturnRequest',
+        entityId: returnPublicId,
+        meta: { notes: updatedNotes.notes },
+      });
+      return this.getById(returnPublicId);
     }
 
     if (!this.validateTransition(rr.status, status, rr.type)) {
@@ -633,13 +889,31 @@ export class ReturnsService {
 
     const data = { status };
     if (notes !== undefined) data.notes = notes ? String(notes).trim() : null;
+    if (rejectionReason !== undefined) {
+      data.rejectionReason = rejectionReason ? String(rejectionReason).trim() : null;
+    }
+    if (inspectionChecklist !== undefined) {
+      data.inspectionChecklistJson = inspectionChecklist;
+    }
     if (status === 'RECEIVED') data.receivedAt = new Date();
     if (status === 'INSPECTION_APPROVED') data.inspectionApprovedAt = new Date();
 
-    const updated = await prisma.returnRequest.update({
-      where: { id: rr.id },
-      data,
-      include: returnInclude,
+    const actorUserId = await resolveActorUserId(actor);
+
+    const updated = await prisma.$transaction(async (tx) => {
+      const row = await tx.returnRequest.update({
+        where: { id: rr.id },
+        data,
+        include: returnInclude,
+      });
+      await appendReturnStatusEvent(tx, {
+        returnRequestId: rr.id,
+        fromStatus: rr.status,
+        toStatus: status,
+        actorUserId,
+        note: data.notes || data.rejectionReason || null,
+      });
+      return row;
     });
 
     await writeAdminAudit({
@@ -648,7 +922,7 @@ export class ReturnsService {
       action: 'RETURN_STATUS',
       entityType: 'ReturnRequest',
       entityId: returnPublicId,
-      meta: { from: rr.status, to: status, notes: data.notes },
+      meta: { from: rr.status, to: status, notes: data.notes, rejectionReason: data.rejectionReason },
     });
 
     if (status === 'RECEIVED') {
@@ -657,29 +931,48 @@ export class ReturnsService {
       });
     }
 
-    if (status === 'APPROVED' && rr.type === 'STANDARD' && config.standardReturnRestock) {
-      const full = await prisma.returnRequest.findUnique({
-        where: { id: rr.id },
-        include: { orderItem: true },
-      });
-      if (full?.orderItem) {
-        const restockQty = Math.max(1, Number(full.quantity || 1));
-        await prisma.$transaction(async (tx) => {
-          const product = await tx.product.findUnique({
-            where: { id: full.orderItem.productId },
-            include: { variants: { orderBy: { sortOrder: 'asc' } } },
-          });
-          if (product) {
-            await restockOrderLineStock(
-              tx,
-              product,
-              full.orderItem.productVariantId,
-              restockQty,
-              { referenceType: 'return', referenceId: returnPublicId, note: 'Standard return approved' },
-              'RESTOCK'
-            );
-          }
+    if (status === 'UNDER_INSPECTION') {
+      try {
+        notifyInspectionQueued(updated);
+      } catch (err) {
+        console.error('[returns] inspection queued notification failed', returnPublicId, err);
+      }
+    }
+
+    if (status === 'APPROVED' && rr.type === 'STANDARD') {
+      if (config.standardReturnRestock) {
+        const full = await prisma.returnRequest.findUnique({
+          where: { id: rr.id },
+          include: { orderItem: true },
         });
+        if (full?.orderItem) {
+          const restockQty = Math.max(1, Number(full.quantity || 1));
+          await prisma.$transaction(async (tx) => {
+            const product = await tx.product.findUnique({
+              where: { id: full.orderItem.productId },
+              include: { variants: { orderBy: { sortOrder: 'asc' } } },
+            });
+            if (product) {
+              await restockOrderLineStock(
+                tx,
+                product,
+                full.orderItem.productVariantId,
+                restockQty,
+                { referenceType: 'return', referenceId: returnPublicId, note: 'Standard return approved' },
+                'RESTOCK'
+              );
+            }
+          });
+        }
+      }
+      try {
+        await processStandardReturnRefund({ ...rr, ...updated }, actor);
+      } catch (err) {
+        if (err instanceof AppError && err.code === 'STRIPE_NOT_CONFIGURED') {
+          // Allow approval without Stripe in dev — refund fields stay null.
+        } else {
+          throw err;
+        }
       }
     }
 
@@ -707,9 +1000,16 @@ export class ReturnsService {
             actionUrl: `${config.frontend.customerUrl}/dashboard/returns/${returnPublicId}`,
           },
         });
-        return withJob;
+        return this.getById(returnPublicId);
       }
     }
+
+    const emailNote =
+      status === 'REJECTED' || status === 'INSPECTION_REJECTED'
+        ? data.rejectionReason || 'See return details for more information.'
+        : status === 'APPROVED' && rr.type === 'STANDARD'
+          ? 'Your product refund has been initiated. Original shipping charges are not refunded.'
+          : undefined;
 
     await emailService.sendTemplate({
       to: rr.user.email,
@@ -717,11 +1017,12 @@ export class ReturnsService {
       context: {
         name: [rr.user.firstName, rr.user.lastName].filter(Boolean).join(' '),
         status,
+        note: emailNote,
         actionUrl: `${config.frontend.customerUrl}/dashboard/returns/${returnPublicId}`,
       },
     });
 
-    return updated;
+    return this.getById(returnPublicId);
   }
   async bulkMarkReceived(returnPublicIds, actor) {
     const results = [];

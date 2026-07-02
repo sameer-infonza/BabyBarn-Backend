@@ -151,6 +151,18 @@ export function renderBrandedEmailTemplate(template, context = {}, brand) {
     return { subject, html, text: `Refund ${context.amount} for order ${context.orderId}. ${context.actionUrl}` };
   }
 
+  if (template === 'return-requested') {
+    const subject = 'We received your return request';
+    const bodyHtml = `
+      ${greet(name)}
+      ${emailBodyParagraph(`Your <strong>${escapeHtml(context.returnType || 'return')}</strong> request is in our queue. We will email you when inspection or shipping steps are ready.`)}
+      ${emailMutedNote('Original shipping charges are not refundable on standard returns.')}
+      ${emailCtaButton(context.actionUrl, 'Track return')}
+    `;
+    const { html } = doc(subject, 'Return request received', bodyHtml, brand);
+    return { subject, html, text: `Return request received. ${context.actionUrl}` };
+  }
+
   if (template === 'return-status') {
     const subject = 'Update on your return request';
     const statusRaw = String(context.status || '');
@@ -183,6 +195,26 @@ export function renderBrandedEmailTemplate(template, context = {}, brand) {
     `;
     const { html } = doc(subject, 'Return status update', bodyHtml, brand);
     return { subject, html, text: `Return status: ${statusLabel}. ${context.actionUrl}` };
+  }
+
+  if (template === 'return-package-request') {
+    const statusKey = String(context.status || '').toUpperCase();
+    const subject =
+      statusKey === 'SENT'
+        ? 'Your prepaid return package is on the way'
+        : 'Your prepaid return package request was approved';
+    const bodyHtml = `
+      ${greet(name)}
+      ${emailBodyParagraph(
+        statusKey === 'SENT'
+          ? 'We dispatched a prepaid return package for your order.'
+          : 'Your request for a replacement prepaid return package was approved.'
+      )}
+      ${context.trackingNumber ? emailMutedNote(`Tracking: ${escapeHtml(context.trackingNumber)}`) : ''}
+      ${emailCtaButton(context.actionUrl, 'View orders')}
+    `;
+    const { html } = doc(subject, 'Return package update', bodyHtml, brand);
+    return { subject, html, text: `Return package ${context.status}. ${context.actionUrl}` };
   }
 
   if (template === 'store-credit-update') {
@@ -339,6 +371,165 @@ export function renderBrandedEmailTemplate(template, context = {}, brand) {
       subject,
       html,
       text: `${context.productName} dropped from ${context.oldPrice} to ${context.newPrice}.`,
+    };
+  }
+
+  if (template === 'admin-return-request') {
+    const subject = `[Admin] New ${context.returnType || 'return'} request`;
+    const bodyHtml = `
+      ${emailHeroText('New return request', 'A customer submitted a return that needs your attention.')}
+      ${emailPanel(
+        `<table width="100%">${emailInfoRows([
+          { label: 'Type', value: context.returnType, bold: true },
+          { label: 'Order', value: context.orderNumber },
+          { label: 'Customer', value: context.customerEmail },
+          { label: 'Reason', value: context.reason },
+        ])}</table>`,
+        { title: 'Return details' }
+      )}
+      ${context.actionUrl ? emailCtaButton(context.actionUrl, 'Open in admin') : ''}
+      ${context.actionUrl ? emailLinkFallback(context.actionUrl) : ''}
+    `;
+    const { html } = doc(subject, 'New return request', bodyHtml, brand);
+    return {
+      subject,
+      html,
+      text: `New return: ${context.returnType} for ${context.orderNumber}. ${context.actionUrl || ''}`,
+    };
+  }
+
+  if (template === 'admin-eligibility-review') {
+    const subject = '[Admin] Refurb eligibility review needed';
+    const bodyHtml = `
+      ${emailHeroText('Eligibility review', 'A refurbishment return requires manual eligibility review.')}
+      ${emailPanel(
+        `<table width="100%">${emailInfoRows([
+          { label: 'Order', value: context.orderNumber, bold: true },
+          { label: 'Customer', value: context.customerEmail },
+        ])}</table>`,
+        { title: 'Return' }
+      )}
+      ${context.actionUrl ? emailCtaButton(context.actionUrl, 'Review eligibility') : ''}
+      ${context.actionUrl ? emailLinkFallback(context.actionUrl) : ''}
+    `;
+    const { html } = doc(subject, 'Eligibility review needed', bodyHtml, brand);
+    return {
+      subject,
+      html,
+      text: `Eligibility review for ${context.orderNumber}. ${context.actionUrl || ''}`,
+    };
+  }
+
+  if (template === 'admin-inspection-queued') {
+    const subject = '[Admin] Return ready for inspection';
+    const bodyHtml = `
+      ${emailHeroText('Inspection queued', 'A refurbishment return is ready for the inspection workflow.')}
+      ${emailPanel(
+        `<table width="100%">${emailInfoRows([
+          { label: 'Order', value: context.orderNumber, bold: true },
+          { label: 'Customer', value: context.customerEmail },
+        ])}</table>`,
+        { title: 'Return' }
+      )}
+      ${context.actionUrl ? emailCtaButton(context.actionUrl, 'Open inspection') : ''}
+      ${context.actionUrl ? emailLinkFallback(context.actionUrl) : ''}
+    `;
+    const { html } = doc(subject, 'Inspection queued', bodyHtml, brand);
+    return {
+      subject,
+      html,
+      text: `Inspection queued for ${context.orderNumber}. ${context.actionUrl || ''}`,
+    };
+  }
+
+  if (template === 'admin-return-package-request') {
+    const subject = '[Admin] Prepaid return package requested';
+    const bodyHtml = `
+      ${emailHeroText('Package request', 'A customer requested a prepaid return package.')}
+      ${emailPanel(
+        `<table width="100%">${emailInfoRows([
+          { label: 'Order', value: context.orderNumber, bold: true },
+          { label: 'Customer', value: context.customerEmail },
+          { label: 'Reason', value: context.reason },
+        ])}</table>`,
+        { title: 'Request' }
+      )}
+      ${context.actionUrl ? emailCtaButton(context.actionUrl, 'Manage package requests') : ''}
+      ${context.actionUrl ? emailLinkFallback(context.actionUrl) : ''}
+    `;
+    const { html } = doc(subject, 'Return package request', bodyHtml, brand);
+    return {
+      subject,
+      html,
+      text: `Package request for ${context.orderNumber}. ${context.actionUrl || ''}`,
+    };
+  }
+
+  if (template === 'admin-new-order') {
+    const subject = `[Admin] New paid order ${context.orderNumber || ''}`.trim();
+    const bodyHtml = `
+      ${emailHeroText('New paid order', 'A customer order was paid and is ready to fulfill.')}
+      ${emailPanel(
+        `<table width="100%">${emailInfoRows([
+          { label: 'Order', value: context.orderNumber, bold: true },
+          { label: 'Total', value: context.amount },
+          { label: 'Customer', value: context.customerEmail },
+        ])}</table>`,
+        { title: 'Order' }
+      )}
+      ${context.actionUrl ? emailCtaButton(context.actionUrl, 'Open order') : ''}
+      ${context.actionUrl ? emailLinkFallback(context.actionUrl) : ''}
+    `;
+    const { html } = doc(subject, 'New paid order', bodyHtml, brand);
+    return {
+      subject,
+      html,
+      text: `New order ${context.orderNumber}${context.amount ? ` (${context.amount})` : ''}. ${context.actionUrl || ''}`,
+    };
+  }
+
+  if (template === 'admin-low-stock') {
+    const subject = `[Admin] Low stock: ${context.productName || 'Product'}`;
+    const bodyHtml = `
+      ${emailHeroText('Low stock alert', 'Inventory has dropped below the configured threshold.')}
+      ${emailPanel(
+        `<table width="100%">${emailInfoRows([
+          { label: 'Product', value: context.productName, bold: true },
+          { label: 'SKU', value: context.sku },
+          { label: 'Available', value: String(context.available ?? ''), bold: true },
+        ])}</table>`,
+        { title: 'Inventory' }
+      )}
+      ${context.actionUrl ? emailCtaButton(context.actionUrl, 'Open inventory') : ''}
+      ${context.actionUrl ? emailLinkFallback(context.actionUrl) : ''}
+    `;
+    const { html } = doc(subject, 'Low stock alert', bodyHtml, brand);
+    return {
+      subject,
+      html,
+      text: `Low stock: ${context.productName} (${context.available} available). ${context.actionUrl || ''}`,
+    };
+  }
+
+  if (template === 'admin-cancellation-review') {
+    const subject = `[Admin] Cancellation review for ${context.orderNumber || 'order'}`;
+    const bodyHtml = `
+      ${emailHeroText('Cancellation review', 'A customer requested order cancellation before shipment.')}
+      ${emailPanel(
+        `<table width="100%">${emailInfoRows([
+          { label: 'Order', value: context.orderNumber, bold: true },
+          { label: 'Customer', value: context.customerEmail },
+        ])}</table>`,
+        { title: 'Order' }
+      )}
+      ${context.actionUrl ? emailCtaButton(context.actionUrl, 'Review order') : ''}
+      ${context.actionUrl ? emailLinkFallback(context.actionUrl) : ''}
+    `;
+    const { html } = doc(subject, 'Cancellation review needed', bodyHtml, brand);
+    return {
+      subject,
+      html,
+      text: `Cancellation review for ${context.orderNumber}. ${context.actionUrl || ''}`,
     };
   }
 

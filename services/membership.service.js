@@ -50,6 +50,7 @@ export async function getPublicBusinessSettings() {
   return {
     accessMembershipPriceUsd: settings.accessMembershipPriceUsd,
     accessMembershipPriceLabel: `$${Number(settings.accessMembershipPriceUsd).toFixed(0)}`,
+    accessUsedReturnWindowDays: settings.accessUsedReturnWindowDays ?? 365,
   };
 }
 

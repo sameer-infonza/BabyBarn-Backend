@@ -14,7 +14,9 @@
     "prisma:seed": "node scripts/seed.js",
     "smoke:phase2": "node scripts/phase2-smoke.mjs",
     "access:reminders": "node scripts/send-access-reminders.mjs",
-    "access:reminders:dry": "node scripts/send-access-reminders.mjs --dry-run"
+    "access:reminders:dry": "node scripts/send-access-reminders.mjs --dry-run",
+    "migrate:simple-variants": "node scripts/migrate-simple-to-variant-matrix.mjs",
+    "migrate:simple-variants:dry": "node scripts/migrate-simple-to-variant-matrix.mjs --dry-run"
   },
   "prisma": {
     "seed": "node scripts/seed.js"

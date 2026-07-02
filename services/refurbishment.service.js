@@ -2,6 +2,7 @@ import { prisma } from '../lib/prisma.js';
 import { AppError } from '../utils/error-handler.js';
 import { writeAdminAudit } from './audit.service.js';
 import { slugifyName } from '../utils/slug.js';
+import { resolveActorUserId } from '../lib/resolve-actor-user-id.js';
 
 const TRANSITIONS = {
   RECEIVED: ['INSPECTION', 'CANCELLED'],
@@ -167,8 +168,9 @@ export class RefurbishmentService {
     if (['CLEANING', 'IRONING', 'REPAIR', 'IN_PROGRESS'].includes(nextStatus)) data.refurbishedAt = now;
 
     let listedProduct = null;
+    const actorInternalId = await resolveActorUserId(actor);
     if (nextStatus === 'LISTED') {
-      listedProduct = await this.createListedRefurbProduct(job);
+      listedProduct = await this.createListedRefurbProduct(job, actorInternalId);
       data.listedAt = now;
       data.listedProductId = listedProduct.id;
     }
@@ -195,7 +197,7 @@ export class RefurbishmentService {
     return { job: updated, listedProduct: updated.listedProduct || listedProduct };
   }
 
-  async createListedRefurbProduct(job) {
+  async createListedRefurbProduct(job, actorUserId = null) {
     const line = job.returnRequest.orderItem;
     const source = line?.product;
     if (!source) throw new AppError(400, 'Return has no product line to list');
@@ -256,6 +258,7 @@ export class RefurbishmentService {
           eventType: 'RESTOCK',
           referenceType: 'refurbishment_job',
           referenceId: job.publicId,
+          actorUserId,
           note: 'Refurbished unit restocked',
         });
 
@@ -362,6 +365,7 @@ export class RefurbishmentService {
         eventType: 'RESTOCK',
         referenceType: 'refurbishment_job',
         referenceId: job.publicId,
+        actorUserId,
         note: 'Refurbished unit listed',
       });
 

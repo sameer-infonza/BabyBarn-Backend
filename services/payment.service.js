@@ -6,6 +6,7 @@ import { orderService } from './order.service.js';
 import { checkoutIntentService } from './checkout-intent.service.js';
 import { emailService } from './email.service.js';
 import { buildOrderTrackingUrl, buildGuestReturnUrl } from '../lib/order-tracking-token.js';
+import { notifyNewPaidOrder } from './admin-notification.service.js';
 
 async function getMembershipUnitAmountCents() {
   try {
@@ -468,6 +469,16 @@ async function handleOrderCheckoutCompleted(session) {
       });
     }
     const result = await handleCheckoutIntentPaymentCompleted(checkoutIntentPublicId);
+    if (result && typeof result === 'object' && result.orderPublicId) {
+      await prisma.order.updateMany({
+        where: { publicId: result.orderPublicId },
+        data: {
+          stripeCheckoutSessionId: session.id,
+          ...(paymentIntentId ? { stripePaymentIntentId: paymentIntentId } : {}),
+          paymentStatus: 'PAID',
+        },
+      });
+    }
     if (paymentIntentId) {
       await splitOrderTransfersIfBundled(getStripe(), checkoutIntentPublicId, paymentIntentId);
     }
@@ -825,9 +836,15 @@ async function handleCheckoutIntentPaymentCompleted(checkoutIntentPublicId) {
     } catch (emailErr) {
       console.error('[stripe webhook] order confirmation email failed', paidOrder.publicId, emailErr);
     }
+    notifyNewPaidOrder(paidOrder);
   }
 
-  return { handled: true, flow: 'order', alreadyPaid: Boolean(alreadyConsumed) };
+  return {
+    handled: true,
+    flow: 'order',
+    alreadyPaid: Boolean(alreadyConsumed),
+    orderPublicId: paidOrder?.publicId || intentBefore.orderPublicId || null,
+  };
 }
 
 async function handleOrderPaymentCompleted(orderPublicId) {
@@ -869,6 +886,7 @@ async function handleOrderPaymentCompleted(orderPublicId) {
     } catch (emailErr) {
       console.error('[stripe webhook] order confirmation email failed', orderPublicId, emailErr);
     }
+    notifyNewPaidOrder(paidOrder);
   }
 
   return { handled: true, flow: 'order', alreadyPaid };

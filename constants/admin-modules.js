@@ -16,6 +16,7 @@ export const ADMIN_CONSOLE_ROUTE_MODULES = [
   'team',
   'activity',
   'profile',
+  'notifications',
 ];
 
 /** Business-facing team permission modules (coarse-grained, no granular permissions). */

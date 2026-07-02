@@ -13,7 +13,7 @@ function checkConsoleModuleAccess(user, moduleSlug) {
   if (adminModules === null || adminModules === undefined) return true;
   if (!Array.isArray(adminModules)) return false;
   if (adminModules.length === 0) return false;
-  const alwaysAllowed = moduleSlug === 'dashboard' || moduleSlug === 'profile';
+  const alwaysAllowed = moduleSlug === 'dashboard' || moduleSlug === 'profile' || moduleSlug === 'notifications';
   return alwaysAllowed || canAccessRouteModule(adminModules, moduleSlug);
 }
 
@@ -26,10 +26,6 @@ export function requireConsoleModule(moduleSlug) {
     try {
       if (!req.user) {
         next(new AppError(403, 'Forbidden'));
-        return;
-      }
-      if (req.user.role === 'ADMIN_TEAM' && Array.isArray(req.user.adminModules) && req.user.adminModules.length === 0) {
-        next(new AppError(403, 'No console modules assigned'));
         return;
       }
       if (checkConsoleModuleAccess(req.user, moduleSlug)) {
@@ -56,10 +52,6 @@ export function requireConsoleModuleAny(moduleSlugs) {
     try {
       if (!req.user) {
         next(new AppError(403, 'Forbidden'));
-        return;
-      }
-      if (req.user.role === 'ADMIN_TEAM' && Array.isArray(req.user.adminModules) && req.user.adminModules.length === 0) {
-        next(new AppError(403, 'No console modules assigned'));
         return;
       }
       if (slugs.some((slug) => checkConsoleModuleAccess(req.user, slug))) {

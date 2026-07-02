@@ -471,11 +471,12 @@ export async function getBusinessSettings() {
     }));
   return {
     accessMembershipPriceUsd: row.accessMembershipPriceUsd,
+    accessUsedReturnWindowDays: row.accessUsedReturnWindowDays ?? 365,
     updatedAt: row.updatedAt,
   };
 }
 
-export async function updateBusinessSettings({ accessMembershipPriceUsd }) {
+export async function updateBusinessSettings({ accessMembershipPriceUsd, accessUsedReturnWindowDays }) {
   if (accessMembershipPriceUsd != null) {
     const n = Number(accessMembershipPriceUsd);
     if (Number.isNaN(n) || n < 0 || n > 99999) {
@@ -485,6 +486,17 @@ export async function updateBusinessSettings({ accessMembershipPriceUsd }) {
       where: { id: 1 },
       create: { id: 1, accessMembershipPriceUsd: n },
       update: { accessMembershipPriceUsd: n },
+    });
+  }
+  if (accessUsedReturnWindowDays != null) {
+    const days = Math.floor(Number(accessUsedReturnWindowDays));
+    if (!Number.isFinite(days) || days < 30 || days > 730) {
+      throw new AppError(400, 'Used return window must be between 30 and 730 days');
+    }
+    await prisma.businessSettings.upsert({
+      where: { id: 1 },
+      create: { id: 1, accessUsedReturnWindowDays: days },
+      update: { accessUsedReturnWindowDays: days },
     });
   }
   return getBusinessSettings();

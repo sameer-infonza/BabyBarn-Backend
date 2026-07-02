@@ -91,6 +91,7 @@ export async function listLedgerHistory({
             email: true,
             firstName: true,
             lastName: true,
+            role: { select: { name: true } },
           },
         })
       : [];
@@ -127,6 +128,7 @@ export async function listLedgerHistory({
               email: actor.email,
               firstName: actor.firstName,
               lastName: actor.lastName,
+              role: actor.role?.name ?? null,
             }
           : null,
       };

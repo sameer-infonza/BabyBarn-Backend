@@ -79,6 +79,33 @@ router.post(
   (req, res, next) => returnsController.bulkMarkReceived(req, res).catch(next)
 );
 router.post('/guest', (req, res, next) => returnsController.createGuest(req, res).catch(next));
+router.post('/guest/track', (req, res, next) => returnsController.trackGuest(req, res).catch(next));
+router.post(
+  '/package-requests',
+  authenticate,
+  requireFullAccount,
+  (req, res, next) => returnsController.createPackageRequest(req, res).catch(next)
+);
+router.get(
+  '/package-requests/mine',
+  authenticate,
+  requireFullAccount,
+  (req, res, next) => returnsController.listPackageRequestsMine(req, res).catch(next)
+);
+router.get(
+  '/admin/package-requests',
+  authenticate,
+  authorize('ADMIN', 'ADMIN_TEAM'),
+  returnsOrInspection,
+  (req, res, next) => returnsController.listPackageRequestsAdmin(req, res).catch(next)
+);
+router.patch(
+  '/admin/package-requests/:id',
+  authenticate,
+  authorize('ADMIN', 'ADMIN_TEAM'),
+  returnsOrInspection,
+  (req, res, next) => returnsController.updatePackageRequest(req, res).catch(next)
+);
 router.get('/', authenticate, requireFullAccount, (req, res, next) => returnsController.listMine(req, res).catch(next));
 router.post('/upload-photo', authenticate, requireFullAccount, (req, res, next) => {
   returnPhotoUpload.single('image')(req, res, (err) => {

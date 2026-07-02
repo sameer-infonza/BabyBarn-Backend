@@ -1,9 +1,10 @@
 import { Router } from 'express';
 import { orderController } from '../controllers/order.controller.js';
 import { authenticate, authorize, requireFullAccount } from '../middleware/auth.js';
-import { requireConsoleModule } from '../middleware/admin-console.js';
+import { requireConsoleModule, requireConsoleModuleAny } from '../middleware/admin-console.js';
 
 const router = Router();
+const ordersOrShipping = requireConsoleModuleAny(['orders', 'shipping']);
 
 router.get('/track', (req, res, next) => orderController.trackOrder(req, res).catch(next));
 router.get('/', authenticate, requireFullAccount, (req, res, next) => orderController.getUserOrders(req, res).catch(next));
@@ -78,49 +79,49 @@ router.post(
   '/admin/:id/shipping-options',
   authenticate,
   authorize('ADMIN', 'ADMIN_TEAM'),
-  requireConsoleModule('orders'),
+  ordersOrShipping,
   (req, res, next) => orderController.getAdminShippingOptions(req, res).catch(next)
 );
 router.post(
   '/admin/:id/shipping-label',
   authenticate,
   authorize('ADMIN', 'ADMIN_TEAM'),
-  requireConsoleModule('orders'),
+  ordersOrShipping,
   (req, res, next) => orderController.generateAdminShippingLabel(req, res).catch(next)
 );
 router.post(
   '/admin/:id/ups-label',
   authenticate,
   authorize('ADMIN', 'ADMIN_TEAM'),
-  requireConsoleModule('orders'),
+  ordersOrShipping,
   (req, res, next) => orderController.generateAdminUpsLabel(req, res).catch(next)
 );
 router.post(
   '/admin/bulk/ups-labels',
   authenticate,
   authorize('ADMIN', 'ADMIN_TEAM'),
-  requireConsoleModule('orders'),
+  ordersOrShipping,
   (req, res, next) => orderController.bulkGenerateAdminUpsLabels(req, res).catch(next)
 );
 router.get(
   '/admin/bulk/labels.zip',
   authenticate,
   authorize('ADMIN', 'ADMIN_TEAM'),
-  requireConsoleModule('orders'),
+  ordersOrShipping,
   (req, res, next) => orderController.downloadAdminLabelsZip(req, res).catch(next)
 );
 router.post(
   '/admin/:id/return-options',
   authenticate,
   authorize('ADMIN', 'ADMIN_TEAM'),
-  requireConsoleModule('orders'),
+  ordersOrShipping,
   (req, res, next) => orderController.getAdminReturnShippingOptions(req, res).catch(next)
 );
 router.post(
   '/admin/:id/return-label',
   authenticate,
   authorize('ADMIN', 'ADMIN_TEAM'),
-  requireConsoleModule('orders'),
+  ordersOrShipping,
   (req, res, next) => orderController.generateAdminReturnLabel(req, res).catch(next)
 );
 router.get(
@@ -134,7 +135,7 @@ router.get(
   '/admin/:id',
   authenticate,
   authorize('ADMIN', 'ADMIN_TEAM'),
-  requireConsoleModule('orders'),
+  ordersOrShipping,
   (req, res, next) => orderController.getOrderAdmin(req, res).catch(next)
 );
 router.patch(
@@ -155,7 +156,7 @@ router.patch(
   '/:id/shipping',
   authenticate,
   authorize('ADMIN', 'ADMIN_TEAM'),
-  requireConsoleModule('orders'),
+  ordersOrShipping,
   (req, res, next) => orderController.updateAdminShipping(req, res).catch(next)
 );
 router.patch(
@@ -172,7 +173,7 @@ router.patch(
   '/:id/tracking',
   authenticate,
   authorize('ADMIN', 'ADMIN_TEAM'),
-  requireConsoleModule('orders'),
+  ordersOrShipping,
   (req, res, next) => orderController.updateTracking(req, res).catch(next)
 );
 router.get('/:id', authenticate, requireFullAccount, (req, res, next) =>

@@ -341,6 +341,7 @@ export class ProductService {
                 sku: true,
                 stock: true,
                 priceOverride: true,
+                memberPriceOverride: true,
                 combination: true,
               },
             },
@@ -502,6 +503,23 @@ export class ProductService {
 
     const isVariantProduct = inventoryModel === 'variant_matrix' && variants.length > 0;
 
+    const listingActive = Boolean(isActiveListing) && !isDraft;
+    if (listingActive) {
+      const preview = {
+        name,
+        price,
+        stock: isVariantProduct
+          ? variants.reduce((sum, v) => sum + (v.stock ?? 0), 0)
+          : stock,
+        imageUrl,
+        gallery,
+        isDraft,
+        inventoryModel: isVariantProduct ? 'variant_matrix' : inventoryModel,
+        sizeAgeGroup,
+      };
+      assertProductCanActivate(preview, isVariantProduct ? variants : []);
+    }
+
     const slugBase = (requestedSlug && String(requestedSlug).trim()) || slugifyName(name);
     const totalStock = isVariantProduct
       ? variants.reduce((sum, v) => sum + (v.stock ?? 0), 0)
@@ -586,7 +604,7 @@ export class ProductService {
           vendor: vendor ?? null,
           tags: tags ?? null,
           isDraft,
-          isActiveListing,
+          isActiveListing: listingActive,
           inventoryModel,
           productType,
           gallery: normalizedGallery,
@@ -597,6 +615,7 @@ export class ProductService {
                   sku: v.sku,
                   stock: v.stock,
                   priceOverride: v.priceOverride ?? null,
+                  memberPriceOverride: v.memberPriceOverride ?? null,
                   imageUrl: normalizeMediaUrl(v.imageUrl),
                   sortOrder: i,
                 })),
@@ -749,6 +768,7 @@ export class ProductService {
               where: { id: existing.id },
               data: {
                 priceOverride: incoming.priceOverride ?? null,
+                memberPriceOverride: incoming.memberPriceOverride ?? null,
                 imageUrl: normalizeMediaUrl(incoming.imageUrl),
               },
             });
@@ -801,6 +821,7 @@ export class ProductService {
                   sku: v.sku,
                   stock: v.stock,
                   priceOverride: v.priceOverride ?? null,
+                  memberPriceOverride: v.memberPriceOverride ?? null,
                   imageUrl: normalizeMediaUrl(v.imageUrl),
                   sortOrder: i,
                 })),

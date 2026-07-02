@@ -22,6 +22,7 @@ import {
 import { walletService } from './wallet.service.js';
 import { shippingService } from './shipping.service.js';
 import { writeAdminAudit } from './audit.service.js';
+import { notifyCancellationReview } from './admin-notification.service.js';
 import * as orderDocuments from './pdf/order-documents.service.js';
 import { emailService } from './email.service.js';
 import { config } from '../config/env.js';
@@ -134,8 +135,12 @@ function computeAppliedUnitPrice(product, variant, hasAccess) {
     unitRetail = vPrice;
     unitApplied = vPrice;
   }
-  if (hasAccess && product.memberPrice != null && Number(product.memberPrice) > 0) {
-    unitApplied = Math.min(unitApplied, Number(product.memberPrice));
+  const variantMember =
+    variant?.memberPriceOverride != null ? Number(variant.memberPriceOverride) : null;
+  const productMember = product.memberPrice != null ? Number(product.memberPrice) : null;
+  const memberCap = variantMember != null && variantMember > 0 ? variantMember : productMember;
+  if (hasAccess && memberCap != null && memberCap > 0) {
+    unitApplied = Math.min(unitApplied, memberCap);
   }
   return { unitRetail, unitApplied };
 }
@@ -582,7 +587,13 @@ export class OrderService {
             include: {
               product: true,
               returnRequests: {
-                select: { publicId: true, status: true, type: true, createdAt: true },
+                select: {
+                  publicId: true,
+                  status: true,
+                  type: true,
+                  quantity: true,
+                  createdAt: true,
+                },
                 orderBy: { createdAt: 'desc' },
               },
             },
@@ -1347,7 +1358,7 @@ export class OrderService {
         referenceId: orderPublicId,
         eventType: 'REFUND_RESTORE',
         note: 'Stripe refund',
-        actorUserId: null,
+        actorUserId: actor?.id ?? null,
       });
       return tx.order.update({
         where: { id: order.id },
@@ -1768,7 +1779,7 @@ export class OrderService {
         include: { orderItems: { include: { product: true } } },
       });
     }
-    return prisma.order.update({
+    const updated = await prisma.order.update({
       where: { id: order.id },
       data: {
         cancellationReviewStatus: 'PENDING',
@@ -1778,6 +1789,8 @@ export class OrderService {
       },
       include: { orderItems: { include: { product: true } } },
     });
+    notifyCancellationReview(updated);
+    return updated;
   }
 
   async reviewCancellationOrder(orderPublicId, { decision, note }, actor) {

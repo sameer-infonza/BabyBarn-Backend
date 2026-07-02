@@ -8,6 +8,7 @@ import {
   lowStockThresholdFromPar,
   stockStatusFromAvailable,
 } from '../lib/inventory-stock-rules.js';
+import { notifyLowStock } from './admin-notification.service.js';
 
 export const LOW_STOCK_THRESHOLD = DEFAULT_LOW_STOCK_THRESHOLD;
 
@@ -352,7 +353,7 @@ export class InventoryService {
       throw new AppError(401, 'User not found');
     }
 
-    return prisma.$transaction(async (tx) => {
+    const result = await prisma.$transaction(async (tx) => {
       const product = await tx.product.findUnique({
         where: { publicId: productPublicId },
         include: { variants: { orderBy: { sortOrder: 'asc' } } },
@@ -382,6 +383,18 @@ export class InventoryService {
         newTotal: computeTotalStock(updated),
       };
     });
+
+    const available = productAvailableStock(result.product);
+    const status = stockStatusFromAvailable(
+      available,
+      result.product.reorderPoint,
+      result.product.productType
+    );
+    if (status === 'low_stock') {
+      notifyLowStock(result.product, available);
+    }
+
+    return result;
   }
 
   async updateProductType(productPublicId, productType) {

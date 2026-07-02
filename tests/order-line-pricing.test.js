@@ -23,3 +23,13 @@ test('buildOrderLinePricing stays STANDARD when no member price on product', () 
   assert.equal(line.pricingTier, 'STANDARD');
   assert.equal(line.price, 100);
 });
+
+test('buildOrderLinePricing uses variant member price override', () => {
+  const product = { price: 100, memberPrice: 70 };
+  const variant = { priceOverride: 90, memberPriceOverride: 55 };
+  const line = buildOrderLinePricing(product, variant, true);
+  assert.equal(line.pricingTier, 'ACCESS');
+  assert.equal(line.price, 55);
+  assert.equal(line.retailUnitPrice, 90);
+  assert.equal(line.memberPriceSnapshot, 55);
+});

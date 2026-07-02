@@ -158,6 +158,7 @@ const variantInputSchema = z.object({
   sku: z.string().min(1),
   stock: z.number().int().min(0),
   priceOverride: z.number().min(0).nullable().optional(),
+  memberPriceOverride: z.number().min(0).nullable().optional(),
   imageUrl: z.string().min(1).nullable().optional(),
 });
 
@@ -393,6 +394,25 @@ const refurbPhotoUrlsSchema = z.object({
   defect: z.string().min(1).optional(),
 });
 
+export const STANDARD_RETURN_REASONS = [
+  'Wrong Size',
+  'Doesn\'t Fit',
+  'Changed Mind',
+  'Wrong Item Received',
+  'Damaged Product',
+  'Defective Product',
+  'Other',
+];
+
+const standardPhotoUrlsSchema = z
+  .array(z.string().min(1))
+  .max(5)
+  .optional()
+  .refine(
+    (arr) => !arr || arr.every((p) => p.startsWith('/uploads/returns/')),
+    { message: 'Invalid photo upload paths' }
+  );
+
 export const returnRequestCreateSchema = z
   .object({
     orderId: z.string().min(1),
@@ -400,12 +420,11 @@ export const returnRequestCreateSchema = z
     orderItemIds: z.array(z.string().min(1)).min(1).max(50).optional(),
     type: z.enum(['STANDARD', 'REFURBISHMENT']).optional().default('STANDARD'),
     reason: z.string().min(3).max(1000),
-    // Partial returns: a single quantity (applies to all selected items) and/or a
-    // per-item map of orderItemId -> quantity. Server clamps to purchased qty.
+    notes: z.string().max(2000).optional(),
     quantity: z.number().int().min(1).max(99).optional(),
     quantities: z.record(z.string().min(1), z.number().int().min(1).max(99)).optional(),
     questionnaire: refurbQuestionnaireSchema.optional(),
-    photoUrls: refurbPhotoUrlsSchema.optional(),
+    photoUrls: z.union([refurbPhotoUrlsSchema, standardPhotoUrlsSchema]).optional(),
   })
   .refine((body) => Boolean(body.orderItemId) || (body.orderItemIds?.length ?? 0) > 0, {
     message: 'At least one order item is required',
@@ -460,8 +479,42 @@ export const RETURN_STATUS_VALUES = [
 ];
 
 export const returnStatusUpdateSchema = z.object({
-  status: z.enum(RETURN_STATUS_VALUES),
+  status: z.enum(RETURN_STATUS_VALUES).optional(),
   notes: z.string().max(2000).optional().nullable(),
+  rejectionReason: z.string().max(500).optional().nullable(),
+  inspectionChecklist: z
+    .object({
+      correctProduct: z.boolean().optional(),
+      unused: z.boolean().optional(),
+      tagsAttached: z.boolean().optional(),
+      packagingAvailable: z.boolean().optional(),
+      noStains: z.boolean().optional(),
+      noDamage: z.boolean().optional(),
+      noMissingAccessories: z.boolean().optional(),
+    })
+    .optional()
+    .nullable(),
+  manualCarrier: z.string().max(50).optional().nullable(),
+  manualTrackingNumber: z.string().max(120).optional().nullable(),
+  manualShippedAt: z.string().datetime().optional().nullable(),
+});
+
+export const guestReturnTrackSchema = z.object({
+  returnId: z.string().min(1),
+  email: z.string().email(),
+});
+
+export const returnPackageRequestCreateSchema = z.object({
+  orderId: z.string().min(1),
+  reason: z.string().min(3).max(500),
+  comments: z.string().max(2000).optional(),
+});
+
+export const returnPackageRequestUpdateSchema = z.object({
+  status: z.enum(['REQUESTED', 'APPROVED', 'REJECTED', 'SENT']),
+  adminNotes: z.string().max(2000).optional().nullable(),
+  dispatchDate: z.string().datetime().optional().nullable(),
+  uspsTrackingNumber: z.string().max(120).optional().nullable(),
 });
 
 export const returnEligibilityReviewSchema = z.object({

@@ -6,9 +6,13 @@ import {
   refurbInspectionCreateSchema,
   returnLabelGenerateSchema,
   guestReturnCreateSchema,
+  guestReturnTrackSchema,
+  returnPackageRequestCreateSchema,
+  returnPackageRequestUpdateSchema,
   RETURN_STATUS_VALUES,
 } from '../schemas/index.js';
 import { returnsService } from '../services/returns.service.js';
+import { returnPackageRequestService } from '../services/return-package-request.service.js';
 import { refurbishmentService } from '../services/refurbishment.service.js';
 import { toPublicJson } from '../utils/serialize.js';
 import { z } from 'zod';
@@ -50,8 +54,41 @@ export class ReturnsController {
 
   async updateStatus(req, res) {
     const body = await validate(returnStatusUpdateSchema, req.body);
+    if (!body.status && body.manualCarrier === undefined && body.manualTrackingNumber === undefined && body.manualShippedAt === undefined && body.notes === undefined) {
+      throw new AppError(400, 'No updates provided');
+    }
     const actor = { id: req.user?.id, email: req.user?.email };
     const data = await returnsService.updateStatus(req.params.id, body, actor);
+    res.status(200).json({ success: true, data: toPublicJson(data) });
+  }
+
+  async trackGuest(req, res) {
+    const body = await validate(guestReturnTrackSchema, req.body ?? {});
+    const data = await returnsService.trackGuestReturn(body);
+    res.status(200).json({ success: true, data: toPublicJson(data) });
+  }
+
+  async createPackageRequest(req, res) {
+    const body = await validate(returnPackageRequestCreateSchema, req.body);
+    const data = await returnPackageRequestService.createForUser(req.user.id, body);
+    res.status(201).json({ success: true, data: toPublicJson(data) });
+  }
+
+  async listPackageRequestsAdmin(req, res) {
+    const status = req.query.status ? String(req.query.status) : undefined;
+    const data = await returnPackageRequestService.listForAdmin({ status });
+    res.status(200).json({ success: true, data: toPublicJson(data) });
+  }
+
+  async listPackageRequestsMine(req, res) {
+    const data = await returnPackageRequestService.listForUser(req.user.id);
+    res.status(200).json({ success: true, data: toPublicJson(data) });
+  }
+
+  async updatePackageRequest(req, res) {
+    const body = await validate(returnPackageRequestUpdateSchema, req.body);
+    const actor = { id: req.user?.id, email: req.user?.email };
+    const data = await returnPackageRequestService.updateStatus(req.params.id, body, actor);
     res.status(200).json({ success: true, data: toPublicJson(data) });
   }
 
