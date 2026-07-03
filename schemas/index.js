@@ -415,6 +415,16 @@ const refurbPhotoUrlsSchema = z.object({
   defect: z.string().min(1).optional(),
 });
 
+const refurbPhotoUrlsWithPathsSchema = refurbPhotoUrlsSchema
+  .refine(
+    (urls) => Boolean(urls.front?.trim() && urls.back?.trim()),
+    { message: 'Front and back photos are required' }
+  )
+  .refine(
+    (urls) => [urls.front, urls.back, urls.defect].filter(Boolean).every((p) => String(p).startsWith('/uploads/returns/')),
+    { message: 'Invalid photo upload paths' }
+  );
+
 export const STANDARD_RETURN_REASONS = [
   'Wrong Size',
   'Doesn\'t Fit',
@@ -434,11 +444,19 @@ const standardPhotoUrlsSchema = z
     { message: 'Invalid photo upload paths' }
   );
 
+const refurbReturnItemSchema = z.object({
+  orderItemId: z.string().min(1),
+  quantity: z.number().int().min(1).max(99).optional().default(1),
+  questionnaire: refurbQuestionnaireSchema,
+  photoUrls: refurbPhotoUrlsWithPathsSchema,
+});
+
 export const returnRequestCreateSchema = z
   .object({
     orderId: z.string().min(1),
     orderItemId: z.string().min(1).optional(),
     orderItemIds: z.array(z.string().min(1)).min(1).max(50).optional(),
+    refurbItems: z.array(refurbReturnItemSchema).min(1).max(50).optional(),
     type: z.enum(['STANDARD', 'REFURBISHMENT']).optional().default('STANDARD'),
     reason: z.string().min(3).max(1000),
     notes: z.string().max(2000).optional(),
@@ -447,13 +465,29 @@ export const returnRequestCreateSchema = z
     questionnaire: refurbQuestionnaireSchema.optional(),
     photoUrls: z.union([refurbPhotoUrlsSchema, standardPhotoUrlsSchema]).optional(),
   })
-  .refine((body) => Boolean(body.orderItemId) || (body.orderItemIds?.length ?? 0) > 0, {
-    message: 'At least one order item is required',
-    path: ['orderItemIds'],
-  })
+  .refine(
+    (body) => Boolean(body.orderItemId) || (body.orderItemIds?.length ?? 0) > 0 || (body.refurbItems?.length ?? 0) > 0,
+    {
+      message: 'At least one order item is required',
+      path: ['orderItemIds'],
+    }
+  )
   .refine(
     (body) =>
-      body.type !== 'REFURBISHMENT' || (Boolean(body.questionnaire) && Boolean(body.photoUrls)),
+      body.type !== 'REFURBISHMENT' ||
+      (body.refurbItems?.length ?? 0) > 0 ||
+      Boolean(body.orderItemId) ||
+      (body.orderItemIds?.length ?? 0) > 0,
+    {
+      message: 'At least one order item is required',
+      path: ['refurbItems'],
+    }
+  )
+  .refine(
+    (body) =>
+      body.type !== 'REFURBISHMENT' ||
+      (body.refurbItems?.length ?? 0) > 0 ||
+      (Boolean(body.questionnaire) && Boolean(body.photoUrls)),
     {
       message: 'Questionnaire and photos are required for refurbishment returns',
       path: ['questionnaire'],
@@ -462,14 +496,7 @@ export const returnRequestCreateSchema = z
   .refine(
     (body) => {
       if (body.type !== 'REFURBISHMENT') return true;
-      const ids = body.orderItemIds ?? (body.orderItemId ? [body.orderItemId] : []);
-      return ids.length === 1;
-    },
-    { message: 'One item per refurb return', path: ['orderItemIds'] }
-  )
-  .refine(
-    (body) => {
-      if (body.type !== 'REFURBISHMENT') return true;
+      if ((body.refurbItems?.length ?? 0) > 0) return true;
       return Boolean(body.photoUrls?.front?.trim() && body.photoUrls?.back?.trim());
     },
     { message: 'Front and back photos are required', path: ['photoUrls'] }
@@ -477,6 +504,7 @@ export const returnRequestCreateSchema = z
   .refine(
     (body) => {
       if (body.type !== 'REFURBISHMENT') return true;
+      if ((body.refurbItems?.length ?? 0) > 0) return true;
       const urls = body.photoUrls;
       if (!urls) return false;
       const paths = [urls.front, urls.back, urls.defect].filter(Boolean);

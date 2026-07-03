@@ -6,6 +6,7 @@ import {
 } from '../services/admin-notification.service.js';
 import { userCanSeeModule } from '../lib/admin-module-access.js';
 import {
+  resolveUsedReturnWindowStart,
   resolveStandardReturnWindowStart,
   standardReturnWindowDaysLeft,
 } from '../services/returns.service.js';
@@ -53,5 +54,29 @@ test('standard return window stays closed before delivery', () => {
       status: 'SHIPPED',
     }),
     0
+  );
+});
+
+test('used return window starts from deliveredAt when available', () => {
+  const deliveredAt = new Date(Date.now() - 10 * 24 * 60 * 60 * 1000);
+  const createdAt = new Date(Date.now() - 40 * 24 * 60 * 60 * 1000);
+  const start = resolveUsedReturnWindowStart({
+    createdAt,
+    deliveredAt,
+    status: 'DELIVERED',
+  });
+
+  assert.equal(start?.toISOString(), deliveredAt.toISOString());
+});
+
+test('used return window stays closed before delivery', () => {
+  const createdAt = new Date(Date.now() - 10 * 24 * 60 * 60 * 1000);
+  assert.equal(
+    resolveUsedReturnWindowStart({
+      createdAt,
+      deliveredAt: null,
+      status: 'SHIPPED',
+    }),
+    null
   );
 });

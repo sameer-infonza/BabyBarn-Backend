@@ -647,6 +647,7 @@ model OrderItem {
 model ReturnRequest {
   id Int @id @default(autoincrement())
   publicId String @unique @default(cuid())
+  submissionPublicId String @default(cuid())
   userId Int
   orderId Int
   orderItemId Int?
@@ -689,6 +690,7 @@ model ReturnRequest {
   @@index([userId])
   @@index([orderId])
   @@index([status])
+  @@index([submissionPublicId])
 }
 
 model ReturnStatusEvent {

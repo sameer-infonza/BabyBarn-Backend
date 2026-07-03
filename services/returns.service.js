@@ -115,6 +115,172 @@ export function standardReturnWindowDaysLeft(order, windowDays = 14) {
   return Math.max(0, Math.ceil((end - Date.now()) / (24 * 60 * 60 * 1000)));
 }
 
+export function resolveUsedReturnWindowStart(order) {
+  return resolveStandardReturnWindowStart(order);
+}
+
+function returnSubmissionKey(row) {
+  return row?.submissionPublicId || row?.submissionId || row?.publicId || row?.id;
+}
+
+function computeRowRefundPreview(row) {
+  return row?.type === 'STANDARD' && row?.orderItem
+    ? computeStandardReturnRefundAmount(row.orderItem, row.quantity)
+    : null;
+}
+
+function deriveSubmissionStatus(rows) {
+  if (!rows.length) return 'REQUESTED';
+  const statuses = rows.map((row) => row.status);
+  if (statuses.every((status) => status === statuses[0])) return statuses[0];
+
+  const type = rows[0].type;
+  if (type === 'STANDARD') {
+    if (statuses.every((status) => status === 'APPROVED')) return 'APPROVED';
+    if (statuses.every((status) => status === 'REJECTED')) return 'REJECTED';
+    if (statuses.includes('UNDER_INSPECTION')) return 'UNDER_INSPECTION';
+    if (statuses.includes('RECEIVED')) return 'RECEIVED';
+    if (statuses.includes('REQUESTED')) return 'REQUESTED';
+    if (statuses.includes('APPROVED')) return 'APPROVED';
+    return statuses[0];
+  }
+
+  if (statuses.every((status) => status === 'INSPECTION_APPROVED')) return 'INSPECTION_APPROVED';
+  if (statuses.every((status) => ['ELIGIBILITY_REJECTED', 'INSPECTION_REJECTED', 'REJECTED'].includes(status))) {
+    return statuses[0];
+  }
+
+  const refurbPriority = [
+    'ELIGIBILITY_REVIEW',
+    'APPROVED',
+    'LABEL_GENERATED',
+    'IN_TRANSIT',
+    'RECEIVED',
+    'UNDER_INSPECTION',
+    'INSPECTION_APPROVED',
+  ];
+  for (const status of refurbPriority) {
+    if (statuses.includes(status)) return status;
+  }
+  return statuses[0];
+}
+
+function buildSubmissionStatusEvents(rows) {
+  return rows
+    .flatMap((row) =>
+      (row.statusEvents ?? []).map((event) => ({
+        ...event,
+        returnItemId: row.id || row.publicId,
+        returnSubmissionId: returnSubmissionKey(row),
+        itemName: row.orderItem?.product?.name || null,
+        note:
+          row.orderItem?.product?.name && event.note
+            ? `${row.orderItem.product.name} — ${event.note}`
+            : event.note || row.orderItem?.product?.name || null,
+      }))
+    )
+    .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+}
+
+function buildSubmissionChildItem(row) {
+  return {
+    id: row.publicId,
+    submissionId: returnSubmissionKey(row),
+    type: row.type,
+    status: row.status,
+    quantity: row.quantity,
+    reason: row.reason,
+    notes: row.notes,
+    rejectionReason: row.rejectionReason,
+    photoUrlsJson: row.photoUrlsJson,
+    creditAwarded: row.creditAwarded,
+    refundAmount: row.refundAmount,
+    stripeRefundId: row.stripeRefundId,
+    refundedAt: row.refundedAt,
+    refundPreview: row.refundPreview ?? computeRowRefundPreview(row),
+    manualCarrier: row.manualCarrier,
+    manualTrackingNumber: row.manualTrackingNumber,
+    manualShippedAt: row.manualShippedAt,
+    returnLabelUrl: row.returnLabelUrl,
+    returnTrackingNumber: row.returnTrackingNumber,
+    returnShippingCarrier: row.returnShippingCarrier,
+    createdAt: row.createdAt,
+    updatedAt: row.updatedAt,
+    user: row.user,
+    order: row.order,
+    orderItem: row.orderItem,
+    eligibilityQuestionnaire: row.eligibilityQuestionnaire,
+    inspectionRecords: row.inspectionRecords,
+    refurbishmentJob: row.refurbishmentJob,
+    statusEvents: row.statusEvents,
+  };
+}
+
+function buildReturnSubmission(rows, { includeEvents = false } = {}) {
+  if (!rows.length) return null;
+  const ordered = [...rows].sort((a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime());
+  const latestFirst = [...ordered].sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+  const primary = ordered[0];
+  const submissionId = returnSubmissionKey(primary);
+  const items = ordered.map((row) => buildSubmissionChildItem({ ...row, submissionId }));
+  const refundAmounts = items.map((row) => Number(row.refundAmount ?? 0));
+  const hasExplicitRefundAmount = items.some((row) => row.refundAmount != null);
+  const refundPreview = items.reduce((sum, row) => sum + Number(row.refundPreview ?? 0), 0);
+  const creditAwarded = items.reduce((sum, row) => sum + Number(row.creditAwarded ?? 0), 0);
+  const quantity = items.reduce((sum, row) => sum + Math.max(1, Number(row.quantity ?? 1)), 0);
+  const statusEvents = includeEvents ? buildSubmissionStatusEvents(items) : undefined;
+  const latestTrackingRow = latestFirst.find((row) => row.returnTrackingNumber || row.manualTrackingNumber || row.returnLabelUrl);
+
+  return {
+    id: submissionId,
+    submissionId,
+    primaryItemId: primary.publicId,
+    type: primary.type,
+    status: deriveSubmissionStatus(items),
+    reason: primary.reason,
+    notes: primary.notes,
+    rejectionReason: items.length === 1 ? primary.rejectionReason : null,
+    createdAt: primary.createdAt,
+    updatedAt: latestFirst[0]?.updatedAt ?? primary.updatedAt,
+    quantity,
+    photoUrlsJson:
+      primary.type === 'STANDARD' && Array.isArray(primary.photoUrlsJson) ? primary.photoUrlsJson : null,
+    creditAwarded,
+    refundAmount: hasExplicitRefundAmount ? refundAmounts.reduce((sum, value) => sum + value, 0) : null,
+    refundPreview: refundPreview > 0 ? refundPreview : null,
+    stripeRefundId: items.length === 1 ? primary.stripeRefundId : null,
+    refundedAt: items.length === 1 ? primary.refundedAt : null,
+    manualCarrier: items.length === 1 ? primary.manualCarrier : latestTrackingRow?.manualCarrier ?? null,
+    manualTrackingNumber:
+      items.length === 1 ? primary.manualTrackingNumber : latestTrackingRow?.manualTrackingNumber ?? null,
+    manualShippedAt: items.length === 1 ? primary.manualShippedAt : latestTrackingRow?.manualShippedAt ?? null,
+    returnLabelUrl: latestTrackingRow?.returnLabelUrl ?? null,
+    returnTrackingNumber: latestTrackingRow?.returnTrackingNumber ?? null,
+    returnShippingCarrier: latestTrackingRow?.returnShippingCarrier ?? null,
+    eligibilityQuestionnaire: items.length === 1 ? primary.eligibilityQuestionnaire : null,
+    inspectionRecords: items.length === 1 ? primary.inspectionRecords : [],
+    refurbishmentJob: items.length === 1 ? primary.refurbishmentJob : null,
+    user: primary.user,
+    order: primary.order,
+    orderItem: items.length === 1 ? primary.orderItem : null,
+    items,
+    statusEvents,
+  };
+}
+
+function groupReturnRows(rows, { includeEvents = false } = {}) {
+  const groups = new Map();
+  for (const row of rows) {
+    const key = returnSubmissionKey(row);
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(row);
+  }
+  return [...groups.values()]
+    .map((group) => buildReturnSubmission(group, { includeEvents }))
+    .filter(Boolean)
+    .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+}
+
 export class ReturnsService {
   validateTransition(current, next, type = 'STANDARD') {
     const map = type === 'REFURBISHMENT' ? REFURB_TRANSITIONS : STANDARD_TRANSITIONS;
@@ -135,58 +301,120 @@ export class ReturnsService {
   async listForUser(userPublicId) {
     const user = await prisma.user.findUnique({ where: { publicId: userPublicId }, select: { id: true } });
     if (!user) throw new AppError(401, 'Unauthorized');
-    return prisma.returnRequest.findMany({
+    const rows = await prisma.returnRequest.findMany({
       where: { userId: user.id },
       include: returnInclude,
       orderBy: { createdAt: 'desc' },
     });
+    return groupReturnRows(rows);
   }
 
   async getForUser(userPublicId, returnPublicId) {
     const user = await prisma.user.findUnique({ where: { publicId: userPublicId }, select: { id: true } });
     if (!user) throw new AppError(401, 'Unauthorized');
-    const row = await prisma.returnRequest.findUnique({
-      where: { publicId: returnPublicId },
+    let rows = await prisma.returnRequest.findMany({
+      where: {
+        userId: user.id,
+        OR: [{ publicId: returnPublicId }, { submissionPublicId: returnPublicId }],
+      },
       include: returnInclude,
+      orderBy: { createdAt: 'asc' },
     });
-    if (!row || row.userId !== user.id) throw new AppError(404, 'Return request not found');
-    const statusEvents = await listReturnStatusEvents(row.id);
-    const refundPreview =
-      row.type === 'STANDARD' && row.orderItem
-        ? computeStandardReturnRefundAmount(row.orderItem, row.quantity)
-        : null;
-    return { ...row, statusEvents, refundPreview };
+    if (rows.length === 1) {
+      const key = returnSubmissionKey(rows[0]);
+      if (key && key !== returnPublicId) {
+        rows = await prisma.returnRequest.findMany({
+          where: { userId: user.id, submissionPublicId: key },
+          include: returnInclude,
+          orderBy: { createdAt: 'asc' },
+        });
+      }
+    }
+    if (!rows.length) throw new AppError(404, 'Return request not found');
+    const rowsWithEvents = await Promise.all(
+      rows.map(async (row) => ({
+        ...row,
+        refundPreview: computeRowRefundPreview(row),
+        statusEvents: await listReturnStatusEvents(row.id),
+      }))
+    );
+    return buildReturnSubmission(rowsWithEvents, { includeEvents: true });
   }
 
   async getById(returnPublicId) {
-    const row = await prisma.returnRequest.findUnique({
+    let row = await prisma.returnRequest.findUnique({
       where: { publicId: returnPublicId },
       include: returnInclude,
     });
+    if (!row) {
+      row = await prisma.returnRequest.findFirst({
+        where: { submissionPublicId: returnPublicId },
+        include: returnInclude,
+        orderBy: { createdAt: 'asc' },
+      });
+    }
     if (!row) throw new AppError(404, 'Return request not found');
+    const submissionItems = await prisma.returnRequest.findMany({
+      where: { submissionPublicId: returnSubmissionKey(row) },
+      include: returnInclude,
+      orderBy: { createdAt: 'asc' },
+    });
     const statusEvents = await listReturnStatusEvents(row.id);
     const refundPreview =
       row.type === 'STANDARD' && row.orderItem
         ? computeStandardReturnRefundAmount(row.orderItem, row.quantity)
         : null;
-    return { ...row, statusEvents, refundPreview };
+    return {
+      ...row,
+      submissionId: returnSubmissionKey(row),
+      statusEvents,
+      refundPreview,
+      submissionItems: submissionItems.map((item) =>
+        buildSubmissionChildItem({
+          ...item,
+          refundPreview: computeRowRefundPreview(item),
+        })
+      ),
+      submissionStatus: deriveSubmissionStatus(submissionItems),
+      submissionQuantity: submissionItems.reduce((sum, item) => sum + Math.max(1, Number(item.quantity ?? 1)), 0),
+    };
   }
 
   async trackGuestReturn({ returnId, email }) {
     const normalizedEmail = String(email || '').trim().toLowerCase();
     if (!normalizedEmail) throw new AppError(400, 'Email is required');
-    const row = await prisma.returnRequest.findUnique({
-      where: { publicId: returnId },
+    let rows = await prisma.returnRequest.findMany({
+      where: { OR: [{ publicId: returnId }, { submissionPublicId: returnId }] },
       include: {
         ...returnInclude,
         user: { select: { email: true } },
       },
+      orderBy: { createdAt: 'asc' },
     });
-    if (!row || String(row.user?.email || '').toLowerCase() !== normalizedEmail) {
+    if (rows.length === 1) {
+      const key = returnSubmissionKey(rows[0]);
+      if (key && key !== returnId) {
+        rows = await prisma.returnRequest.findMany({
+          where: { submissionPublicId: key },
+          include: {
+            ...returnInclude,
+            user: { select: { email: true } },
+          },
+          orderBy: { createdAt: 'asc' },
+        });
+      }
+    }
+    if (!rows.length || String(rows[0].user?.email || '').toLowerCase() !== normalizedEmail) {
       throw new AppError(404, 'Return not found');
     }
-    const statusEvents = await listReturnStatusEvents(row.id);
-    return { ...row, statusEvents };
+    const rowsWithEvents = await Promise.all(
+      rows.map(async (row) => ({
+        ...row,
+        refundPreview: computeRowRefundPreview(row),
+        statusEvents: await listReturnStatusEvents(row.id),
+      }))
+    );
+    return buildReturnSubmission(rowsWithEvents, { includeEvents: true });
   }
 
   resolveOrderItemIds(payload, order) {
@@ -209,8 +437,28 @@ export class ReturnsService {
     });
     if (!order || order.userId !== user.id) throw new AppError(404, 'Order not found');
 
-    const itemPublicIds = this.resolveOrderItemIds(payload, order);
+    const refurbItems =
+      payload.type === 'REFURBISHMENT'
+        ? Array.isArray(payload.refurbItems) && payload.refurbItems.length > 0
+          ? payload.refurbItems
+          : [
+              {
+                orderItemId: payload.orderItemIds?.[0] || payload.orderItemId,
+                quantity: payload.quantity ?? 1,
+                questionnaire: payload.questionnaire,
+                photoUrls: payload.photoUrls,
+              },
+            ].filter((item) => item.orderItemId)
+        : [];
+    const itemPublicIds =
+      payload.type === 'REFURBISHMENT'
+        ? refurbItems.map((item) => item.orderItemId)
+        : this.resolveOrderItemIds(payload, order);
     if (itemPublicIds.length === 0) throw new AppError(404, 'Order item not found');
+    if (new Set(itemPublicIds).size !== itemPublicIds.length) {
+      throw new AppError(400, 'Each item can only be selected once per return request');
+    }
+    const refurbItemById = new Map(refurbItems.map((item) => [item.orderItemId, item]));
 
     if (payload.type === 'REFURBISHMENT') {
       const { isRefurbishedEnabled } = await import('../config/feature-flags.js');
@@ -219,15 +467,21 @@ export class ReturnsService {
       }
       const hasAccess = Boolean(user.accessMemberUntil && user.accessMemberUntil > new Date());
       if (!hasAccess) throw new AppError(403, 'ACCESS membership required for refurbishment returns');
-      if (itemPublicIds.length !== 1) {
-        throw new AppError(400, 'One item per refurb return');
+      const windowStart = resolveUsedReturnWindowStart(order);
+      if (!windowStart) {
+        throw new AppError(400, 'Return Used Product becomes available after delivery');
       }
-      const targetItem = order.orderItems.find((i) => i.publicId === itemPublicIds[0]);
-      if (!targetItem) throw new AppError(404, 'Order item not found');
       const windowDays = await getAccessUsedReturnWindowDays();
-      const usedAgeDays = (Date.now() - new Date(order.createdAt).getTime()) / (1000 * 60 * 60 * 24);
+      const usedAgeDays = (Date.now() - windowStart.getTime()) / (1000 * 60 * 60 * 24);
       if (usedAgeDays > windowDays) {
-        throw new AppError(400, `Used return window (${windowDays} days) has passed`);
+        throw new AppError(400, `Used return window (${windowDays} days from delivery) has passed`);
+      }
+      for (const publicId of itemPublicIds) {
+        const targetItem = order.orderItems.find((i) => i.publicId === publicId);
+        if (!targetItem) throw new AppError(404, 'Order item not found');
+        if (targetItem.product?.productType === 'REFURBISHED') {
+          throw new AppError(400, 'Return Used Product is only available for eligible new items');
+        }
       }
     }
 
@@ -248,6 +502,7 @@ export class ReturnsService {
       },
       select: {
         publicId: true,
+        submissionPublicId: true,
         status: true,
         type: true,
         quantity: true,
@@ -275,7 +530,7 @@ export class ReturnsService {
       });
       const requestedQty =
         payload.type === 'REFURBISHMENT'
-          ? 1
+          ? Number(refurbItemById.get(publicId)?.quantity ?? 1)
           : Number(payload.quantities?.[publicId] ?? payload.quantity ?? 1);
       const qty = Math.max(1, Number.isFinite(requestedQty) ? requestedQty : 1);
 
@@ -307,7 +562,7 @@ export class ReturnsService {
           orderId: order.publicId,
           orderNumber: order.orderNumber,
           existingReturns: flatExisting.map((r) => ({
-            returnId: r.publicId,
+            returnId: r.submissionPublicId || r.publicId,
             status: r.status,
             type: r.type,
             orderItemId: r.orderItem?.publicId,
@@ -319,36 +574,41 @@ export class ReturnsService {
       );
     }
 
-    let eligibilityEval = null;
+    const eligibilityByItemId = new Map();
     if (payload.type === 'REFURBISHMENT') {
-      eligibilityEval = evaluateRefurbQuestionnaire(payload.questionnaire, payload.photoUrls);
+      for (const item of refurbItems) {
+        eligibilityByItemId.set(item.orderItemId, evaluateRefurbQuestionnaire(item.questionnaire, item.photoUrls));
+      }
     }
 
     const created = [];
+    let submissionPublicId = null;
     for (const publicId of pendingIds) {
       const orderItem = order.orderItems.find((i) => i.publicId === publicId);
       if (!orderItem) throw new AppError(404, 'Order item not found');
       if (payload.type === 'STANDARD' && orderItem.product?.productType === 'REFURBISHED') {
         throw new AppError(400, 'Standard returns are only available for eligible new items');
       }
+      const refurbItem = refurbItemById.get(publicId);
+      const eligibilityEval = payload.type === 'REFURBISHMENT' ? eligibilityByItemId.get(publicId) : null;
 
       const initialStatus =
-        payload.type === 'REFURBISHMENT'
+        payload.type === 'REFURBISHMENT' && eligibilityEval
           ? initialReturnStatusForDecision(eligibilityEval.decision)
           : 'REQUESTED';
 
       // Partial returns: clamp the requested quantity to what was purchased.
-      // Refurb returns are always one unit at a time.
       const purchasedQty = Math.max(1, Number(orderItem.quantity || 1));
       const requestedQty =
         payload.type === 'REFURBISHMENT'
-          ? 1
+          ? Number(refurbItem?.quantity ?? 1)
           : Number(payload.quantities?.[publicId] ?? payload.quantity ?? 1);
       const quantity = Math.min(purchasedQty, Math.max(1, Number.isFinite(requestedQty) ? requestedQty : 1));
 
       const row = await prisma.$transaction(async (tx) => {
         const rr = await tx.returnRequest.create({
           data: {
+            ...(submissionPublicId ? { submissionPublicId } : {}),
             userId: user.id,
             orderId: order.id,
             orderItemId: orderItem.id,
@@ -373,8 +633,8 @@ export class ReturnsService {
           await tx.returnEligibilityQuestionnaire.create({
             data: {
               returnRequestId: rr.id,
-              answersJson: payload.questionnaire,
-              photoUrlsJson: payload.photoUrls ?? {},
+              answersJson: refurbItem?.questionnaire,
+              photoUrlsJson: refurbItem?.photoUrls ?? {},
               autoDecision: eligibilityEval.decision,
               autoDecisionReasons: eligibilityEval.reasons,
             },
@@ -387,34 +647,39 @@ export class ReturnsService {
         });
       });
 
+      if (!submissionPublicId) submissionPublicId = row.submissionPublicId || row.publicId;
       created.push(row);
+    }
+
+    const primaryRow = created[0];
+    if (primaryRow) {
       try {
-        if (row.status === 'ELIGIBILITY_REVIEW') {
-          notifyEligibilityReview(row);
+        if (created.some((row) => row.status === 'ELIGIBILITY_REVIEW')) {
+          notifyEligibilityReview(primaryRow);
         } else {
-          notifyReturnRequest(row);
+          notifyReturnRequest(primaryRow);
         }
       } catch (err) {
-        console.error('[returns] admin notification failed', row.publicId, err);
+        console.error('[returns] admin notification failed', primaryRow.publicId, err);
       }
-      if (row.user?.email) {
+      if (primaryRow.user?.email) {
         try {
           await emailService.sendTemplate({
-            to: row.user.email,
+            to: primaryRow.user.email,
             template: 'return-requested',
             context: {
-              name: [row.user.firstName, row.user.lastName].filter(Boolean).join(' '),
+              name: [primaryRow.user.firstName, primaryRow.user.lastName].filter(Boolean).join(' '),
               returnType: payload.type === 'REFURBISHMENT' ? 'Used product return' : 'Standard return',
-              actionUrl: `${config.frontend.customerUrl}/dashboard/returns/${row.publicId}`,
+              actionUrl: `${config.frontend.customerUrl}/dashboard/returns/${submissionPublicId || primaryRow.publicId}`,
             },
           });
         } catch (err) {
-          console.error('[returns] customer return-requested email failed', row.publicId, err);
+          console.error('[returns] customer return-requested email failed', primaryRow.publicId, err);
         }
       }
     }
 
-    return created.length === 1 ? created[0] : created;
+    return buildReturnSubmission(created);
   }
 
   /**
@@ -514,7 +779,7 @@ export class ReturnsService {
       context: {
         name: [rr.user.firstName, rr.user.lastName].filter(Boolean).join(' '),
         status: nextStatus,
-        actionUrl: `${config.frontend.customerUrl}/dashboard/returns/${returnPublicId}`,
+        actionUrl: `${config.frontend.customerUrl}/dashboard/returns/${rr.submissionPublicId || returnPublicId}`,
       },
     });
 
@@ -997,7 +1262,7 @@ export class ReturnsService {
           context: {
             name: [rr.user.firstName, rr.user.lastName].filter(Boolean).join(' '),
             status,
-            actionUrl: `${config.frontend.customerUrl}/dashboard/returns/${returnPublicId}`,
+            actionUrl: `${config.frontend.customerUrl}/dashboard/returns/${rr.submissionPublicId || returnPublicId}`,
           },
         });
         return this.getById(returnPublicId);
@@ -1018,7 +1283,7 @@ export class ReturnsService {
         name: [rr.user.firstName, rr.user.lastName].filter(Boolean).join(' '),
         status,
         note: emailNote,
-        actionUrl: `${config.frontend.customerUrl}/dashboard/returns/${returnPublicId}`,
+        actionUrl: `${config.frontend.customerUrl}/dashboard/returns/${rr.submissionPublicId || returnPublicId}`,
       },
     });
 

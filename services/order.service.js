@@ -65,6 +65,7 @@ const orderItemAdminInclude = {
 const orderItemCustomerInclude = {
   product: {
     select: {
+      id: true,
       publicId: true,
       name: true,
       slug: true,
@@ -79,6 +80,7 @@ const orderItemCustomerInclude = {
   },
   productVariant: {
     select: {
+      id: true,
       publicId: true,
       sku: true,
       combination: true,
@@ -530,7 +532,24 @@ export class OrderService {
         where,
         skip,
         take: limit,
-        include: { orderItems: { include: orderItemCustomerInclude } },
+        include: {
+          orderItems: {
+            include: {
+              ...orderItemCustomerInclude,
+              returnRequests: {
+                select: {
+                  publicId: true,
+                  submissionPublicId: true,
+                  status: true,
+                  type: true,
+                  quantity: true,
+                  createdAt: true,
+                },
+                orderBy: { createdAt: 'desc' },
+              },
+            },
+          },
+        },
         orderBy: { createdAt: 'desc' },
       }),
       prisma.order.count({ where }),
@@ -614,6 +633,7 @@ export class OrderService {
               returnRequests: {
                 select: {
                   publicId: true,
+                  submissionPublicId: true,
                   status: true,
                   type: true,
                   quantity: true,
@@ -713,7 +733,8 @@ export class OrderService {
       totalAmount: Number(order.totalAmount),
       shippingCost: Number(order.shippingCost || 0),
       trackingNumber: order.trackingNumber,
-      trackingCarrier: order.trackingCarrier,
+      shippingCarrier: order.shippingCarrier,
+      trackingCarrier: order.shippingCarrier,
       placedAsGuest: Boolean(order.placedAsGuest),
       items: order.orderItems.map((item) => ({
         id: item.id,
@@ -1794,10 +1815,10 @@ export class OrderService {
     ]);
     if (!order) throw new AppError(404, 'Order not found');
     if (!user || order.userId !== user.id) throw new AppError(403, 'Unauthorized to cancel this order');
-    if (['SHIPPED', 'DELIVERED', 'RETURNED', 'REFUNDED'].includes(order.status)) {
-      throw new AppError(400, 'Order can no longer be canceled');
-    }
     if (order.status === 'CANCELLED') return order;
+    if (order.status !== 'PENDING' || order.paymentStatus !== 'UNPAID') {
+      throw new AppError(400, 'This order can no longer be cancelled online.');
+    }
     if (order.cancellationReviewStatus === 'PENDING') {
       return prisma.order.findUnique({
         where: { id: order.id },
