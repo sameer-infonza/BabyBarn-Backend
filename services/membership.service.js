@@ -351,6 +351,8 @@ export async function getAccessSavingsForUser(userPublicId) {
   if (!hasAccess) {
     return {
       savingsTotal: 0,
+      memberPricingSavings: 0,
+      totalOrderValueInCycle: 0,
       orderCount: 0,
       channels: [],
       storeCreditBalance,
@@ -359,6 +361,22 @@ export async function getAccessSavingsForUser(userPublicId) {
       recentCredits,
     };
   }
+
+  const membershipDays = parseInt(process.env.ACCESS_MEMBERSHIP_DAYS || '365', 10);
+  const cycleStart = new Date(user.accessMemberUntil);
+  cycleStart.setUTCDate(cycleStart.getUTCDate() - membershipDays);
+
+  const paidOrders = await prisma.order.findMany({
+    where: {
+      userId: user.id,
+      paymentStatus: 'PAID',
+      status: { notIn: ['CANCELLED'] },
+      createdAt: { gte: cycleStart },
+    },
+    select: { totalAmount: true },
+  });
+  const totalOrderValueInCycle =
+    Math.round(paidOrders.reduce((sum, order) => sum + Number(order.totalAmount), 0) * 100) / 100;
 
   const items = await prisma.orderItem.findMany({
     where: {
@@ -402,6 +420,7 @@ export async function getAccessSavingsForUser(userPublicId) {
   return {
     savingsTotal: Math.round((savingsTotal + storeCreditEarned) * 100) / 100,
     memberPricingSavings: memberPricingSavingsRounded,
+    totalOrderValueInCycle,
     orderCount: orderIds.size,
     channels: [
       {

@@ -4,6 +4,101 @@
 
 /** @typedef {{ referenceType: string; referenceId: string; actorUserId?: number | null; note?: string | null }} LedgerContext */
 
+function referenceActorKey(referenceType, referenceId) {
+  return `${referenceType}:${referenceId}`;
+}
+
+function serializeLedgerActor(user) {
+  return {
+    id: user.publicId,
+    email: user.email,
+    firstName: user.firstName,
+    lastName: user.lastName,
+    role: user.role?.name ?? null,
+  };
+}
+
+/** Resolve customer/admin actors for ledger rows missing actorUserId (legacy order/checkout events). */
+async function resolveReferenceActors(prisma, rows) {
+  const refToUserId = new Map();
+  const orderPublicIds = new Set();
+  const intentReferenceIds = new Set();
+
+  for (const row of rows) {
+    if (row.actorUserId) continue;
+    const { referenceType, referenceId } = row;
+    if (!referenceType || !referenceId) continue;
+
+    if (referenceType === 'order') {
+      if (referenceId.startsWith('pending:')) {
+        const userId = Number.parseInt(referenceId.slice('pending:'.length), 10);
+        if (!Number.isNaN(userId)) {
+          refToUserId.set(referenceActorKey(referenceType, referenceId), userId);
+        }
+      } else {
+        orderPublicIds.add(referenceId);
+      }
+      continue;
+    }
+
+    if (referenceType === 'checkout_intent') {
+      intentReferenceIds.add(referenceId);
+    }
+  }
+
+  if (orderPublicIds.size > 0) {
+    const orders = await prisma.order.findMany({
+      where: { publicId: { in: [...orderPublicIds] } },
+      select: { publicId: true, userId: true },
+    });
+    for (const order of orders) {
+      if (order.userId) {
+        refToUserId.set(referenceActorKey('order', order.publicId), order.userId);
+      }
+    }
+  }
+
+  if (intentReferenceIds.size > 0) {
+    const refs = [...intentReferenceIds];
+    const intents = await prisma.checkoutIntent.findMany({
+      where: {
+        OR: [{ publicId: { in: refs } }, { checkoutSignature: { in: refs } }],
+      },
+      select: { publicId: true, checkoutSignature: true, userId: true },
+    });
+    for (const intent of intents) {
+      if (!intent.userId) continue;
+      refToUserId.set(referenceActorKey('checkout_intent', intent.publicId), intent.userId);
+      if (intent.checkoutSignature) {
+        refToUserId.set(referenceActorKey('checkout_intent', intent.checkoutSignature), intent.userId);
+      }
+    }
+  }
+
+  const userIds = [...new Set([...refToUserId.values()].filter(Boolean))];
+  if (!userIds.length) return new Map();
+
+  const users = await prisma.user.findMany({
+    where: { id: { in: userIds } },
+    select: {
+      id: true,
+      publicId: true,
+      email: true,
+      firstName: true,
+      lastName: true,
+      role: { select: { name: true } },
+    },
+  });
+  const userById = new Map(users.map((user) => [user.id, user]));
+
+  const refToActor = new Map();
+  for (const [key, userId] of refToUserId) {
+    const user = userById.get(userId);
+    if (user) refToActor.set(key, serializeLedgerActor(user));
+  }
+  return refToActor;
+}
+
 export async function writeInventoryLedger(tx, {
   productId,
   productVariantId = null,
@@ -96,12 +191,17 @@ export async function listLedgerHistory({
         })
       : [];
   const actorById = new Map(actors.map((actor) => [actor.id, actor]));
+  const refActorByKey = await resolveReferenceActors(prisma, rows);
 
   const { combinationLabel } = await import('./inventory.service.js');
 
   return {
     entries: rows.map((r) => {
-      const actor = r.actorUserId ? actorById.get(r.actorUserId) : null;
+      const actorRow = r.actorUserId ? actorById.get(r.actorUserId) : null;
+      const actor =
+        actorRow != null
+          ? serializeLedgerActor(actorRow)
+          : refActorByKey.get(referenceActorKey(r.referenceType, r.referenceId)) ?? null;
       return {
         id: r.publicId,
         eventType: r.eventType,
@@ -122,15 +222,7 @@ export async function listLedgerHistory({
               combinationLabel: combinationLabel(r.productVariant.combination),
             }
           : null,
-        actor: actor
-          ? {
-              id: actor.publicId,
-              email: actor.email,
-              firstName: actor.firstName,
-              lastName: actor.lastName,
-              role: actor.role?.name ?? null,
-            }
-          : null,
+        actor,
       };
     }),
     pagination: {

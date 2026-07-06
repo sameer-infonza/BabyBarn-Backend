@@ -154,6 +154,27 @@ export class WalletService {
       },
     });
   }
+
+  /** Restore store credit that was redeemed on a paid order being cancelled. */
+  async refundRedeemedCreditInTx(tx, userId, amount, orderPublicId) {
+    const capped = Math.round(Number(amount) * 100) / 100;
+    if (capped <= 0) return;
+
+    const wallet = await ensureWallet(tx, userId);
+    await tx.storeCreditWallet.update({
+      where: { id: wallet.id },
+      data: { balance: { increment: capped } },
+    });
+    await tx.storeCreditTransaction.create({
+      data: {
+        walletId: wallet.id,
+        type: 'ADJUSTED',
+        amount: capped,
+        orderPublicId,
+        note: `Restored after order ${orderPublicId} cancellation`,
+      },
+    });
+  }
 }
 
 export const walletService = new WalletService();

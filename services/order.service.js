@@ -22,7 +22,10 @@ import {
 import { walletService } from './wallet.service.js';
 import { shippingService } from './shipping.service.js';
 import { writeAdminAudit } from './audit.service.js';
-import { notifyCancellationReview } from './admin-notification.service.js';
+import {
+  canCustomerCancelOrder,
+  customerCancelUnavailableReason,
+} from '../lib/customer-order-cancellation.js';
 import * as orderDocuments from './pdf/order-documents.service.js';
 import { emailService } from './email.service.js';
 import { config } from '../config/env.js';
@@ -996,6 +999,7 @@ export class OrderService {
         await reserveOrderLineStock(tx, product, variantDbId, item.quantity, {
           referenceType: 'order',
           referenceId: `pending:${user.id}`,
+          actorUserId: user.id,
         });
       }
 
@@ -1101,6 +1105,7 @@ export class OrderService {
         await releaseOrderLineStock(tx, product, line.productVariantId, line.quantity, {
           referenceType: 'order',
           referenceId: orderPublicId,
+          actorUserId: order.userId,
         });
       }
 
@@ -1140,6 +1145,7 @@ export class OrderService {
         await commitOrderLineStock(tx, product, line.productVariantId, line.quantity, {
           referenceType: 'order',
           referenceId: orderPublicId,
+          actorUserId: order.userId,
         });
       }
 
@@ -1808,53 +1814,169 @@ export class OrderService {
     return updated;
   }
 
-  async requestCancellationByUser(orderPublicId, userPublicId, reason) {
+  async resolveStripePaymentIntentId(order) {
+    const { getStripe } = await import('./payment.service.js');
+    const stripe = getStripe();
+    if (!stripe) return { stripe: null, paymentIntentId: null };
+
+    let paymentIntentId = order.stripePaymentIntentId;
+    if (!paymentIntentId && order.stripeCheckoutSessionId) {
+      const ref = order.stripeCheckoutSessionId;
+      if (ref.startsWith('pi_')) {
+        paymentIntentId = ref;
+      } else if (ref.startsWith('cs_')) {
+        const session = await stripe.checkout.sessions.retrieve(ref);
+        paymentIntentId =
+          typeof session.payment_intent === 'string' ? session.payment_intent : session.payment_intent?.id;
+      }
+    }
+    return { stripe, paymentIntentId };
+  }
+
+  async finalizeOrderCancellation(order, { reason = null, actorUserId = null, reviewStatus = 'NONE' } = {}) {
+    const orderPublicId = order.publicId;
+    const isPaid = order.paymentStatus === 'PAID';
+    let stripeRefundId = null;
+    let refundAmountUsd = 0;
+
+    if (isPaid) {
+      const { stripe, paymentIntentId } = await this.resolveStripePaymentIntentId(order);
+      if (!stripe) {
+        throw new AppError(503, 'Stripe is not configured', 'STRIPE_NOT_CONFIGURED');
+      }
+      if (!paymentIntentId) {
+        throw new AppError(400, 'No Stripe payment reference found for this order', 'NO_PAYMENT_REFERENCE');
+      }
+
+      refundAmountUsd = Number(order.totalAmount);
+      const amountCents = Math.round(refundAmountUsd * 100);
+      if (amountCents > 0) {
+        const refund = await stripe.refunds.create(
+          {
+            payment_intent: paymentIntentId,
+            amount: amountCents,
+            metadata: { orderPublicId, source: 'customer_cancel' },
+          },
+          { idempotencyKey: `cancel-${orderPublicId}-${amountCents}` }
+        );
+        stripeRefundId = refund.id;
+      }
+    } else {
+      await this.releasePendingOrderResources(orderPublicId);
+    }
+
+    const updated = await prisma.$transaction(async (tx) => {
+      const withItems = await tx.order.findUnique({
+        where: { id: order.id },
+        include: { orderItems: true, user: userForOrderList },
+      });
+      if (!withItems) throw new AppError(404, 'Order not found');
+
+      if (isPaid) {
+        const { restockPaidOrderInTx } = await import('./inventory-restock.service.js');
+        await restockPaidOrderInTx(tx, withItems, {
+          referenceType: 'order',
+          referenceId: orderPublicId,
+          eventType: 'CANCEL_RESTORE',
+          note: 'Customer order cancellation',
+          actorUserId,
+        });
+        if (withItems.storeCreditApplied > 0) {
+          await walletService.refundRedeemedCreditInTx(
+            tx,
+            withItems.userId,
+            withItems.storeCreditApplied,
+            orderPublicId
+          );
+        }
+      }
+
+      return tx.order.update({
+        where: { id: order.id },
+        data: {
+          status: 'CANCELLED',
+          paymentStatus: isPaid ? 'REFUNDED' : order.paymentStatus,
+          fulfillmentStatus: null,
+          cancellationReviewStatus: reviewStatus,
+          cancellationRequestedAt: new Date(),
+          cancellationRequestReason: reason?.trim() || null,
+          cancellationReviewNote: null,
+        },
+        include: {
+          orderItems: { include: orderItemCustomerInclude },
+          user: userForOrderList,
+        },
+      });
+    });
+
+    try {
+      const customer = updated.user;
+      if (customer?.email) {
+        const name = [customer.firstName, customer.lastName].filter(Boolean).join(' ');
+        await emailService.sendTemplate({
+          to: customer.email,
+          template: 'order-cancelled',
+          context: {
+            name,
+            orderId: order.orderNumber || orderPublicId,
+            reason: isPaid
+              ? 'A refund has been initiated and may take 5–10 business days to appear.'
+              : null,
+            actionUrl: `${config.frontend.customerUrl}/dashboard/orders/${orderPublicId}`,
+          },
+        });
+      }
+    } catch (emailErr) {
+      console.error('[order] cancellation email failed', orderPublicId, emailErr);
+    }
+
+    return { order: updated, isPaid, refundAmountUsd, stripeRefundId };
+  }
+
+  async cancelOrderByUser(orderPublicId, userPublicId, reason) {
     const [order, user] = await Promise.all([
-      prisma.order.findUnique({ where: { publicId: orderPublicId } }),
+      prisma.order.findUnique({
+        where: { publicId: orderPublicId },
+        include: { orderItems: true, user: userForOrderList },
+      }),
       prisma.user.findUnique({ where: { publicId: userPublicId }, select: { id: true } }),
     ]);
     if (!order) throw new AppError(404, 'Order not found');
     if (!user || order.userId !== user.id) throw new AppError(403, 'Unauthorized to cancel this order');
-    if (order.status === 'CANCELLED') return order;
-    if (order.status !== 'PENDING' || order.paymentStatus !== 'UNPAID') {
-      throw new AppError(400, 'This order can no longer be cancelled online.');
+    if (order.status === 'CANCELLED') {
+      return { order, isPaid: order.paymentStatus === 'PAID', refundAmountUsd: 0, stripeRefundId: null };
     }
-    if (order.cancellationReviewStatus === 'PENDING') {
-      return prisma.order.findUnique({
-        where: { id: order.id },
-        include: { orderItems: { include: { product: true } } },
-      });
+    if (!canCustomerCancelOrder(order)) {
+      throw new AppError(400, customerCancelUnavailableReason(order));
     }
-    const updated = await prisma.order.update({
-      where: { id: order.id },
-      data: {
-        cancellationReviewStatus: 'PENDING',
-        cancellationRequestedAt: new Date(),
-        cancellationRequestReason: reason?.trim() || null,
-        cancellationReviewNote: null,
-      },
-      include: { orderItems: { include: { product: true } } },
+
+    return this.finalizeOrderCancellation(order, {
+      reason,
+      actorUserId: user.id,
+      reviewStatus: 'NONE',
     });
-    notifyCancellationReview(updated);
-    return updated;
+  }
+
+  /** @deprecated Use cancelOrderByUser — kept as alias for route handler compatibility. */
+  async requestCancellationByUser(orderPublicId, userPublicId, reason) {
+    const result = await this.cancelOrderByUser(orderPublicId, userPublicId, reason);
+    return result.order;
   }
 
   async reviewCancellationOrder(orderPublicId, { decision, note }, actor) {
-    const order = await prisma.order.findUnique({ where: { publicId: orderPublicId } });
+    const order = await prisma.order.findUnique({
+      where: { publicId: orderPublicId },
+      include: { orderItems: true, user: userForOrderList },
+    });
     if (!order) throw new AppError(404, 'Order not found');
     if (order.cancellationReviewStatus !== 'PENDING') {
       throw new AppError(400, 'No pending cancellation request for this order');
     }
     if (decision === 'approve') {
-      const updated = await prisma.order.update({
-        where: { id: order.id },
-        data: {
-          status: 'CANCELLED',
-          cancellationReviewStatus: 'APPROVED',
-          cancellationReviewNote: note?.trim() || null,
-          ...(order.paymentStatus === 'PAID' ? { paymentStatus: 'FAILED' } : {}),
-        },
-        include: { orderItems: { include: { product: true } }, user: userForOrderList },
+      const { order: updated } = await this.finalizeOrderCancellation(order, {
+        reason: order.cancellationRequestReason,
+        actorUserId: actor?.id ?? null,
+        reviewStatus: 'APPROVED',
       });
       await writeAdminAudit({
         actorId: actor?.id,
@@ -1864,6 +1986,13 @@ export class OrderService {
         entityId: orderPublicId,
         meta: { note: note?.trim() || null },
       });
+      if (note?.trim()) {
+        return prisma.order.update({
+          where: { id: order.id },
+          data: { cancellationReviewNote: note.trim() },
+          include: { orderItems: { include: { product: true } }, user: userForOrderList },
+        });
+      }
       return updated;
     }
     const updated = await prisma.order.update({

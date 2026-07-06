@@ -402,6 +402,7 @@ async function markOrderRefundedBySessionId(sessionId, source) {
         referenceId: order.publicId,
         eventType: 'REFUND_RESTORE',
         note: `Stripe ${source}`,
+        actorUserId: order.userId,
       });
       await tx.order.update({
         where: { id: order.id },

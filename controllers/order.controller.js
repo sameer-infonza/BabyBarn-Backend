@@ -251,11 +251,14 @@ export class OrderController {
   async cancelMyOrder(req, res) {
     const { id } = req.params;
     const body = await validate(cancelOrderRequestSchema, req.body ?? {});
-    const order = await orderService.requestCancellationByUser(id, req.user.id, body.reason);
+    const result = await orderService.cancelOrderByUser(id, req.user.id, body.reason);
+    const message = result.isPaid
+      ? 'Your order has been cancelled. A refund has been initiated and may take 5–10 business days to appear.'
+      : 'Your order has been cancelled.';
     res.status(200).json({
       success: true,
-      message: 'Cancellation request submitted. Our team will review it shortly.',
-      data: toPublicJson(order),
+      message,
+      data: toPublicJson(result.order),
     });
   }
 

@@ -134,6 +134,7 @@ export class CheckoutIntentService {
       await reserveOrderLineStock(tx, product, line.productVariantId, line.quantity, {
         referenceType: 'checkout_intent',
         referenceId: intent.publicId,
+        actorUserId: intent.userId,
       });
     }
   }
@@ -155,6 +156,7 @@ export class CheckoutIntentService {
         await releaseOrderLineStock(tx, product, line.productVariantId, line.quantity, {
           referenceType: 'checkout_intent',
           referenceId: intentPublicId,
+          actorUserId: intent.userId,
         });
       }
 
@@ -313,6 +315,7 @@ export class CheckoutIntentService {
         await reserveOrderLineStock(tx, product, variantDbId, item.quantity, {
           referenceType: 'checkout_intent',
           referenceId: signature,
+          actorUserId: user.id,
         });
       }
 
@@ -563,6 +566,7 @@ export class CheckoutIntentService {
         await commitOrderLineStock(tx, product, line.productVariantId, line.quantity, {
           referenceType: 'order',
           referenceId: created.publicId,
+          actorUserId: intent.userId,
         });
       }
 
