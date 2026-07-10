@@ -62,3 +62,33 @@ test('blocks legacy pending review', () => {
     false
   );
 });
+
+test('allows partial cancel when some lines remain active', () => {
+  assert.equal(
+    canCustomerCancelOrder({
+      status: 'PROCESSING',
+      paymentStatus: 'PARTIALLY_REFUNDED',
+      fulfillmentStatus: 'NEW_ORDER',
+      orderItems: [
+        { publicId: 'a', cancelledAt: new Date() },
+        { publicId: 'b', cancelledAt: null },
+      ],
+    }),
+    true
+  );
+});
+
+test('blocks when every line is already cancelled', () => {
+  assert.equal(
+    canCustomerCancelOrder({
+      status: 'PROCESSING',
+      paymentStatus: 'PARTIALLY_REFUNDED',
+      fulfillmentStatus: 'NEW_ORDER',
+      orderItems: [
+        { publicId: 'a', cancelledAt: new Date() },
+        { publicId: 'b', cancelledAt: new Date() },
+      ],
+    }),
+    false
+  );
+});

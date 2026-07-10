@@ -122,5 +122,19 @@ router.patch(
   returnsOrInspection,
   (req, res, next) => returnsController.updateStatus(req, res).catch(next)
 );
+router.post(
+  '/:id/refund',
+  authenticate,
+  authorize('ADMIN', 'ADMIN_TEAM'),
+  returnsOrInspection,
+  (req, res, next) => returnsController.processRefund(req, res).catch(next)
+);
+router.post(
+  '/:id/restock',
+  authenticate,
+  authorize('ADMIN', 'ADMIN_TEAM'),
+  returnsOrInspection,
+  (req, res, next) => returnsController.restockReturn(req, res).catch(next)
+);
 
 export default router;

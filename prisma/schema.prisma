@@ -25,6 +25,7 @@ enum OrderPaymentStatus {
   PAID
   FAILED
   REFUNDED
+  PARTIALLY_REFUNDED
 }
 
 // Warehouse / carrier pipeline (orthogonal to OrderStatus; do not remove OrderStatus values).
@@ -330,6 +331,8 @@ model Product {
   name        String
   slug        String   @unique
   description String?
+  /// Short blurb shown near PDP variant filters (refurbished listings).
+  shortDescription     String?
   price       Float
   stock         Int @default(0)
   reservedStock Int @default(0)
@@ -628,6 +631,9 @@ model OrderItem {
   pickedQuantity  Int      @default(0)
   pickedAt        DateTime?
   pickedByUserId  Int?
+  /// Set when the customer (or admin) cancels this line before shipment.
+  cancelledAt          DateTime?
+  cancellationReason   String?
 
   order   Order   @relation(fields: [orderId], references: [id], onDelete: Cascade)
   product Product @relation(fields: [productId], references: [id], onDelete: Cascade)
@@ -642,12 +648,15 @@ model OrderItem {
   @@index([productId])
   @@index([productVariantId])
   @@index([pickedByUserId])
+  @@index([cancelledAt])
 }
 
 model ReturnRequest {
   id Int @id @default(autoincrement())
   publicId String @unique @default(cuid())
   submissionPublicId String @default(cuid())
+  /// Customer/admin-facing reference, e.g. SRT-000042 / RRT-000042 (not the API publicId).
+  returnNumber String? @unique
   userId Int
   orderId Int
   orderItemId Int?
@@ -662,6 +671,10 @@ model ReturnRequest {
   refundAmount Float?
   stripeRefundId String?
   refundedAt DateTime?
+  /// e.g. "Visa ····4242" resolved from Stripe at refund time
+  refundPaymentMethodLabel String?
+  restockedAt DateTime?
+  restockedQuantity Int?
   manualCarrier String?
   manualTrackingNumber String?
   manualShippedAt DateTime?
@@ -691,6 +704,7 @@ model ReturnRequest {
   @@index([orderId])
   @@index([status])
   @@index([submissionPublicId])
+  @@index([returnNumber])
 }
 
 model ReturnStatusEvent {

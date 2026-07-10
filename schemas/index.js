@@ -171,6 +171,7 @@ const createProductBodySchema = z.object({
   name: z.string().min(1, 'Product name is required'),
   slug: z.string().min(1).optional(),
   description: z.union([z.string(), z.null()]).optional(),
+  shortDescription: z.union([z.string(), z.null()]).optional(),
   price: z.number().min(0, 'Price must be positive'),
   stock: z.number().int().min(0, 'Stock must be non-negative'),
   categoryId: z.string().min(1).optional(),
@@ -212,8 +213,9 @@ export const createProductSchema = createProductBodySchema.superRefine((data, ct
 export const refurbFromSourceSchema = z.object({
   sourceProductId: z.string().min(1, 'Source product is required'),
   sourceVariantId: z.string().min(1).optional(),
-  initialStock: z.number().int().min(1).max(99).optional().default(1),
+  initialStock: z.number().int().min(0).max(99).optional().default(1),
   conditionGrade: z.enum(['A', 'B', 'C']).nullable().optional(),
+  createAsDraft: z.boolean().optional().default(false),
 });
 
 export const refurbStandaloneCreateSchema = createProductBodySchema
@@ -329,7 +331,31 @@ export const orderStatusUpdateSchema = z.object({
 
 export const cancelOrderRequestSchema = z.object({
   reason: z.string().max(500).optional().nullable(),
+  /** When set, only these order line publicIds are cancelled (partial cancel). */
+  itemIds: z.array(z.string().min(1)).max(100).optional(),
 });
+
+/** Public guest cancel — same rules as authenticated cancel, verified by tracking token or order+email. */
+export const guestCancelOrderSchema = z
+  .object({
+    token: z.string().min(1).optional(),
+    orderNumber: z.string().min(1).optional(),
+    email: z.string().email().optional(),
+    reason: z.string().max(500).optional().nullable(),
+    itemIds: z
+      .preprocess(
+        (val) =>
+          Array.isArray(val)
+            ? val.filter((id) => typeof id === 'string' && String(id).trim().length > 0)
+            : val,
+        z.array(z.string().min(1)).max(100).optional()
+      )
+      .optional(),
+  })
+  .refine((body) => Boolean(body.token) || (Boolean(body.orderNumber) && Boolean(body.email)), {
+    message: 'Provide a tracking token or both order number and email',
+    path: ['orderNumber'],
+  });
 
 export const orderCancellationReviewSchema = z.object({
   decision: z.enum(['approve', 'reject']),
@@ -591,7 +617,13 @@ export const guestReturnCreateSchema = z
     orderNumber: z.string().min(1).optional(),
     email: z.string().email().optional(),
     orderItemId: z.string().min(1).optional(),
-    orderItemIds: z.array(z.string().min(1)).min(1).max(50).optional(),
+    orderItemIds: z.preprocess(
+      (val) =>
+        Array.isArray(val)
+          ? val.filter((id) => typeof id === 'string' && String(id).trim().length > 0)
+          : val,
+      z.array(z.string().min(1)).min(1).max(50).optional()
+    ),
     reason: z.string().min(3).max(1000),
   })
   .refine((body) => Boolean(body.token) || (Boolean(body.orderNumber) && Boolean(body.email)), {

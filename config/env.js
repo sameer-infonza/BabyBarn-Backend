@@ -89,7 +89,8 @@ export const config = {
   /** Unpaid checkout orders older than this are expired and resources released (minutes). */
   pendingOrderTtlMinutes: parseInt(process.env.PENDING_ORDER_TTL_MINUTES || '60', 10),
   /** When true, approving a STANDARD return restocks one unit to the original SKU. */
-  standardReturnRestock: process.env.STANDARD_RETURN_RESTOCK !== 'false',
+  /** Blind auto-restock on approve is off; admins restock via pick UI (plan 41). */
+  standardReturnRestock: process.env.STANDARD_RETURN_RESTOCK === 'true',
   salesTaxRate: Number(process.env.SALES_TAX_RATE ?? 0.06),
   /** Days before ACCESS expiry to send the pre-expiry reminder email (comma-separated for multiple, e.g. "14,0"). */
   accessRenewalReminderDays: (process.env.ACCESS_RENEWAL_REMINDER_DAYS || '14,0')

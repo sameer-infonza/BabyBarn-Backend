@@ -30,13 +30,17 @@ Once any of these happen, the **Cancel Order** action is hidden and `PATCH /api/
 ```
 PATCH /api/orders/:id/cancel
 Authorization: Bearer <customer JWT>
-Body: { "reason": "optional string, max 500 chars" }
+Body: {
+  "reason": "optional string, max 500 chars",
+  "itemIds": ["optional order line publicIds — omit to cancel the whole order"]
+}
 ```
 
 ### Success responses
 
-- **Unpaid order:** order `status` → `CANCELLED`; reserved inventory and store-credit holds are released.
-- **Paid order (pre-warehouse):** Stripe refund for the order total; inventory restocked; redeemed store credit restored to the wallet; order `status` → `CANCELLED`, `paymentStatus` → `REFUNDED`.
+- **Unpaid order (full):** order `status` → `CANCELLED`; reserved inventory and store-credit holds are released.
+- **Paid order (full, pre-warehouse):** Stripe refund for the order total; inventory restocked; redeemed store credit restored; order `status` → `CANCELLED`, `paymentStatus` → `REFUNDED`.
+- **Partial (selected `itemIds`):** only those lines are marked cancelled; inventory restored for those lines; Stripe/store-credit refund is proportional to cancelled merchandise. Remaining lines stay active; paid orders become `paymentStatus = PARTIALLY_REFUNDED` until the last active line is cancelled.
 
 ### Error responses
 

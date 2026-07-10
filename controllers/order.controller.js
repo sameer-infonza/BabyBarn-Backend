@@ -10,6 +10,7 @@ import {
   adminGenerateLabelSchema,
   adminBulkUpsLabelsSchema,
   cancelOrderRequestSchema,
+  guestCancelOrderSchema,
   orderCancellationReviewSchema,
   orderFulfillmentActionSchema,
   orderBulkFulfillmentSchema,
@@ -70,6 +71,24 @@ export class OrderController {
     const email = req.query.email ? String(req.query.email) : undefined;
     const data = await orderService.trackPublicOrder({ token, orderNumber, email });
     res.status(200).json({ success: true, data: toPublicJson(data) });
+  }
+
+  async cancelGuestOrder(req, res) {
+    const body = await validate(guestCancelOrderSchema, req.body ?? {});
+    const result = await orderService.cancelOrderByGuest(body);
+    const partial = Boolean(result.partial);
+    const message = result.isPaid
+      ? partial
+        ? 'Selected items have been cancelled. A partial refund has been initiated and may take 5–10 business days to appear.'
+        : 'Your order has been cancelled. A refund has been initiated and may take 5–10 business days to appear.'
+      : partial
+        ? 'Selected items have been cancelled.'
+        : 'Your order has been cancelled.';
+    res.status(200).json({
+      success: true,
+      message,
+      data: toPublicJson(result.order),
+    });
   }
 
   async createOrder(req, res) {
@@ -251,10 +270,18 @@ export class OrderController {
   async cancelMyOrder(req, res) {
     const { id } = req.params;
     const body = await validate(cancelOrderRequestSchema, req.body ?? {});
-    const result = await orderService.cancelOrderByUser(id, req.user.id, body.reason);
+    const result = await orderService.cancelOrderByUser(id, req.user.id, {
+      reason: body.reason,
+      itemIds: body.itemIds,
+    });
+    const partial = Boolean(result.partial);
     const message = result.isPaid
-      ? 'Your order has been cancelled. A refund has been initiated and may take 5–10 business days to appear.'
-      : 'Your order has been cancelled.';
+      ? partial
+        ? 'Selected items have been cancelled. A partial refund has been initiated and may take 5–10 business days to appear.'
+        : 'Your order has been cancelled. A refund has been initiated and may take 5–10 business days to appear.'
+      : partial
+        ? 'Selected items have been cancelled.'
+        : 'Your order has been cancelled.';
     res.status(200).json({
       success: true,
       message,

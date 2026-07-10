@@ -30,6 +30,7 @@ import {
   computeStandardReturnRefundAmount,
   processStandardReturnRefund,
 } from './return-refund.service.js';
+import { assignReturnNumber } from '../utils/return-number.js';
 
 function isMissingWalletTableError(error) {
   return Boolean(
@@ -40,9 +41,10 @@ function isMissingWalletTableError(error) {
   );
 }
 
+/** Strict standard ladder: Received → Inspection → Approve/Reject; refund/restock are separate actions. */
 const STANDARD_TRANSITIONS = {
-  REQUESTED: ['RECEIVED', 'UNDER_INSPECTION', 'APPROVED', 'REJECTED'],
-  RECEIVED: ['UNDER_INSPECTION', 'APPROVED', 'REJECTED'],
+  REQUESTED: ['RECEIVED'],
+  RECEIVED: ['UNDER_INSPECTION'],
   UNDER_INSPECTION: ['APPROVED', 'REJECTED'],
   APPROVED: [],
   REJECTED: [],
@@ -81,6 +83,9 @@ const returnInclude = {
     include: {
       product: {
         select: { publicId: true, name: true, productType: true, sku: true, slug: true },
+      },
+      productVariant: {
+        select: { publicId: true, sku: true, combination: true },
       },
     },
   },
@@ -182,10 +187,25 @@ function buildSubmissionStatusEvents(rows) {
     .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
 }
 
+function checklistComplete(checklist) {
+  if (!checklist || typeof checklist !== 'object') return false;
+  const keys = [
+    'correctProduct',
+    'unused',
+    'tagsAttached',
+    'packagingAvailable',
+    'noStains',
+    'noDamage',
+    'noMissingAccessories',
+  ];
+  return keys.every((k) => checklist[k] === true);
+}
+
 function buildSubmissionChildItem(row) {
   return {
     id: row.publicId,
     submissionId: returnSubmissionKey(row),
+    returnNumber: row.returnNumber || null,
     type: row.type,
     status: row.status,
     quantity: row.quantity,
@@ -197,7 +217,10 @@ function buildSubmissionChildItem(row) {
     refundAmount: row.refundAmount,
     stripeRefundId: row.stripeRefundId,
     refundedAt: row.refundedAt,
+    refundPaymentMethodLabel: row.refundPaymentMethodLabel ?? null,
     refundPreview: row.refundPreview ?? computeRowRefundPreview(row),
+    restockedAt: row.restockedAt ?? null,
+    restockedQuantity: row.restockedQuantity ?? null,
     manualCarrier: row.manualCarrier,
     manualTrackingNumber: row.manualTrackingNumber,
     manualShippedAt: row.manualShippedAt,
@@ -231,9 +254,21 @@ function buildReturnSubmission(rows, { includeEvents = false } = {}) {
   const statusEvents = includeEvents ? buildSubmissionStatusEvents(items) : undefined;
   const latestTrackingRow = latestFirst.find((row) => row.returnTrackingNumber || row.manualTrackingNumber || row.returnLabelUrl);
 
+  const refundedAts = items.map((row) => row.refundedAt).filter(Boolean);
+  const latestRefundedAt =
+    refundedAts.length > 0
+      ? refundedAts.sort((a, b) => new Date(b).getTime() - new Date(a).getTime())[0]
+      : null;
+  const refundPaymentMethodLabel =
+    items.find((row) => row.refundPaymentMethodLabel)?.refundPaymentMethodLabel ?? null;
+
+  const returnNumber =
+    ordered.find((row) => row.returnNumber)?.returnNumber || primary.returnNumber || null;
+
   return {
     id: submissionId,
     submissionId,
+    returnNumber,
     primaryItemId: primary.publicId,
     type: primary.type,
     status: deriveSubmissionStatus(items),
@@ -249,7 +284,8 @@ function buildReturnSubmission(rows, { includeEvents = false } = {}) {
     refundAmount: hasExplicitRefundAmount ? refundAmounts.reduce((sum, value) => sum + value, 0) : null,
     refundPreview: refundPreview > 0 ? refundPreview : null,
     stripeRefundId: items.length === 1 ? primary.stripeRefundId : null,
-    refundedAt: items.length === 1 ? primary.refundedAt : null,
+    refundedAt: latestRefundedAt,
+    refundPaymentMethodLabel,
     manualCarrier: items.length === 1 ? primary.manualCarrier : latestTrackingRow?.manualCarrier ?? null,
     manualTrackingNumber:
       items.length === 1 ? primary.manualTrackingNumber : latestTrackingRow?.manualTrackingNumber ?? null,
@@ -291,11 +327,14 @@ export class ReturnsService {
     const where = {};
     if (filters.type) where.type = filters.type;
     if (filters.status) where.status = filters.status;
-    return prisma.returnRequest.findMany({
+    const rows = await prisma.returnRequest.findMany({
       where,
       include: returnInclude,
       orderBy: { createdAt: 'desc' },
     });
+    // Flat rows for inspection/dashboard; grouped submissions for admin returns list.
+    if (filters.grouped) return groupReturnRows(rows);
+    return rows;
   }
 
   async listForUser(userPublicId) {
@@ -315,7 +354,11 @@ export class ReturnsService {
     let rows = await prisma.returnRequest.findMany({
       where: {
         userId: user.id,
-        OR: [{ publicId: returnPublicId }, { submissionPublicId: returnPublicId }],
+        OR: [
+          { publicId: returnPublicId },
+          { submissionPublicId: returnPublicId },
+          { returnNumber: returnPublicId },
+        ],
       },
       include: returnInclude,
       orderBy: { createdAt: 'asc' },
@@ -348,7 +391,9 @@ export class ReturnsService {
     });
     if (!row) {
       row = await prisma.returnRequest.findFirst({
-        where: { submissionPublicId: returnPublicId },
+        where: {
+          OR: [{ submissionPublicId: returnPublicId }, { returnNumber: returnPublicId }],
+        },
         include: returnInclude,
         orderBy: { createdAt: 'asc' },
       });
@@ -360,15 +405,18 @@ export class ReturnsService {
       orderBy: { createdAt: 'asc' },
     });
     const statusEvents = await listReturnStatusEvents(row.id);
-    const refundPreview =
-      row.type === 'STANDARD' && row.orderItem
-        ? computeStandardReturnRefundAmount(row.orderItem, row.quantity)
-        : null;
+    const submissionRefundPreview = submissionItems.reduce(
+      (sum, item) => sum + Number(computeRowRefundPreview(item) || 0),
+      0
+    );
+    const submissionReturnNumber =
+      submissionItems.find((item) => item.returnNumber)?.returnNumber || row.returnNumber || null;
     return {
       ...row,
+      returnNumber: submissionReturnNumber,
       submissionId: returnSubmissionKey(row),
       statusEvents,
-      refundPreview,
+      refundPreview: submissionRefundPreview > 0 ? submissionRefundPreview : null,
       submissionItems: submissionItems.map((item) =>
         buildSubmissionChildItem({
           ...item,
@@ -377,6 +425,13 @@ export class ReturnsService {
       ),
       submissionStatus: deriveSubmissionStatus(submissionItems),
       submissionQuantity: submissionItems.reduce((sum, item) => sum + Math.max(1, Number(item.quantity ?? 1)), 0),
+      refundAmount: submissionItems.some((i) => i.refundAmount != null)
+        ? submissionItems.reduce((sum, i) => sum + Number(i.refundAmount || 0), 0)
+        : row.refundAmount,
+      refundedAt: submissionItems.map((i) => i.refundedAt).filter(Boolean).sort((a, b) => new Date(b) - new Date(a))[0] || row.refundedAt,
+      refundPaymentMethodLabel:
+        submissionItems.find((i) => i.refundPaymentMethodLabel)?.refundPaymentMethodLabel ||
+        row.refundPaymentMethodLabel,
     };
   }
 
@@ -384,7 +439,9 @@ export class ReturnsService {
     const normalizedEmail = String(email || '').trim().toLowerCase();
     if (!normalizedEmail) throw new AppError(400, 'Email is required');
     let rows = await prisma.returnRequest.findMany({
-      where: { OR: [{ publicId: returnId }, { submissionPublicId: returnId }] },
+      where: {
+        OR: [{ publicId: returnId }, { submissionPublicId: returnId }, { returnNumber: returnId }],
+      },
       include: {
         ...returnInclude,
         user: { select: { email: true } },
@@ -524,6 +581,7 @@ export class ReturnsService {
       const orderItem = order.orderItems.find((i) => i.publicId === publicId);
       if (!orderItem) continue;
       const lineReturns = existingByItemId.get(publicId) ?? [];
+
       const returnable = returnableQuantityForLine({
         quantity: orderItem.quantity,
         returnRequests: lineReturns,
@@ -562,7 +620,8 @@ export class ReturnsService {
           orderId: order.publicId,
           orderNumber: order.orderNumber,
           existingReturns: flatExisting.map((r) => ({
-            returnId: r.submissionPublicId || r.publicId,
+            returnId: r.returnNumber || r.submissionPublicId || r.publicId,
+            returnNumber: r.returnNumber || null,
             status: r.status,
             type: r.type,
             orderItemId: r.orderItem?.publicId,
@@ -622,6 +681,11 @@ export class ReturnsService {
           },
         });
 
+        // One human-readable returnNumber per submission (first line only).
+        if (!submissionPublicId) {
+          await assignReturnNumber(tx, rr.id, payload.type);
+        }
+
         await appendReturnStatusEvent(tx, {
           returnRequestId: rr.id,
           fromStatus: null,
@@ -670,6 +734,7 @@ export class ReturnsService {
             context: {
               name: [primaryRow.user.firstName, primaryRow.user.lastName].filter(Boolean).join(' '),
               returnType: payload.type === 'REFURBISHMENT' ? 'Used product return' : 'Standard return',
+              returnNumber: primaryRow.returnNumber || null,
               actionUrl: `${config.frontend.customerUrl}/dashboard/returns/${submissionPublicId || primaryRow.publicId}`,
             },
           });
@@ -1084,13 +1149,25 @@ export class ReturnsService {
   async updateStatus(returnPublicId, body, actor) {
     const { status, notes, rejectionReason, inspectionChecklist, manualCarrier, manualTrackingNumber, manualShippedAt } =
       body;
-    const rr = await prisma.returnRequest.findUnique({
+    let rr = await prisma.returnRequest.findUnique({
       where: { publicId: returnPublicId },
       include: {
         user: { select: { email: true, firstName: true, lastName: true } },
         order: { select: { publicId: true } },
       },
     });
+    if (!rr) {
+      rr = await prisma.returnRequest.findFirst({
+        where: {
+          OR: [{ submissionPublicId: returnPublicId }, { returnNumber: returnPublicId }],
+        },
+        include: {
+          user: { select: { email: true, firstName: true, lastName: true } },
+          order: { select: { publicId: true } },
+        },
+        orderBy: { createdAt: 'asc' },
+      });
+    }
     if (!rr) throw new AppError(404, 'Return request not found');
 
     if (
@@ -1113,19 +1190,30 @@ export class ReturnsService {
     }
 
     if (!status) {
-      if (notes === undefined) return this.getById(returnPublicId);
+      if (notes === undefined && inspectionChecklist === undefined) return this.getById(returnPublicId);
       const updatedNotes = await prisma.returnRequest.update({
         where: { id: rr.id },
-        data: { notes: notes ? String(notes).trim() : null },
+        data: {
+          ...(notes !== undefined ? { notes: notes ? String(notes).trim() : null } : {}),
+          ...(inspectionChecklist !== undefined ? { inspectionChecklistJson: inspectionChecklist } : {}),
+        },
         include: returnInclude,
       });
+      if (inspectionChecklist !== undefined) {
+        await appendReturnActionNote(prisma, {
+          returnRequestId: rr.id,
+          status: rr.status,
+          actorUserId: await resolveActorUserId(actor),
+          note: 'Inspection checklist saved',
+        });
+      }
       await writeAdminAudit({
         actorId: actor?.id,
         actorEmail: actor?.email,
-        action: 'RETURN_NOTES',
+        action: inspectionChecklist !== undefined ? 'RETURN_CHECKLIST' : 'RETURN_NOTES',
         entityType: 'ReturnRequest',
         entityId: returnPublicId,
-        meta: { notes: updatedNotes.notes },
+        meta: { notes: updatedNotes.notes, inspectionChecklist },
       });
       return this.getById(returnPublicId);
     }
@@ -1152,6 +1240,21 @@ export class ReturnsService {
       throw new AppError(400, `Invalid return status transition: ${rr.status} -> ${status}`);
     }
 
+    if (
+      rr.type === 'STANDARD' &&
+      (status === 'APPROVED' || status === 'REJECTED') &&
+      rr.status === 'UNDER_INSPECTION'
+    ) {
+      const checklist = inspectionChecklist ?? rr.inspectionChecklistJson;
+      if (!checklistComplete(checklist)) {
+        throw new AppError(400, 'Complete and save the inspection checklist before approving or rejecting');
+      }
+      if (status === 'REJECTED') {
+        const reason = rejectionReason ? String(rejectionReason).trim() : '';
+        if (!reason) throw new AppError(400, 'Rejection reason is required');
+      }
+    }
+
     const data = { status };
     if (notes !== undefined) data.notes = notes ? String(notes).trim() : null;
     if (rejectionReason !== undefined) {
@@ -1165,20 +1268,37 @@ export class ReturnsService {
 
     const actorUserId = await resolveActorUserId(actor);
 
+    // Keep multi-item STANDARD submissions in sync on status transitions.
+    const siblingIds =
+      rr.type === 'STANDARD'
+        ? (
+            await prisma.returnRequest.findMany({
+              where: { submissionPublicId: rr.submissionPublicId },
+              select: { id: true, status: true, publicId: true },
+            })
+          )
+            .filter((s) => s.status === rr.status)
+            .map((s) => s.id)
+        : [rr.id];
+
     const updated = await prisma.$transaction(async (tx) => {
-      const row = await tx.returnRequest.update({
-        where: { id: rr.id },
-        data,
-        include: returnInclude,
-      });
-      await appendReturnStatusEvent(tx, {
-        returnRequestId: rr.id,
-        fromStatus: rr.status,
-        toStatus: status,
-        actorUserId,
-        note: data.notes || data.rejectionReason || null,
-      });
-      return row;
+      let primary = null;
+      for (const sid of siblingIds) {
+        const row = await tx.returnRequest.update({
+          where: { id: sid },
+          data,
+          include: returnInclude,
+        });
+        await appendReturnStatusEvent(tx, {
+          returnRequestId: sid,
+          fromStatus: rr.status,
+          toStatus: status,
+          actorUserId,
+          note: data.notes || data.rejectionReason || null,
+        });
+        if (sid === rr.id) primary = row;
+      }
+      return primary;
     });
 
     await writeAdminAudit({
@@ -1192,7 +1312,9 @@ export class ReturnsService {
 
     if (status === 'RECEIVED') {
       await prisma.$transaction(async (tx) => {
-        await markUnitsReturnedForReturn(tx, rr.id);
+        for (const sid of siblingIds) {
+          await markUnitsReturnedForReturn(tx, sid);
+        }
       });
     }
 
@@ -1204,42 +1326,7 @@ export class ReturnsService {
       }
     }
 
-    if (status === 'APPROVED' && rr.type === 'STANDARD') {
-      if (config.standardReturnRestock) {
-        const full = await prisma.returnRequest.findUnique({
-          where: { id: rr.id },
-          include: { orderItem: true },
-        });
-        if (full?.orderItem) {
-          const restockQty = Math.max(1, Number(full.quantity || 1));
-          await prisma.$transaction(async (tx) => {
-            const product = await tx.product.findUnique({
-              where: { id: full.orderItem.productId },
-              include: { variants: { orderBy: { sortOrder: 'asc' } } },
-            });
-            if (product) {
-              await restockOrderLineStock(
-                tx,
-                product,
-                full.orderItem.productVariantId,
-                restockQty,
-                { referenceType: 'return', referenceId: returnPublicId, note: 'Standard return approved' },
-                'RESTOCK'
-              );
-            }
-          });
-        }
-      }
-      try {
-        await processStandardReturnRefund({ ...rr, ...updated }, actor);
-      } catch (err) {
-        if (err instanceof AppError && err.code === 'STRIPE_NOT_CONFIGURED') {
-          // Allow approval without Stripe in dev — refund fields stay null.
-        } else {
-          throw err;
-        }
-      }
-    }
+    // STANDARD approve no longer auto-refunds or auto-restocks (plan 39–41).
 
     if (status === 'INSPECTION_APPROVED' && rr.type === 'REFURBISHMENT') {
       await refurbishmentService.createJobForReturn(rr.id);
@@ -1273,7 +1360,7 @@ export class ReturnsService {
       status === 'REJECTED' || status === 'INSPECTION_REJECTED'
         ? data.rejectionReason || 'See return details for more information.'
         : status === 'APPROVED' && rr.type === 'STANDARD'
-          ? 'Your product refund has been initiated. Original shipping charges are not refunded.'
+          ? 'Your return was approved. Your refund will be processed next. Original shipping charges are not refunded.'
           : undefined;
 
     await emailService.sendTemplate({
@@ -1289,6 +1376,131 @@ export class ReturnsService {
 
     return this.getById(returnPublicId);
   }
+
+  /**
+   * Process Stripe refunds for all APPROVED STANDARD lines in a submission (no auto on approve).
+   */
+  async processRefund(returnPublicId, actor) {
+    const detail = await this.getById(returnPublicId);
+    if (detail.type !== 'STANDARD') {
+      throw new AppError(400, 'Refunds apply to standard returns only');
+    }
+    const items = detail.submissionItems?.length
+      ? detail.submissionItems
+      : [
+          {
+            id: detail.primaryItemId || detail.id,
+            status: detail.status,
+            stripeRefundId: detail.stripeRefundId,
+          },
+        ];
+
+    const pending = items.filter((item) => item.status === 'APPROVED' && !item.stripeRefundId);
+    if (!pending.length) {
+      const alreadyDone = items.every((item) => item.stripeRefundId || item.refundAmount != null);
+      if (alreadyDone) return this.getById(returnPublicId);
+      throw new AppError(400, 'Return must be approved before processing a refund');
+    }
+
+    for (const item of pending) {
+      const row = await prisma.returnRequest.findUnique({
+        where: { publicId: item.id },
+        select: { id: true, publicId: true, type: true, stripeRefundId: true, status: true },
+      });
+      if (!row) continue;
+      try {
+        await processStandardReturnRefund(row, actor);
+      } catch (err) {
+        if (err instanceof AppError && err.code === 'STRIPE_NOT_CONFIGURED') {
+          // Dev without Stripe — leave refund fields null.
+          continue;
+        }
+        throw err;
+      }
+    }
+    return this.getById(returnPublicId);
+  }
+
+  async restockReturn(returnPublicId, body, actor) {
+    const rr = await prisma.returnRequest.findFirst({
+      where: {
+        OR: [{ publicId: returnPublicId }, { submissionPublicId: returnPublicId }],
+      },
+      include: { orderItem: true },
+      orderBy: { createdAt: 'asc' },
+    });
+    if (!rr) throw new AppError(404, 'Return request not found');
+    if (rr.type !== 'STANDARD') {
+      throw new AppError(400, 'Restock applies to standard returns only');
+    }
+
+    const siblings = await prisma.returnRequest.findMany({
+      where: { submissionPublicId: rr.submissionPublicId },
+      include: { orderItem: true },
+      orderBy: { createdAt: 'asc' },
+    });
+    if (!siblings.every((s) => s.status === 'APPROVED')) {
+      throw new AppError(400, 'Approve the return before restocking inventory');
+    }
+
+    const selections = Array.isArray(body?.items) ? body.items : null;
+    const actorUserId = await resolveActorUserId(actor);
+
+    await prisma.$transaction(async (tx) => {
+      for (const sibling of siblings) {
+        if (sibling.restockedAt) continue;
+        let qty = Math.max(1, Number(sibling.quantity || 1));
+        if (selections) {
+          const sel = selections.find(
+            (s) => s.returnItemId === sibling.publicId || s.id === sibling.publicId
+          );
+          if (!sel) continue;
+          qty = Math.min(qty, Math.max(1, Number(sel.quantity ?? qty)));
+        }
+        if (!sibling.orderItem) continue;
+        const product = await tx.product.findUnique({
+          where: { id: sibling.orderItem.productId },
+          include: { variants: { orderBy: { sortOrder: 'asc' } } },
+        });
+        if (!product) continue;
+        await restockOrderLineStock(
+          tx,
+          product,
+          sibling.orderItem.productVariantId,
+          qty,
+          {
+            referenceType: 'return',
+            referenceId: sibling.publicId,
+            actorUserId,
+            note: `Standard return restock · ${sibling.returnNumber || sibling.publicId}`,
+          },
+          'RESTOCK'
+        );
+        await tx.returnRequest.update({
+          where: { id: sibling.id },
+          data: { restockedAt: new Date(), restockedQuantity: qty },
+        });
+        await appendReturnActionNote(tx, {
+          returnRequestId: sibling.id,
+          status: sibling.status,
+          actorUserId,
+          note: `Restocked ${qty} unit${qty === 1 ? '' : 's'} to inventory`,
+        });
+      }
+    });
+
+    await writeAdminAudit({
+      actorId: actor?.id,
+      actorEmail: actor?.email,
+      action: 'RETURN_RESTOCK',
+      entityType: 'ReturnRequest',
+      entityId: returnPublicId,
+      meta: { items: selections },
+    });
+
+    return this.getById(returnPublicId);
+  }
+
   async bulkMarkReceived(returnPublicIds, actor) {
     const results = [];
     for (const id of returnPublicIds) {

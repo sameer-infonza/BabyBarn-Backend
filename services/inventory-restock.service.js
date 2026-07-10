@@ -19,6 +19,7 @@ export async function restockPaidOrder(orderPublicId, ledgerCtx = {}) {
 
     let restocked = 0;
     for (const line of order.orderItems) {
+      if (line.cancelledAt) continue;
       const product = await tx.product.findUnique({
         where: { id: line.productId },
         include: { variants: { orderBy: { sortOrder: 'asc' } } },
@@ -38,6 +39,10 @@ export async function restockPaidOrder(orderPublicId, ledgerCtx = {}) {
   });
 }
 
+/**
+ * Restock paid-order lines. Skips already-cancelled lines.
+ * Pass `itemPublicIds` to restock only those lines (partial cancellation).
+ */
 export async function restockPaidOrderInTx(tx, order, ledgerCtx = {}) {
   const ctx = {
     referenceType: ledgerCtx.referenceType || 'order',
@@ -45,8 +50,13 @@ export async function restockPaidOrderInTx(tx, order, ledgerCtx = {}) {
     actorUserId: ledgerCtx.actorUserId ?? null,
     note: ledgerCtx.note ?? null,
   };
+  const filterIds = Array.isArray(ledgerCtx.itemPublicIds)
+    ? new Set(ledgerCtx.itemPublicIds.map(String))
+    : null;
   let restocked = 0;
   for (const line of order.orderItems) {
+    if (line.cancelledAt) continue;
+    if (filterIds && !filterIds.has(String(line.publicId))) continue;
     const product = await tx.product.findUnique({
       where: { id: line.productId },
       include: { variants: { orderBy: { sortOrder: 'asc' } } },

@@ -56,7 +56,16 @@ export class AdminController {
     const limit = Math.min(parseInt(String(req.query.limit), 10) || 20, 100);
     const dateFrom = req.query.dateFrom ? String(req.query.dateFrom) : undefined;
     const dateTo = req.query.dateTo ? String(req.query.dateTo) : undefined;
-    const data = await listFinanceTransactions(page, limit, { dateFrom, dateTo });
+    const orderId = req.query.orderId ? String(req.query.orderId) : undefined;
+    const membershipRef = req.query.membershipRef ? String(req.query.membershipRef) : undefined;
+    const transactionType = req.query.transactionType ? String(req.query.transactionType) : undefined;
+    const data = await listFinanceTransactions(page, limit, {
+      dateFrom,
+      dateTo,
+      orderId,
+      membershipRef,
+      transactionType,
+    });
     res.status(200).json({ success: true, data: toPublicJson(data) });
   }
 

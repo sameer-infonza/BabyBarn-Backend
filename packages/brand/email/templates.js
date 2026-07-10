@@ -153,14 +153,20 @@ export function renderBrandedEmailTemplate(template, context = {}, brand) {
 
   if (template === 'return-requested') {
     const subject = 'We received your return request';
+    const returnRef = context.returnNumber ? String(context.returnNumber).trim() : '';
     const bodyHtml = `
       ${greet(name)}
       ${emailBodyParagraph(`Your <strong>${escapeHtml(context.returnType || 'return')}</strong> request is in our queue. We will email you when inspection or shipping steps are ready.`)}
+      ${returnRef ? emailBodyParagraph(`Return ID: <strong>${escapeHtml(returnRef)}</strong>`) : ''}
       ${emailMutedNote('Original shipping charges are not refundable on standard returns.')}
       ${emailCtaButton(context.actionUrl, 'Track return')}
     `;
     const { html } = doc(subject, 'Return request received', bodyHtml, brand);
-    return { subject, html, text: `Return request received. ${context.actionUrl}` };
+    return {
+      subject,
+      html,
+      text: `Return request received${returnRef ? ` (${returnRef})` : ''}. ${context.actionUrl}`,
+    };
   }
 
   if (template === 'return-status') {

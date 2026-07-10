@@ -207,6 +207,7 @@ const userForOrderList = {
     firstName: true,
     lastName: true,
     accessMemberUntil: true,
+    isGuest: true,
     role: { select: { name: true } },
   },
 };
@@ -726,6 +727,7 @@ export class OrderService {
     const shipping = order.shippingAddressJson && typeof order.shippingAddressJson === 'object'
       ? order.shippingAddressJson
       : null;
+    const canCancel = canCustomerCancelOrder(order);
     return {
       id: order.publicId,
       orderNumber: order.orderNumber,
@@ -739,13 +741,25 @@ export class OrderService {
       shippingCarrier: order.shippingCarrier,
       trackingCarrier: order.shippingCarrier,
       placedAsGuest: Boolean(order.placedAsGuest),
+      cancellationReviewStatus: order.cancellationReviewStatus || null,
+      canCancel,
+      cancelUnavailableReason: canCancel ? null : customerCancelUnavailableReason(order),
       items: order.orderItems.map((item) => ({
-        id: item.id,
-        publicId: item.publicId,
+        // Expose the public cuid as `id` directly so clients don't depend on
+        // toPublicJson remapping (and never send a null/undefined item id).
+        id: item.publicId,
         quantity: item.quantity,
         unitPrice: Number(item.price),
         lineTotal: Number(item.price) * item.quantity,
-        product: item.product,
+        cancelledAt: item.cancelledAt || null,
+        product: item.product
+          ? {
+              id: item.product.publicId,
+              name: item.product.name,
+              slug: item.product.slug,
+              imageUrl: item.product.imageUrl,
+            }
+          : null,
       })),
       shipping: shipping
         ? {
@@ -1088,15 +1102,29 @@ export class OrderService {
     return order;
   }
 
-  async releasePendingOrderResources(orderPublicId) {
+  /**
+   * Release reserved stock (and optionally store-credit hold) for unpaid orders.
+   * @param {string} orderPublicId
+   * @param {{ itemPublicIds?: string[] | null, releaseStoreCredit?: boolean }} [opts]
+   */
+  async releasePendingOrderResources(orderPublicId, opts = {}) {
+    const filterIds = Array.isArray(opts.itemPublicIds)
+      ? new Set(opts.itemPublicIds.map(String))
+      : null;
+    const releaseStoreCredit = opts.releaseStoreCredit !== false;
+
     await prisma.$transaction(async (tx) => {
       const order = await tx.order.findUnique({
         where: { publicId: orderPublicId },
         include: { orderItems: true },
       });
-      if (!order || order.paymentStatus === 'PAID') return;
+      if (!order || order.paymentStatus === 'PAID' || order.paymentStatus === 'PARTIALLY_REFUNDED') {
+        return;
+      }
 
       for (const line of order.orderItems) {
+        if (line.cancelledAt) continue;
+        if (filterIds && !filterIds.has(String(line.publicId))) continue;
         const product = await tx.product.findUnique({
           where: { id: line.productId },
           include: { variants: { orderBy: { sortOrder: 'asc' } } },
@@ -1109,7 +1137,7 @@ export class OrderService {
         });
       }
 
-      if (order.storeCreditApplied > 0) {
+      if (releaseStoreCredit && order.storeCreditApplied > 0 && !filterIds) {
         await walletService.releaseHoldInTx(
           tx,
           order.userId,
@@ -1138,6 +1166,7 @@ export class OrderService {
       }
 
       for (const line of order.orderItems) {
+        if (line.cancelledAt) continue;
         const product = await tx.product.findUnique({
           where: { id: line.productId },
           include: { variants: { orderBy: { sortOrder: 'asc' } } },
@@ -1256,12 +1285,24 @@ export class OrderService {
         OR: [
           { accessMembershipIncluded: true },
           { orderItems: { some: { pricingTier: 'ACCESS' } } },
+          {
+            user: {
+              isGuest: false,
+              accessMemberUntil: { gt: new Date() },
+            },
+          },
         ],
       });
+    } else if (mf === 'guest') {
+      and.push({ user: { isGuest: true } });
     } else if (mf === 'standard') {
       and.push({
         accessMembershipIncluded: false,
         NOT: { orderItems: { some: { pricingTier: 'ACCESS' } } },
+        user: {
+          isGuest: false,
+          OR: [{ accessMemberUntil: null }, { accessMemberUntil: { lte: new Date() } }],
+        },
       });
     }
     if (dateFrom || dateTo) {
@@ -1339,6 +1380,7 @@ export class OrderService {
             lastName: true,
             phone: true,
             accessMemberUntil: true,
+            isGuest: true,
           },
         },
         orderItems: {
@@ -1833,13 +1875,71 @@ export class OrderService {
     return { stripe, paymentIntentId };
   }
 
-  async finalizeOrderCancellation(order, { reason = null, actorUserId = null, reviewStatus = 'NONE' } = {}) {
+  /**
+   * Cancel an entire order or selected line items before warehouse processing.
+   * @param {object} order
+   * @param {{ reason?: string|null, actorUserId?: number|null, reviewStatus?: string, itemPublicIds?: string[]|null }} opts
+   */
+  async finalizeOrderCancellation(
+    order,
+    { reason = null, actorUserId = null, reviewStatus = 'NONE', itemPublicIds = null } = {}
+  ) {
     const orderPublicId = order.publicId;
-    const isPaid = order.paymentStatus === 'PAID';
+    const reasonTrimmed = reason?.trim() || null;
+    const activeLines = (order.orderItems || []).filter((line) => !line.cancelledAt);
+    if (activeLines.length === 0) {
+      throw new AppError(400, 'All items on this order are already cancelled');
+    }
+
+    let linesToCancel = activeLines;
+    if (Array.isArray(itemPublicIds) && itemPublicIds.length > 0) {
+      const wanted = new Set(itemPublicIds.map(String));
+      linesToCancel = activeLines.filter((line) => wanted.has(String(line.publicId)));
+      if (linesToCancel.length === 0) {
+        throw new AppError(400, 'No matching active items to cancel');
+      }
+      const unknown = [...wanted].filter((id) => !activeLines.some((l) => String(l.publicId) === id));
+      if (unknown.length > 0) {
+        throw new AppError(400, 'One or more selected items are not on this order or already cancelled');
+      }
+    }
+
+    const cancellingAll = linesToCancel.length === activeLines.length;
+    const isPaid =
+      order.paymentStatus === 'PAID' || order.paymentStatus === 'PARTIALLY_REFUNDED';
     let stripeRefundId = null;
     let refundAmountUsd = 0;
 
-    if (isPaid) {
+    const merchandiseSubtotal = activeLines.reduce(
+      (sum, line) => sum + Number(line.price) * Number(line.quantity),
+      0
+    );
+    const cancelMerchandise = linesToCancel.reduce(
+      (sum, line) => sum + Number(line.price) * Number(line.quantity),
+      0
+    );
+    const storeCreditOnOrder = Math.max(0, Number(order.storeCreditApplied) || 0);
+    const taxOnOrder = Math.max(0, Number(order.taxAmount) || 0);
+    const creditShare =
+      cancellingAll || merchandiseSubtotal <= 0
+        ? storeCreditOnOrder
+        : Math.round((storeCreditOnOrder * (cancelMerchandise / merchandiseSubtotal)) * 100) / 100;
+    const taxShare =
+      cancellingAll || merchandiseSubtotal <= 0
+        ? taxOnOrder
+        : Math.round((taxOnOrder * (cancelMerchandise / merchandiseSubtotal)) * 100) / 100;
+    // Full cancel refunds the remaining card total (includes shipping). Partial refunds
+    // cancelled merchandise + proportional tax, minus store-credit share for those lines.
+    if (cancellingAll && isPaid) {
+      refundAmountUsd = Math.max(0, Number(order.totalAmount));
+    } else if (isPaid) {
+      refundAmountUsd = Math.max(
+        0,
+        Math.round((cancelMerchandise + taxShare - creditShare) * 100) / 100
+      );
+    }
+
+    if (isPaid && refundAmountUsd > 0) {
       const { stripe, paymentIntentId } = await this.resolveStripePaymentIntentId(order);
       if (!stripe) {
         throw new AppError(503, 'Stripe is not configured', 'STRIPE_NOT_CONFIGURED');
@@ -1848,22 +1948,40 @@ export class OrderService {
         throw new AppError(400, 'No Stripe payment reference found for this order', 'NO_PAYMENT_REFERENCE');
       }
 
-      refundAmountUsd = Number(order.totalAmount);
       const amountCents = Math.round(refundAmountUsd * 100);
       if (amountCents > 0) {
+        const lineKey = linesToCancel
+          .map((l) => l.publicId)
+          .sort()
+          .join(',');
         const refund = await stripe.refunds.create(
           {
             payment_intent: paymentIntentId,
             amount: amountCents,
-            metadata: { orderPublicId, source: 'customer_cancel' },
+            metadata: {
+              orderPublicId,
+              source: cancellingAll ? 'customer_cancel' : 'customer_cancel_partial',
+              itemPublicIds: lineKey.slice(0, 450),
+            },
           },
-          { idempotencyKey: `cancel-${orderPublicId}-${amountCents}` }
+          {
+            idempotencyKey: `cancel-${orderPublicId}-${cancellingAll ? 'full' : lineKey}-${amountCents}`.slice(
+              0,
+              255
+            ),
+          }
         );
         stripeRefundId = refund.id;
       }
-    } else {
-      await this.releasePendingOrderResources(orderPublicId);
+    } else if (!isPaid) {
+      await this.releasePendingOrderResources(orderPublicId, {
+        itemPublicIds: cancellingAll ? null : linesToCancel.map((l) => l.publicId),
+        releaseStoreCredit: false,
+      });
     }
+
+    const cancelIds = linesToCancel.map((l) => l.publicId);
+    const now = new Date();
 
     const updated = await prisma.$transaction(async (tx) => {
       const withItems = await tx.order.findUnique({
@@ -1877,29 +1995,77 @@ export class OrderService {
         await restockPaidOrderInTx(tx, withItems, {
           referenceType: 'order',
           referenceId: orderPublicId,
-          eventType: 'CANCEL_RESTORE',
-          note: 'Customer order cancellation',
+          eventType: 'REFUND_RESTORE',
+          note: cancellingAll ? 'Customer order cancellation' : 'Customer partial item cancellation',
           actorUserId,
+          itemPublicIds: cancelIds,
         });
-        if (withItems.storeCreditApplied > 0) {
+        if (creditShare > 0) {
           await walletService.refundRedeemedCreditInTx(
             tx,
             withItems.userId,
-            withItems.storeCreditApplied,
+            creditShare,
             orderPublicId
           );
         }
+      } else if (creditShare > 0) {
+        await walletService.releaseHoldInTx(tx, withItems.userId, creditShare, orderPublicId);
+      }
+
+      await tx.orderItem.updateMany({
+        where: {
+          orderId: order.id,
+          publicId: { in: cancelIds },
+          cancelledAt: null,
+        },
+        data: {
+          cancelledAt: now,
+          cancellationReason: reasonTrimmed,
+        },
+      });
+
+      const remainingActive = await tx.orderItem.count({
+        where: { orderId: order.id, cancelledAt: null },
+      });
+
+      const nextStoreCredit = Math.max(
+        0,
+        Math.round((storeCreditOnOrder - creditShare) * 100) / 100
+      );
+      const nextTax = Math.max(0, Math.round((taxOnOrder - taxShare) * 100) / 100);
+      let nextTotal;
+      if (cancellingAll) {
+        nextTotal = 0;
+      } else if (isPaid) {
+        nextTotal = Math.max(
+          0,
+          Math.round((Number(order.totalAmount) - refundAmountUsd) * 100) / 100
+        );
+      } else {
+        // Unpaid: drop cancelled merchandise/tax/credit from the amount still due.
+        nextTotal = Math.max(
+          0,
+          Math.round((Number(order.totalAmount) - cancelMerchandise - taxShare + creditShare) * 100) /
+            100
+        );
       }
 
       return tx.order.update({
         where: { id: order.id },
         data: {
-          status: 'CANCELLED',
-          paymentStatus: isPaid ? 'REFUNDED' : order.paymentStatus,
-          fulfillmentStatus: null,
+          status: remainingActive === 0 ? 'CANCELLED' : order.status,
+          paymentStatus: isPaid
+            ? remainingActive === 0
+              ? 'REFUNDED'
+              : 'PARTIALLY_REFUNDED'
+            : order.paymentStatus,
+          fulfillmentStatus: remainingActive === 0 ? null : order.fulfillmentStatus,
+          storeCreditApplied: nextStoreCredit,
+          taxAmount: nextTax,
+          totalAmount: nextTotal,
           cancellationReviewStatus: reviewStatus,
-          cancellationRequestedAt: new Date(),
-          cancellationRequestReason: reason?.trim() || null,
+          cancellationRequestedAt: now,
+          cancellationRequestReason: reasonTrimmed,
           cancellationReviewNote: null,
         },
         include: {
@@ -1911,7 +2077,7 @@ export class OrderService {
 
     try {
       const customer = updated.user;
-      if (customer?.email) {
+      if (customer?.email && cancellingAll) {
         const name = [customer.firstName, customer.lastName].filter(Boolean).join(' ');
         await emailService.sendTemplate({
           to: customer.email,
@@ -1930,10 +2096,19 @@ export class OrderService {
       console.error('[order] cancellation email failed', orderPublicId, emailErr);
     }
 
-    return { order: updated, isPaid, refundAmountUsd, stripeRefundId };
+    return {
+      order: updated,
+      isPaid,
+      refundAmountUsd,
+      stripeRefundId,
+      partial: !cancellingAll,
+    };
   }
 
-  async cancelOrderByUser(orderPublicId, userPublicId, reason) {
+  async cancelOrderByUser(orderPublicId, userPublicId, opts = {}) {
+    const reason = typeof opts === 'string' ? opts : opts?.reason;
+    const itemIds = typeof opts === 'string' ? null : opts?.itemIds;
+
     const [order, user] = await Promise.all([
       prisma.order.findUnique({
         where: { publicId: orderPublicId },
@@ -1944,7 +2119,13 @@ export class OrderService {
     if (!order) throw new AppError(404, 'Order not found');
     if (!user || order.userId !== user.id) throw new AppError(403, 'Unauthorized to cancel this order');
     if (order.status === 'CANCELLED') {
-      return { order, isPaid: order.paymentStatus === 'PAID', refundAmountUsd: 0, stripeRefundId: null };
+      return {
+        order,
+        isPaid: order.paymentStatus === 'PAID' || order.paymentStatus === 'REFUNDED',
+        refundAmountUsd: 0,
+        stripeRefundId: null,
+        partial: false,
+      };
     }
     if (!canCustomerCancelOrder(order)) {
       throw new AppError(400, customerCancelUnavailableReason(order));
@@ -1954,12 +2135,63 @@ export class OrderService {
       reason,
       actorUserId: user.id,
       reviewStatus: 'NONE',
+      itemPublicIds: Array.isArray(itemIds) && itemIds.length > 0 ? itemIds : null,
+    });
+  }
+
+  /**
+   * Guest self-service cancel: verify tracking token or order number + email,
+   * then apply the same pre-shipment cancel rules as authenticated customers.
+   */
+  async cancelOrderByGuest(payload) {
+    let orderNumber = payload.orderNumber ? String(payload.orderNumber).trim() : '';
+    let email = payload.email ? String(payload.email).trim().toLowerCase() : '';
+
+    if (payload.token) {
+      const verified = verifyOrderTrackingToken(payload.token);
+      orderNumber = verified.orderNumber;
+      email = verified.email;
+    }
+
+    if (!orderNumber || !email) {
+      throw new AppError(400, 'Order number and email are required');
+    }
+
+    let order = await prisma.order.findFirst({
+      where: {
+        OR: [{ orderNumber }, { publicId: orderNumber }],
+        contactEmail: { equals: email, mode: 'insensitive' },
+      },
+      include: {
+        orderItems: true,
+        user: { select: { publicId: true, id: true } },
+      },
+    });
+    if (!order) {
+      order = await prisma.order.findFirst({
+        where: {
+          OR: [{ orderNumber }, { publicId: orderNumber }],
+          user: { email: { equals: email, mode: 'insensitive' } },
+        },
+        include: {
+          orderItems: true,
+          user: { select: { publicId: true, id: true } },
+        },
+      });
+    }
+    if (!order?.user) {
+      throw new AppError(404, 'Order not found for that email');
+    }
+
+    return this.cancelOrderByUser(order.publicId, order.user.publicId, {
+      reason: payload.reason,
+      itemIds: payload.itemIds,
     });
   }
 
   /** @deprecated Use cancelOrderByUser — kept as alias for route handler compatibility. */
   async requestCancellationByUser(orderPublicId, userPublicId, reason) {
-    const result = await this.cancelOrderByUser(orderPublicId, userPublicId, reason);
+    const result = await this.cancelOrderByUser(orderPublicId, userPublicId, { reason });
     return result.order;
   }
 

@@ -22,6 +22,7 @@ export async function createUnitsForPaidOrder(tx, order, orderItems) {
   const created = [];
 
   for (const line of orderItems) {
+    if (line.cancelledAt) continue;
     for (let i = 0; i < line.quantity; i += 1) {
       const unitSku = unitSkuFromOrder(order.publicId, line.id, i + 1);
       const unit = await tx.productUnit.create({

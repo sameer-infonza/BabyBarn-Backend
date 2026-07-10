@@ -28,7 +28,6 @@ function flattenRows(orders) {
         product: li.product?.name || 'Item',
         sku: li.productVariant?.sku || li.product?.sku || '—',
         qty,
-        plan: li.pricingTier === 'ACCESS' ? 'ACCESS' : 'Standard',
         envelope: order.includeReturnEnvelope ? 'Yes' : '—',
         picked: pickedQty >= qty && qty > 0 ? 'Yes' : pickedQty > 0 ? `${pickedQty}/${qty}` : 'No',
       });
@@ -61,7 +60,6 @@ export function renderPickupListLayout(doc, { brand, title, orders }) {
     { key: 'product', label: 'Product', w: 0, align: 'left' }, // flex
     { key: 'sku', label: 'SKU', w: 72, align: 'left' },
     { key: 'qty', label: 'Qty', w: 28, align: 'center' },
-    { key: 'plan', label: 'Plan', w: 52, align: 'left' },
     { key: 'envelope', label: 'Envelope', w: 52, align: 'center' },
     { key: 'picked', label: 'Picked', w: 44, align: 'center' },
   ];
@@ -161,7 +159,6 @@ export function renderPickupListLayout(doc, { brand, title, orders }) {
       row.product,
       row.sku,
       String(row.qty),
-      row.plan,
       row.envelope,
       row.picked,
     ];

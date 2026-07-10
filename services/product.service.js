@@ -464,6 +464,7 @@ export class ProductService {
       variantAxes: _variantAxes,
       name,
       description,
+      shortDescription,
       price,
       stock,
       imageUrl,
@@ -590,6 +591,7 @@ export class ProductService {
           name,
           slug,
           description: description ?? null,
+          shortDescription: shortDescription ?? null,
           price,
           stock: totalStock,
           categoryId,
@@ -638,7 +640,10 @@ export class ProductService {
   async updateProduct(publicId, data) {
     const product = await prisma.product.findUnique({
       where: { publicId },
-      include: { variants: true },
+      include: {
+        variants: true,
+        category: { select: { publicId: true } },
+      },
     });
 
     if (!product) {
@@ -670,9 +675,8 @@ export class ProductService {
       if (data.sku !== undefined && data.sku !== product.sku) {
         throw new AppError(400, 'Cannot change SKU on a refurb listing.', 'REFURB_LOCKED');
       }
-      if (data.categoryId !== undefined) {
-        throw new AppError(400, 'Cannot change category on a refurb listing.', 'REFURB_LOCKED');
-      }
+      // Category is locked for linked/pipeline refurb listings. Ignore any categoryId in
+      // the payload (admin forms often re-send a cascade-rewritten id that is not a real change).
     }
 
     const {
@@ -716,7 +720,7 @@ export class ProductService {
               : gallery;
       }
 
-      if (categoryPublicId !== undefined) {
+      if (categoryPublicId !== undefined && !isSkuCategoryLockedRefurb) {
         const category = await tx.category.findUnique({
           where: { publicId: categoryPublicId },
           select: { id: true },
@@ -937,12 +941,31 @@ export class ProductService {
             where: {
               productType: 'REFURBISHED',
               sourceProductId: { in: sourceIds },
-              isActiveListing: true,
             },
-            select: { publicId: true, sourceProductId: true, stock: true, sku: true },
+            select: {
+              publicId: true,
+              sourceProductId: true,
+              stock: true,
+              sku: true,
+              isActiveListing: true,
+              isDraft: true,
+              updatedAt: true,
+            },
+            orderBy: { updatedAt: 'desc' },
           })
         : [];
-    const refurbBySource = new Map(refurbListings.map((r) => [r.sourceProductId, r]));
+    // Prefer active listing; otherwise any draft/inactive shell for this source.
+    const refurbBySource = new Map();
+    for (const r of refurbListings) {
+      const prev = refurbBySource.get(r.sourceProductId);
+      if (!prev) {
+        refurbBySource.set(r.sourceProductId, r);
+        continue;
+      }
+      const prevActive = prev.isActiveListing && !prev.isDraft;
+      const nextActive = r.isActiveListing && !r.isDraft;
+      if (nextActive && !prevActive) refurbBySource.set(r.sourceProductId, r);
+    }
 
     return {
       items: products.map((p) => {
@@ -987,6 +1010,7 @@ export class ProductService {
       sourceVariantPublicId: payload.sourceVariantId,
       initialStock: payload.initialStock ?? 1,
       conditionGrade: payload.conditionGrade ?? null,
+      createAsDraft: payload.createAsDraft === true,
       actorUserId,
       ledgerReference: {
         type: 'manual_refurb',

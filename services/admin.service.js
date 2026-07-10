@@ -140,71 +140,133 @@ async function distinctOrderCountByProductType(createdAt, productType) {
   return rows[0]?.count ?? 0;
 }
 
-export async function listFinanceTransactions(page = 1, limit = 20, { dateFrom, dateTo } = {}) {
+export async function listFinanceTransactions(
+  page = 1,
+  limit = 20,
+  { dateFrom, dateTo, orderId, membershipRef, transactionType } = {}
+) {
   const skip = (page - 1) * limit;
   const range = dateRangeWhere(dateFrom, dateTo);
   const gteOrder = range?.gte ? Prisma.sql`AND o."createdAt" >= ${range.gte}` : Prisma.empty;
   const lteOrder = range?.lte ? Prisma.sql`AND o."createdAt" <= ${range.lte}` : Prisma.empty;
   const gteMembership = range?.gte ? Prisma.sql`AND mp."paidAt" >= ${range.gte}` : Prisma.empty;
   const lteMembership = range?.lte ? Prisma.sql`AND mp."paidAt" <= ${range.lte}` : Prisma.empty;
+  const gteRefund = range?.gte ? Prisma.sql`AND rr."refundedAt" >= ${range.gte}` : Prisma.empty;
+  const lteRefund = range?.lte ? Prisma.sql`AND rr."refundedAt" <= ${range.lte}` : Prisma.empty;
+
+  const orderFilter = orderId
+    ? Prisma.sql`AND (o."orderNumber" ILIKE ${`%${orderId}%`} OR o."publicId" ILIKE ${`%${orderId}%`})`
+    : Prisma.empty;
+  const membershipFilter = membershipRef
+    ? Prisma.sql`AND (mp."publicId" ILIKE ${`%${membershipRef}%`} OR mp."stripeSessionId" ILIKE ${`%${membershipRef}%`} OR u."accessNumber" ILIKE ${`%${membershipRef}%`})`
+    : Prisma.empty;
+  const refundOrderFilter = orderId
+    ? Prisma.sql`AND (o."orderNumber" ILIKE ${`%${orderId}%`} OR o."publicId" ILIKE ${`%${orderId}%`} OR COALESCE(rr."returnNumber", '') ILIKE ${`%${orderId}%`})`
+    : Prisma.empty;
+
+  const type = String(transactionType || 'all').toLowerCase();
+  const includeOrder = type === 'all' || type === 'payment' || type === 'order';
+  const includeMembership = type === 'all' || type === 'access' || type === 'membership';
+  const includeRefund = type === 'all' || type === 'refund';
+
+  const parts = [];
+  if (includeOrder) {
+    parts.push(Prisma.sql`
+      SELECT
+        'order'::text AS "kind",
+        'payment'::text AS "direction",
+        o."publicId" AS "publicId",
+        o."orderNumber" AS "reference",
+        o."totalAmount"::float AS "amount",
+        o."paymentStatus"::text AS "status",
+        o."createdAt" AS "occurredAt",
+        u."email" AS "customerEmail",
+        u."firstName" AS "customerFirstName",
+        u."lastName" AS "customerLastName",
+        u."publicId" AS "userPublicId",
+        NULL::text AS "stripeSessionId",
+        NULL::text AS "returnPublicId"
+      FROM "Order" o
+      INNER JOIN "User" u ON o."userId" = u."id"
+      WHERE o."paymentStatus" IN ('PAID', 'REFUNDED')
+        AND o."status" <> 'CANCELLED'
+        ${gteOrder}
+        ${lteOrder}
+        ${orderFilter}
+    `);
+  }
+  if (includeMembership && !orderId) {
+    parts.push(Prisma.sql`
+      SELECT
+        'membership'::text AS "kind",
+        'payment'::text AS "direction",
+        mp."publicId" AS "publicId",
+        mp."type"::text AS "reference",
+        mp."amount"::float AS "amount",
+        'PAID'::text AS "status",
+        mp."paidAt" AS "occurredAt",
+        u."email" AS "customerEmail",
+        u."firstName" AS "customerFirstName",
+        u."lastName" AS "customerLastName",
+        u."publicId" AS "userPublicId",
+        mp."stripeSessionId" AS "stripeSessionId",
+        NULL::text AS "returnPublicId"
+      FROM "MembershipPayment" mp
+      INNER JOIN "User" u ON mp."userId" = u."id"
+      WHERE 1 = 1
+        ${gteMembership}
+        ${lteMembership}
+        ${membershipFilter}
+    `);
+  }
+  if (includeRefund) {
+    parts.push(Prisma.sql`
+      SELECT
+        'refund'::text AS "kind",
+        'refund'::text AS "direction",
+        rr."publicId" AS "publicId",
+        COALESCE(rr."returnNumber", o."orderNumber", rr."publicId") AS "reference",
+        COALESCE(rr."refundAmount", 0)::float AS "amount",
+        'REFUNDED'::text AS "status",
+        rr."refundedAt" AS "occurredAt",
+        u."email" AS "customerEmail",
+        u."firstName" AS "customerFirstName",
+        u."lastName" AS "customerLastName",
+        u."publicId" AS "userPublicId",
+        rr."stripeRefundId" AS "stripeSessionId",
+        rr."publicId" AS "returnPublicId"
+      FROM "ReturnRequest" rr
+      INNER JOIN "Order" o ON rr."orderId" = o."id"
+      INNER JOIN "User" u ON rr."userId" = u."id"
+      WHERE rr."refundedAt" IS NOT NULL
+        AND rr."refundAmount" IS NOT NULL
+        AND rr."type" = 'STANDARD'
+        ${gteRefund}
+        ${lteRefund}
+        ${refundOrderFilter}
+    `);
+  }
+
+  if (!parts.length) {
+    return {
+      transactions: [],
+      pagination: { total: 0, page, limit, pages: 1 },
+    };
+  }
+
+  const unionSql = parts.reduce((acc, part, idx) => (idx === 0 ? part : Prisma.sql`${acc} UNION ALL ${part}`));
 
   const [countRows, rows] = await Promise.all([
     prisma.$queryRaw`
       SELECT COUNT(*)::int AS "count"
       FROM (
-        SELECT o."id"
-        FROM "Order" o
-        WHERE o."paymentStatus" IN ('PAID', 'REFUNDED')
-          AND o."status" <> 'CANCELLED'
-          ${gteOrder}
-          ${lteOrder}
-        UNION ALL
-        SELECT mp."id"
-        FROM "MembershipPayment" mp
-        WHERE 1 = 1
-          ${gteMembership}
-          ${lteMembership}
+        ${unionSql}
       ) combined
     `,
     prisma.$queryRaw`
       SELECT *
       FROM (
-        SELECT
-          'order'::text AS "kind",
-          o."publicId" AS "publicId",
-          o."orderNumber" AS "reference",
-          o."totalAmount"::float AS "amount",
-          o."paymentStatus"::text AS "status",
-          o."createdAt" AS "occurredAt",
-          u."email" AS "customerEmail",
-          u."firstName" AS "customerFirstName",
-          u."lastName" AS "customerLastName",
-          u."publicId" AS "userPublicId",
-          NULL::text AS "stripeSessionId"
-        FROM "Order" o
-        INNER JOIN "User" u ON o."userId" = u."id"
-        WHERE o."paymentStatus" IN ('PAID', 'REFUNDED')
-          AND o."status" <> 'CANCELLED'
-          ${gteOrder}
-          ${lteOrder}
-        UNION ALL
-        SELECT
-          'membership'::text AS "kind",
-          mp."publicId" AS "publicId",
-          mp."type"::text AS "reference",
-          mp."amount"::float AS "amount",
-          'PAID'::text AS "status",
-          mp."paidAt" AS "occurredAt",
-          u."email" AS "customerEmail",
-          u."firstName" AS "customerFirstName",
-          u."lastName" AS "customerLastName",
-          u."publicId" AS "userPublicId",
-          mp."stripeSessionId" AS "stripeSessionId"
-        FROM "MembershipPayment" mp
-        INNER JOIN "User" u ON mp."userId" = u."id"
-        WHERE 1 = 1
-          ${gteMembership}
-          ${lteMembership}
+        ${unionSql}
       ) combined
       ORDER BY "occurredAt" DESC
       LIMIT ${limit} OFFSET ${skip}
@@ -216,6 +278,7 @@ export async function listFinanceTransactions(page = 1, limit = 20, { dateFrom, 
   return {
     transactions: rows.map((row) => ({
       kind: row.kind,
+      direction: row.direction || (row.kind === 'refund' ? 'refund' : 'payment'),
       publicId: row.publicId,
       reference: row.reference,
       amount: row.amount,
@@ -225,6 +288,7 @@ export async function listFinanceTransactions(page = 1, limit = 20, { dateFrom, 
       customerName: [row.customerFirstName, row.customerLastName].filter(Boolean).join(' ') || null,
       userPublicId: row.userPublicId ?? null,
       stripeSessionId: row.stripeSessionId ?? null,
+      returnPublicId: row.returnPublicId ?? null,
     })),
     pagination: {
       total,
@@ -269,6 +333,7 @@ export async function listCustomers(page = 1, limit = 20, { search, role } = {})
         lastName: true,
         phone: true,
         isActive: true,
+        isGuest: true,
         accessMemberUntil: true,
         createdAt: true,
         role: { select: { name: true } },
@@ -293,6 +358,7 @@ export async function getCustomerDetail(userPublicId) {
       lastName: true,
       phone: true,
       isActive: true,
+      isGuest: true,
       accessMemberUntil: true,
       accessNumber: true,
       babyName: true,
@@ -355,6 +421,8 @@ export async function getCustomerDetail(userPublicId) {
         select: {
           id: true,
           publicId: true,
+          returnNumber: true,
+          submissionPublicId: true,
           status: true,
           type: true,
           createdAt: true,

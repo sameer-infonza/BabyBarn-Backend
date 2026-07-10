@@ -15,13 +15,15 @@ import { returnsService } from '../services/returns.service.js';
 import { returnPackageRequestService } from '../services/return-package-request.service.js';
 import { refurbishmentService } from '../services/refurbishment.service.js';
 import { toPublicJson } from '../utils/serialize.js';
+import { AppError } from '../utils/error-handler.js';
 import { z } from 'zod';
 
 export class ReturnsController {
   async listAll(req, res) {
     const type = req.query.type ? String(req.query.type) : undefined;
     const status = req.query.status ? String(req.query.status) : undefined;
-    const data = await returnsService.listAll({ type, status });
+    const grouped = String(req.query.grouped || '') === '1' || String(req.query.grouped || '') === 'true';
+    const data = await returnsService.listAll({ type, status, grouped });
     res.status(200).json({ success: true, data: toPublicJson(data) });
   }
 
@@ -54,11 +56,37 @@ export class ReturnsController {
 
   async updateStatus(req, res) {
     const body = await validate(returnStatusUpdateSchema, req.body);
-    if (!body.status && body.manualCarrier === undefined && body.manualTrackingNumber === undefined && body.manualShippedAt === undefined && body.notes === undefined) {
+    if (!body.status && body.manualCarrier === undefined && body.manualTrackingNumber === undefined && body.manualShippedAt === undefined && body.notes === undefined && body.inspectionChecklist === undefined) {
       throw new AppError(400, 'No updates provided');
     }
     const actor = { id: req.user?.id, email: req.user?.email };
     const data = await returnsService.updateStatus(req.params.id, body, actor);
+    res.status(200).json({ success: true, data: toPublicJson(data) });
+  }
+
+  async processRefund(req, res) {
+    const actor = { id: req.user?.id, email: req.user?.email };
+    const data = await returnsService.processRefund(req.params.id, actor);
+    res.status(200).json({ success: true, data: toPublicJson(data) });
+  }
+
+  async restockReturn(req, res) {
+    const body = await validate(
+      z.object({
+        items: z
+          .array(
+            z.object({
+              returnItemId: z.string().min(1).optional(),
+              id: z.string().min(1).optional(),
+              quantity: z.number().int().positive().optional(),
+            })
+          )
+          .optional(),
+      }),
+      req.body ?? {}
+    );
+    const actor = { id: req.user?.id, email: req.user?.email };
+    const data = await returnsService.restockReturn(req.params.id, body, actor);
     res.status(200).json({ success: true, data: toPublicJson(data) });
   }
 

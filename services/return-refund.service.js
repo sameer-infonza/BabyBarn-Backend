@@ -103,12 +103,35 @@ export async function processStandardReturnRefund(returnRequest, actor) {
     { idempotencyKey: `return-refund-${full.publicId}-${amountCents}` }
   );
 
+  let refundPaymentMethodLabel = null;
+  try {
+    const pi = await stripe.paymentIntents.retrieve(paymentIntentId, {
+      expand: ['payment_method', 'latest_charge'],
+    });
+    const pm =
+      typeof pi.payment_method === 'object' && pi.payment_method
+        ? pi.payment_method
+        : typeof pi.latest_charge === 'object' && pi.latest_charge?.payment_method_details
+          ? null
+          : null;
+    const card =
+      pm?.card ||
+      (typeof pi.latest_charge === 'object' ? pi.latest_charge?.payment_method_details?.card : null);
+    if (card?.brand || card?.last4) {
+      const brand = card.brand ? String(card.brand).replace(/^\w/, (c) => c.toUpperCase()) : 'Card';
+      refundPaymentMethodLabel = card.last4 ? `${brand} ····${card.last4}` : brand;
+    }
+  } catch {
+    // Non-fatal — destination label is best-effort.
+  }
+
   const updated = await prisma.returnRequest.update({
     where: { id: full.id },
     data: {
       refundAmount: refundAmountUsd,
       stripeRefundId: refund.id,
       refundedAt: new Date(),
+      ...(refundPaymentMethodLabel ? { refundPaymentMethodLabel } : {}),
     },
   });
 

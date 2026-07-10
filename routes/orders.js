@@ -7,6 +7,7 @@ const router = Router();
 const ordersOrShipping = requireConsoleModuleAny(['orders', 'shipping']);
 
 router.get('/track', (req, res, next) => orderController.trackOrder(req, res).catch(next));
+router.post('/guest/cancel', (req, res, next) => orderController.cancelGuestOrder(req, res).catch(next));
 router.get('/', authenticate, requireFullAccount, (req, res, next) => orderController.getUserOrders(req, res).catch(next));
 router.get('/stats', authenticate, requireFullAccount, (req, res, next) => orderController.getUserOrderStats(req, res).catch(next));
 router.post('/', authenticate, (req, res, next) => orderController.createOrder(req, res).catch(next));

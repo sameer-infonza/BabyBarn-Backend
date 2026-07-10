@@ -24,6 +24,8 @@ export class WishlistService {
             stock: true,
             reservedStock: true,
             productType: true,
+            isDraft: true,
+            isActiveListing: true,
             variants: { select: { publicId: true, stock: true, reservedStock: true, priceOverride: true } },
           },
         },
@@ -33,14 +35,16 @@ export class WishlistService {
       },
     });
 
-    return rows.map((row) => ({
-      productId: row.product.publicId,
-      variantId: row.productVariant?.publicId ?? null,
-      priceAtAdd: row.priceAtAdd,
-      addedAt: row.createdAt,
-      product: row.product,
-      variant: row.productVariant,
-    }));
+    return rows
+      .filter((row) => row.product && !row.product.isDraft && row.product.isActiveListing)
+      .map((row) => ({
+        productId: row.product.publicId,
+        variantId: row.productVariant?.publicId ?? null,
+        priceAtAdd: row.priceAtAdd,
+        addedAt: row.createdAt,
+        product: row.product,
+        variant: row.productVariant,
+      }));
   }
 
   async syncForUser(userPublicId, items) {
@@ -56,7 +60,7 @@ export class WishlistService {
         where: { publicId: item.productId },
         include: { variants: true },
       });
-      if (!product || product.isDraft) continue;
+      if (!product || product.isDraft || !product.isActiveListing) continue;
 
       let variantDbId = null;
       let priceAtAdd = product.price;

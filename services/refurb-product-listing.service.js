@@ -19,10 +19,19 @@ export function findRefurbVariantForSource(refurbVariants, sourceVariant) {
   return refurbVariants.find((rv) => JSON.stringify(rv.combination ?? {}) === combo);
 }
 
-function clampStock(n) {
+function clampStock(n, { allowZero = false } = {}) {
   const v = Math.floor(Number(n));
+  if (!Number.isFinite(v)) return allowZero ? 0 : 1;
+  if (allowZero && v <= 0) return 0;
   if (!Number.isFinite(v) || v < 1) return 1;
   return Math.min(v, 99);
+}
+
+function sourceHasCanonicalAge(sourceFull) {
+  const age = typeof sourceFull.sizeAgeGroup === 'string' ? sourceFull.sizeAgeGroup.trim() : '';
+  if (!age) return false;
+  // Canonical ages match customer/admin AGE presets (e.g. 0-3M).
+  return /^(0-3M|3-6M|6-9M|9-12M|12-18M|18-24M)$/i.test(age);
 }
 
 /**
@@ -39,13 +48,27 @@ export async function listOrRestockRefurbForSourceInTx(tx, {
   actorUserId = null,
   ledgerReference,
   unitReturnRequestId = null,
+  createAsDraft = false,
 }) {
   if (!sourceFull) throw new AppError(400, 'Source product missing');
   if (sourceFull.productType !== 'NEW') {
     throw new AppError(400, 'Refurb listings can only be created from new catalog products');
   }
 
-  const qty = clampStock(initialStock);
+  const isVariantSource =
+    sourceFull.inventoryModel === 'variant_matrix' && sourceFull.variants.length > 0;
+  const lineVariant = sourceVariantId
+    ? sourceFull.variants.find((v) => v.id === sourceVariantId)
+    : isVariantSource && sourceFull.variants.length === 1
+      ? sourceFull.variants[0]
+      : null;
+
+  // Manual shells without age / without a chosen variant stay draft until admin finishes Age Groups.
+  const needsAgeConfig = !isVariantSource && !sourceHasCanonicalAge(sourceFull);
+  const cloneAllVariants = isVariantSource && !lineVariant;
+  const asDraft = Boolean(createAsDraft) || needsAgeConfig || cloneAllVariants;
+  const qty = clampStock(initialStock, { allowZero: asDraft });
+
   const refurbSku = `${sourceFull.sku}-RF`;
 
   const existing = await tx.product.findFirst({
@@ -57,15 +80,15 @@ export async function listOrRestockRefurbForSourceInTx(tx, {
     include: { variants: { orderBy: { sortOrder: 'asc' } } },
   });
 
-  const isVariantSource =
-    sourceFull.inventoryModel === 'variant_matrix' && sourceFull.variants.length > 0;
-  const lineVariant = sourceVariantId
-    ? sourceFull.variants.find((v) => v.id === sourceVariantId)
-    : isVariantSource && sourceFull.variants.length === 1
-      ? sourceFull.variants[0]
-      : null;
 
   if (existing) {
+    if (asDraft && qty < 1) {
+      // Opening an existing listing for edit — no stock change.
+      return {
+        product: existing,
+        restocked: false,
+      };
+    }
     const { syncParentStockFromVariants } = await import('./inventory.service.js');
     let ledgerVariantId = null;
 
@@ -129,17 +152,22 @@ export async function listOrRestockRefurbForSourceInTx(tx, {
     };
   }
 
+  // Also find inactive/draft shells for the same source so we don't duplicate.
+  const existingAny = await tx.product.findFirst({
+    where: {
+      productType: 'REFURBISHED',
+      sourceProductId: sourceFull.id,
+    },
+    include: { variants: { orderBy: { sortOrder: 'asc' } }, category: true },
+  });
+  if (existingAny) {
+    return { product: existingAny, restocked: false };
+  }
+
   const baseName = `${sourceFull.name} (Refurbished)`;
   const slugBase = slugifyName(baseName);
   const { ensureUniqueSlug } = await import('./product.service.js');
   const slug = await ensureUniqueSlug(tx, `${slugBase}-${sourceFull.slug.slice(-6)}`);
-
-  if (isVariantSource && !lineVariant) {
-    throw new AppError(
-      400,
-      'Select a variant for this product — variant-matrix refurb requires a source variant'
-    );
-  }
 
   const refurbPrice =
     refurbPriceFrom(sourceFull.memberPrice) ??
@@ -168,8 +196,8 @@ export async function listOrRestockRefurbForSourceInTx(tx, {
       vendor: sourceFull.vendor,
       tags: sourceFull.tags,
       productType: 'REFURBISHED',
-      isDraft: false,
-      isActiveListing: true,
+      isDraft: asDraft,
+      isActiveListing: !asDraft,
       sourceReturnId: sourceReturnId ?? null,
       sourceProductId: sourceFull.id,
       conditionGrade: conditionGrade ?? null,
@@ -180,9 +208,9 @@ export async function listOrRestockRefurbForSourceInTx(tx, {
   const { syncParentStockFromVariants } = await import('./inventory.service.js');
   let ledgerVariantId = null;
 
-  if (isVariantSource && lineVariant) {
+  if (isVariantSource) {
     for (const sv of sourceFull.variants) {
-      const isTarget = sv.id === lineVariant.id;
+      const isTarget = lineVariant ? sv.id === lineVariant.id : false;
       const variantPrice = sv.priceOverride != null ? refurbPriceFrom(sv.priceOverride) : refurbPrice;
       const created = await tx.productVariant.create({
         data: {
@@ -201,16 +229,18 @@ export async function listOrRestockRefurbForSourceInTx(tx, {
     await syncParentStockFromVariants(tx, product.id);
   }
 
-  await writeInventoryLedger(tx, {
-    productId: product.id,
-    productVariantId: ledgerVariantId,
-    quantityDelta: qty,
-    eventType: 'RESTOCK',
-    referenceType: ledgerReference.type,
-    referenceId: ledgerReference.id,
-    actorUserId,
-    note: ledgerReference.note || 'Refurbished unit listed',
-  });
+  if (qty > 0) {
+    await writeInventoryLedger(tx, {
+      productId: product.id,
+      productVariantId: ledgerVariantId,
+      quantityDelta: qty,
+      eventType: 'RESTOCK',
+      referenceType: ledgerReference.type,
+      referenceId: ledgerReference.id,
+      actorUserId,
+      note: ledgerReference.note || 'Refurbished unit listed',
+    });
+  }
 
   if (unitReturnRequestId) {
     await relinkUnitsForReturn(tx, {
@@ -255,6 +285,7 @@ export async function listOrRestockRefurbForSource({
   conditionGrade = null,
   actorUserId = null,
   ledgerReference,
+  createAsDraft = false,
 }) {
   const sourceFull = await prisma.product.findUnique({
     where: { publicId: sourceProductPublicId },
@@ -281,6 +312,7 @@ export async function listOrRestockRefurbForSource({
       sourceReturnId: null,
       actorUserId,
       ledgerReference,
+      createAsDraft,
     })
   );
 }
