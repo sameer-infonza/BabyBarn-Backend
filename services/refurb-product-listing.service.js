@@ -131,7 +131,7 @@ export async function listOrRestockRefurbForSourceInTx(tx, {
       referenceType: ledgerReference.type,
       referenceId: ledgerReference.id,
       actorUserId,
-      note: 'Refurbished unit restocked',
+      note: 'Inventory added after Refurbishment Approval',
     });
 
     if (unitReturnRequestId) {
@@ -238,7 +238,7 @@ export async function listOrRestockRefurbForSourceInTx(tx, {
       referenceType: ledgerReference.type,
       referenceId: ledgerReference.id,
       actorUserId,
-      note: ledgerReference.note || 'Refurbished unit listed',
+      note: ledgerReference.note || 'Inventory added after Refurbishment Approval',
     });
   }
 

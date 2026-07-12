@@ -39,6 +39,7 @@ async function ledgerRelease(tx, productId, productVariantId, quantity, ledgerCt
     referenceType: ledgerCtx.referenceType,
     referenceId: ledgerCtx.referenceId,
     actorUserId: ledgerCtx.actorUserId ?? null,
+    note: ledgerCtx.note ?? null,
   });
 }
 
@@ -52,6 +53,7 @@ async function ledgerCommit(tx, productId, productVariantId, quantity, ledgerCtx
     referenceType: ledgerCtx.referenceType,
     referenceId: ledgerCtx.referenceId,
     actorUserId: ledgerCtx.actorUserId ?? null,
+    note: ledgerCtx.note ?? null,
   });
 }
 

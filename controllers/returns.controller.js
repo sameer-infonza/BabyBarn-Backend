@@ -9,6 +9,8 @@ import {
   guestReturnTrackSchema,
   returnPackageRequestCreateSchema,
   returnPackageRequestUpdateSchema,
+  refurbUspsShipmentSchema,
+  returnCancelSchema,
   RETURN_STATUS_VALUES,
 } from '../schemas/index.js';
 import { returnsService } from '../services/returns.service.js';
@@ -23,7 +25,9 @@ export class ReturnsController {
     const type = req.query.type ? String(req.query.type) : undefined;
     const status = req.query.status ? String(req.query.status) : undefined;
     const grouped = String(req.query.grouped || '') === '1' || String(req.query.grouped || '') === 'true';
-    const data = await returnsService.listAll({ type, status, grouped });
+    const adminVisible =
+      String(req.query.adminVisible || '') === '1' || String(req.query.adminVisible || '') === 'true';
+    const data = await returnsService.listAll({ type, status, grouped, adminVisible });
     res.status(200).json({ success: true, data: toPublicJson(data) });
   }
 
@@ -192,6 +196,24 @@ export class ReturnsController {
     );
     const actor = { id: req.user?.id, email: req.user?.email };
     const data = await returnsService.bulkMarkReceived(body.returnPublicIds, actor);
+    res.status(200).json({ success: true, data: toPublicJson(data) });
+  }
+
+  async submitUspsShipment(req, res) {
+    const body = await validate(refurbUspsShipmentSchema, req.body);
+    const data = await returnsService.submitCustomerUspsShipment(req.user.id, req.params.id, body);
+    res.status(200).json({ success: true, data: toPublicJson(data) });
+  }
+
+  async cancelReturn(req, res) {
+    const body = await validate(returnCancelSchema, req.body ?? {});
+    const data = await returnsService.cancelByUser(req.user.id, req.params.id, body);
+    res.status(200).json({ success: true, data: toPublicJson(data) });
+  }
+
+  async keepWaiting(req, res) {
+    const actor = { id: req.user?.id, email: req.user?.email };
+    const data = await returnsService.keepWaiting(req.params.id, actor);
     res.status(200).json({ success: true, data: toPublicJson(data) });
   }
 

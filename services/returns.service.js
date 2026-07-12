@@ -23,7 +23,7 @@ import {
   evaluateRefurbQuestionnaire,
   initialReturnStatusForDecision,
 } from './refurb-eligibility.service.js';
-import { computeRefurbStoreCredit, getAccessUsedReturnWindowDays } from '../config/refurb.config.js';
+import { computeRefurbStoreCredit, getAccessUsedReturnWindowDays, refurbShipByDeadline } from '../config/refurb.config.js';
 import { verifyOrderTrackingToken } from '../lib/order-tracking-token.js';
 import { appendReturnStatusEvent, listReturnStatusEvents, appendReturnActionNote } from './return-status-events.service.js';
 import {
@@ -31,6 +31,7 @@ import {
   processStandardReturnRefund,
 } from './return-refund.service.js';
 import { assignReturnNumber } from '../utils/return-number.js';
+import { returnLedgerNote } from '../lib/inventory-ledger-notes.js';
 
 function isMissingWalletTableError(error) {
   return Boolean(
@@ -54,7 +55,7 @@ const REFURB_TRANSITIONS = {
   REQUESTED: ['ELIGIBILITY_REVIEW', 'ELIGIBILITY_REJECTED', 'APPROVED', 'REJECTED'],
   ELIGIBILITY_REVIEW: ['APPROVED', 'ELIGIBILITY_REJECTED', 'REJECTED'],
   ELIGIBILITY_REJECTED: [],
-  APPROVED: ['LABEL_GENERATED', 'REJECTED'],
+  APPROVED: ['IN_TRANSIT', 'CANCELLED', 'REJECTED'],
   LABEL_GENERATED: ['IN_TRANSIT', 'RECEIVED', 'REJECTED'],
   IN_TRANSIT: ['RECEIVED', 'REJECTED'],
   RECEIVED: ['UNDER_INSPECTION'],
@@ -62,10 +63,20 @@ const REFURB_TRANSITIONS = {
   INSPECTION_APPROVED: [],
   INSPECTION_REJECTED: [],
   REJECTED: [],
+  CANCELLED: [],
 };
 
 const returnInclude = {
-  user: { select: { publicId: true, email: true, firstName: true, lastName: true } },
+  user: {
+    select: {
+      publicId: true,
+      email: true,
+      firstName: true,
+      lastName: true,
+      isGuest: true,
+      accessMemberUntil: true,
+    },
+  },
   order: {
     select: {
       id: true,
@@ -82,7 +93,7 @@ const returnInclude = {
   orderItem: {
     include: {
       product: {
-        select: { publicId: true, name: true, productType: true, sku: true, slug: true },
+        select: { publicId: true, name: true, productType: true, sku: true, slug: true, sizeAgeGroup: true },
       },
       productVariant: {
         select: { publicId: true, sku: true, combination: true },
@@ -201,6 +212,38 @@ function checklistComplete(checklist) {
   return keys.every((k) => checklist[k] === true);
 }
 
+function computeRefurbCreditPreview(row) {
+  if (row?.type !== 'REFURBISHMENT' || !row.orderItem) return null;
+  if (row.orderItem.product?.productType === 'REFURBISHED') return 0;
+  const unit = Number(row.orderItem.memberPriceSnapshot ?? row.orderItem.price ?? 0);
+  const qty = Math.max(1, Number(row.quantity ?? 1));
+  return Math.round(computeRefurbStoreCredit(unit) * qty * 100) / 100;
+}
+
+/** Admin refurb queue: hide APPROVED until customer submits USPS tracking or requests envelope. */
+function isRefurbVisibleToAdmin(row, openPackageOrderIds = new Set()) {
+  if (row.type !== 'REFURBISHMENT') return true;
+  if (row.status === 'ELIGIBILITY_REVIEW') return true;
+  if (['IN_TRANSIT', 'RECEIVED', 'UNDER_INSPECTION', 'INSPECTION_APPROVED', 'INSPECTION_REJECTED'].includes(row.status)) {
+    return true;
+  }
+  if (row.customerShippingSubmittedAt || row.manualTrackingNumber) return true;
+  if (openPackageOrderIds.has(row.orderId)) return true;
+  return false;
+}
+
+async function loadOpenPackageOrderIds(orderIds = []) {
+  if (!orderIds.length) return new Set();
+  const rows = await prisma.returnPackageRequest.findMany({
+    where: {
+      orderId: { in: orderIds },
+      status: { in: ['REQUESTED', 'APPROVED', 'SENT'] },
+    },
+    select: { orderId: true },
+  });
+  return new Set(rows.map((r) => r.orderId));
+}
+
 function buildSubmissionChildItem(row) {
   return {
     id: row.publicId,
@@ -224,6 +267,11 @@ function buildSubmissionChildItem(row) {
     manualCarrier: row.manualCarrier,
     manualTrackingNumber: row.manualTrackingNumber,
     manualShippedAt: row.manualShippedAt,
+    customerShippingNote: row.customerShippingNote ?? null,
+    customerShippingSubmittedAt: row.customerShippingSubmittedAt ?? null,
+    shipByDeadline: row.shipByDeadline ?? null,
+    keepWaitingUntil: row.keepWaitingUntil ?? null,
+    creditPreview: computeRefurbCreditPreview(row),
     returnLabelUrl: row.returnLabelUrl,
     returnTrackingNumber: row.returnTrackingNumber,
     returnShippingCarrier: row.returnShippingCarrier,
@@ -290,6 +338,12 @@ function buildReturnSubmission(rows, { includeEvents = false } = {}) {
     manualTrackingNumber:
       items.length === 1 ? primary.manualTrackingNumber : latestTrackingRow?.manualTrackingNumber ?? null,
     manualShippedAt: items.length === 1 ? primary.manualShippedAt : latestTrackingRow?.manualShippedAt ?? null,
+    customerShippingNote: latestTrackingRow?.customerShippingNote ?? primary.customerShippingNote ?? null,
+    customerShippingSubmittedAt:
+      latestTrackingRow?.customerShippingSubmittedAt ?? primary.customerShippingSubmittedAt ?? null,
+    shipByDeadline: primary.shipByDeadline ?? latestFirst.find((r) => r.shipByDeadline)?.shipByDeadline ?? null,
+    keepWaitingUntil: primary.keepWaitingUntil ?? latestFirst.find((r) => r.keepWaitingUntil)?.keepWaitingUntil ?? null,
+    creditPreview: items.reduce((sum, row) => sum + Number(row.creditPreview ?? 0), 0) || null,
     returnLabelUrl: latestTrackingRow?.returnLabelUrl ?? null,
     returnTrackingNumber: latestTrackingRow?.returnTrackingNumber ?? null,
     returnShippingCarrier: latestTrackingRow?.returnShippingCarrier ?? null,
@@ -326,12 +380,17 @@ export class ReturnsService {
   async listAll(filters = {}) {
     const where = {};
     if (filters.type) where.type = filters.type;
-    if (filters.status) where.status = filters.status;
-    const rows = await prisma.returnRequest.findMany({
+    if (filters.status && filters.status !== 'all') where.status = filters.status;
+    let rows = await prisma.returnRequest.findMany({
       where,
       include: returnInclude,
       orderBy: { createdAt: 'desc' },
     });
+    if (filters.adminVisible && filters.type === 'REFURBISHMENT') {
+      const orderIds = [...new Set(rows.map((r) => r.orderId).filter(Boolean))];
+      const openPkgOrders = await loadOpenPackageOrderIds(orderIds);
+      rows = rows.filter((row) => isRefurbVisibleToAdmin(row, openPkgOrders));
+    }
     // Flat rows for inspection/dashboard; grouped submissions for admin returns list.
     if (filters.grouped) return groupReturnRows(rows);
     return rows;
@@ -381,7 +440,9 @@ export class ReturnsService {
         statusEvents: await listReturnStatusEvents(row.id),
       }))
     );
-    return buildReturnSubmission(rowsWithEvents, { includeEvents: true });
+    const submission = buildReturnSubmission(rowsWithEvents, { includeEvents: true });
+    const packageRequest = await this.getPackageRequestForSubmission(rows);
+    return { ...submission, packageRequest };
   }
 
   async getById(returnPublicId) {
@@ -411,17 +472,22 @@ export class ReturnsService {
     );
     const submissionReturnNumber =
       submissionItems.find((item) => item.returnNumber)?.returnNumber || row.returnNumber || null;
-    return {
-      ...row,
+    const rowsWithPreview = submissionItems.map((item) => ({
+      ...item,
+      refundPreview: computeRowRefundPreview(item),
+    }));
+    const submission = buildReturnSubmission(rowsWithPreview, { includeEvents: false });
+    const packageRequest = await this.getPackageRequestForSubmission(submissionItems);
+  return {
+      ...submission,
+      id: row.publicId,
+      primaryItemId: row.publicId,
+      statusEvents,
       returnNumber: submissionReturnNumber,
       submissionId: returnSubmissionKey(row),
-      statusEvents,
-      refundPreview: submissionRefundPreview > 0 ? submissionRefundPreview : null,
-      submissionItems: submissionItems.map((item) =>
-        buildSubmissionChildItem({
-          ...item,
-          refundPreview: computeRowRefundPreview(item),
-        })
+      refundPreview: submissionRefundPreview > 0 ? submissionRefundPreview : submission?.refundPreview ?? null,
+      submissionItems: rowsWithPreview.map((item) =>
+        buildSubmissionChildItem(item)
       ),
       submissionStatus: deriveSubmissionStatus(submissionItems),
       submissionQuantity: submissionItems.reduce((sum, item) => sum + Math.max(1, Number(item.quantity ?? 1)), 0),
@@ -432,6 +498,19 @@ export class ReturnsService {
       refundPaymentMethodLabel:
         submissionItems.find((i) => i.refundPaymentMethodLabel)?.refundPaymentMethodLabel ||
         row.refundPaymentMethodLabel,
+      packageRequest,
+      eligibilityQuestionnaire: row.eligibilityQuestionnaire,
+      inspectionRecords: row.inspectionRecords,
+      refurbishmentJob: row.refurbishmentJob,
+      user: row.user,
+      order: row.order,
+      orderItem: submissionItems.length === 1 ? row.orderItem : null,
+      type: row.type,
+      status: deriveSubmissionStatus(submissionItems),
+      reason: row.reason,
+      notes: row.notes,
+      createdAt: row.createdAt,
+      updatedAt: row.updatedAt,
     };
   }
 
@@ -860,8 +939,14 @@ export class ReturnsService {
       },
     });
     if (!rr) throw new AppError(404, 'Return request not found');
-    if (rr.type === 'REFURBISHMENT' && !['APPROVED', 'LABEL_GENERATED'].includes(rr.status)) {
-      throw new AppError(400, 'Return must be eligibility-approved before generating a label');
+    if (rr.type === 'REFURBISHMENT') {
+      throw new AppError(
+        400,
+        'Refurbishment returns use customer-provided USPS tracking. Generate labels are not used for this path.'
+      );
+    }
+    if (!['APPROVED', 'LABEL_GENERATED'].includes(rr.status)) {
+      throw new AppError(400, 'Return must be approved before generating a label');
     }
 
     // One prepaid return envelope per order. The first return (of any type) gets a
@@ -1472,7 +1557,11 @@ export class ReturnsService {
             referenceType: 'return',
             referenceId: sibling.publicId,
             actorUserId,
-            note: `Standard return restock · ${sibling.returnNumber || sibling.publicId}`,
+            note: returnLedgerNote(
+              'RESTOCK',
+              sibling.returnNumber || sibling.publicId,
+              sibling.type
+            ),
           },
           'RESTOCK'
         );
@@ -1499,6 +1588,211 @@ export class ReturnsService {
     });
 
     return this.getById(returnPublicId);
+  }
+
+  async getPackageRequestForSubmission(rows) {
+    const orderId = rows[0]?.orderId;
+    const returnRequestId = rows[0]?.id;
+    if (!orderId) return null;
+    const linked = returnRequestId
+      ? await prisma.returnPackageRequest.findFirst({
+          where: {
+            returnRequestId,
+            status: { in: ['REQUESTED', 'APPROVED', 'SENT'] },
+          },
+          orderBy: { createdAt: 'desc' },
+          select: {
+            publicId: true,
+            status: true,
+            reason: true,
+            comments: true,
+            dispatchDate: true,
+            uspsTrackingNumber: true,
+            expectedDeliveryDate: true,
+            adminNotes: true,
+            createdAt: true,
+            updatedAt: true,
+          },
+        })
+      : null;
+    if (linked) return linked;
+    return prisma.returnPackageRequest.findFirst({
+      where: {
+        orderId,
+        status: { in: ['REQUESTED', 'APPROVED', 'SENT'] },
+      },
+      orderBy: { createdAt: 'desc' },
+      select: {
+        publicId: true,
+        status: true,
+        reason: true,
+        comments: true,
+        dispatchDate: true,
+        uspsTrackingNumber: true,
+        expectedDeliveryDate: true,
+        adminNotes: true,
+        createdAt: true,
+        updatedAt: true,
+      },
+    });
+  }
+
+  async submitCustomerUspsShipment(userPublicId, returnPublicId, { trackingNumber, note, shippedAt }) {
+    const user = await prisma.user.findUnique({ where: { publicId: userPublicId }, select: { id: true } });
+    if (!user) throw new AppError(401, 'Unauthorized');
+
+    const rows = await this._loadUserSubmissionRows(user.id, returnPublicId);
+    const primary = rows[0];
+    if (primary.type !== 'REFURBISHMENT') throw new AppError(400, 'Only refurbishment returns accept USPS shipment details');
+    if (!['APPROVED', 'LABEL_GENERATED'].includes(primary.status)) {
+      throw new AppError(400, 'Return is not awaiting your shipment details');
+    }
+
+    const tracking = String(trackingNumber || '').trim();
+    if (!tracking) throw new AppError(400, 'USPS tracking number is required');
+
+    const shipped = shippedAt ? new Date(shippedAt) : new Date();
+    const noteTrimmed = note ? String(note).trim() : null;
+
+    const receiveDeadline = refurbShipByDeadline(shipped);
+
+    await prisma.$transaction(async (tx) => {
+      for (const row of rows) {
+        await tx.returnRequest.update({
+          where: { id: row.id },
+          data: {
+            status: 'IN_TRANSIT',
+            manualCarrier: 'USPS',
+            manualTrackingNumber: tracking,
+            manualShippedAt: shipped,
+            customerShippingNote: noteTrimmed,
+            customerShippingSubmittedAt: new Date(),
+            shipByDeadline: receiveDeadline,
+            keepWaitingUntil: null,
+          },
+        });
+        await appendReturnStatusEvent(tx, {
+          returnRequestId: row.id,
+          fromStatus: row.status,
+          toStatus: 'IN_TRANSIT',
+          actorUserId: user.id,
+          note: noteTrimmed ? `Customer shipped via USPS · ${noteTrimmed}` : 'Customer shipped via USPS',
+        });
+      }
+    });
+
+    return this.getForUser(userPublicId, returnPublicId);
+  }
+
+  async cancelByUser(userPublicId, returnPublicId, { reason } = {}) {
+    const user = await prisma.user.findUnique({ where: { publicId: userPublicId }, select: { id: true } });
+    if (!user) throw new AppError(401, 'Unauthorized');
+
+    const rows = await this._loadUserSubmissionRows(user.id, returnPublicId);
+    const primary = rows[0];
+    if (!['APPROVED', 'ELIGIBILITY_REVIEW', 'REQUESTED'].includes(primary.status)) {
+      throw new AppError(400, 'This return can no longer be cancelled online');
+    }
+
+    const note = reason ? String(reason).trim() : 'Cancelled by customer';
+
+    await prisma.$transaction(async (tx) => {
+      for (const row of rows) {
+        await tx.returnRequest.update({
+          where: { id: row.id },
+          data: { status: 'CANCELLED', notes: note },
+        });
+        await appendReturnStatusEvent(tx, {
+          returnRequestId: row.id,
+          fromStatus: row.status,
+          toStatus: 'CANCELLED',
+          actorUserId: user.id,
+          note,
+        });
+      }
+    });
+
+    return this.getForUser(userPublicId, returnPublicId);
+  }
+
+  async keepWaiting(returnPublicId, actor) {
+    const rr = await prisma.returnRequest.findUnique({
+      where: { publicId: returnPublicId },
+    });
+    if (!rr) throw new AppError(404, 'Return request not found');
+    if (rr.type !== 'REFURBISHMENT') throw new AppError(400, 'Only refurbishment returns support keep waiting');
+    if (!['APPROVED', 'IN_TRANSIT'].includes(rr.status)) {
+      throw new AppError(400, 'Return is not in a shippable state');
+    }
+
+    const activeDeadline = rr.keepWaitingUntil || rr.shipByDeadline;
+    if (!activeDeadline) {
+      throw new AppError(400, 'Expected receive date is not set yet — waiting for customer USPS tracking or envelope dispatch');
+    }
+    if (new Date() <= new Date(activeDeadline)) {
+      throw new AppError(400, 'Keep waiting is only available after the expected receive date has passed');
+    }
+
+    const actorUserId = await resolveActorUserId(actor);
+    const submissionKey = rr.submissionPublicId || rr.publicId;
+    const siblings = await prisma.returnRequest.findMany({
+      where: { submissionPublicId: submissionKey },
+      select: { id: true, status: true },
+    });
+
+    const extended = refurbShipByDeadline(rr.keepWaitingUntil || rr.shipByDeadline || new Date());
+
+    await prisma.$transaction(async (tx) => {
+      for (const row of siblings) {
+        await tx.returnRequest.update({
+          where: { id: row.id },
+          data: { keepWaitingUntil: extended },
+        });
+        await appendReturnStatusEvent(tx, {
+          returnRequestId: row.id,
+          fromStatus: row.status,
+          toStatus: row.status,
+          actorUserId,
+          note: `Keep waiting until ${extended.toLocaleDateString()}`,
+        });
+      }
+    });
+
+    await writeAdminAudit({
+      actorId: actor?.id,
+      actorEmail: actor?.email,
+      action: 'RETURN_KEEP_WAITING',
+      entityType: 'ReturnRequest',
+      entityId: returnPublicId,
+      meta: { keepWaitingUntil: extended.toISOString() },
+    });
+
+    return this.getById(returnPublicId);
+  }
+
+  async _loadUserSubmissionRows(userId, returnPublicId) {
+    let rows = await prisma.returnRequest.findMany({
+      where: {
+        userId,
+        OR: [
+          { publicId: returnPublicId },
+          { submissionPublicId: returnPublicId },
+          { returnNumber: returnPublicId },
+        ],
+      },
+      orderBy: { createdAt: 'asc' },
+    });
+    if (!rows.length) throw new AppError(404, 'Return request not found');
+    if (rows.length === 1) {
+      const key = returnSubmissionKey(rows[0]);
+      if (key && key !== returnPublicId) {
+        rows = await prisma.returnRequest.findMany({
+          where: { userId, submissionPublicId: key },
+          orderBy: { createdAt: 'asc' },
+        });
+      }
+    }
+    return rows;
   }
 
   async bulkMarkReceived(returnPublicIds, actor) {

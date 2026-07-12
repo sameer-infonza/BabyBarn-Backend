@@ -26,6 +26,7 @@ import {
   canCustomerCancelOrder,
   customerCancelUnavailableReason,
 } from '../lib/customer-order-cancellation.js';
+import { formatOrderLedgerLabel, orderLedgerNote } from '../lib/inventory-ledger-notes.js';
 import * as orderDocuments from './pdf/order-documents.service.js';
 import { emailService } from './email.service.js';
 import { config } from '../config/env.js';
@@ -1122,6 +1123,9 @@ export class OrderService {
         return;
       }
 
+      const orderLabel = formatOrderLedgerLabel(order.orderNumber, orderPublicId);
+      const releaseNote = orderLedgerNote('RELEASE', orderLabel);
+
       for (const line of order.orderItems) {
         if (line.cancelledAt) continue;
         if (filterIds && !filterIds.has(String(line.publicId))) continue;
@@ -1133,7 +1137,8 @@ export class OrderService {
         await releaseOrderLineStock(tx, product, line.productVariantId, line.quantity, {
           referenceType: 'order',
           referenceId: orderPublicId,
-          actorUserId: order.userId,
+          actorUserId: opts.actorUserId ?? order.userId,
+          note: releaseNote,
         });
       }
 
@@ -1165,6 +1170,9 @@ export class OrderService {
         return order;
       }
 
+      const orderLabel = formatOrderLedgerLabel(order.orderNumber, orderPublicId);
+      const commitNote = orderLedgerNote('COMMIT', orderLabel);
+
       for (const line of order.orderItems) {
         if (line.cancelledAt) continue;
         const product = await tx.product.findUnique({
@@ -1175,6 +1183,7 @@ export class OrderService {
           referenceType: 'order',
           referenceId: orderPublicId,
           actorUserId: order.userId,
+          note: commitNote,
         });
       }
 
@@ -1204,10 +1213,32 @@ export class OrderService {
   async updateOrderStatus(orderPublicId, status, actor) {
     const order = await prisma.order.findUnique({
       where: { publicId: orderPublicId },
+      include: { orderItems: { include: { product: true } } },
     });
 
     if (!order) {
       throw new AppError(404, 'Order not found');
+    }
+
+    if (status === 'CANCELLED' && order.status !== 'CANCELLED') {
+      const actorUserId = await resolveActorUserId(actor);
+      const { order: updated } = await this.finalizeOrderCancellation(order, {
+        reason: 'Cancelled by admin',
+        actorUserId,
+        reviewStatus: 'NONE',
+      });
+      await writeAdminAudit({
+        actorId: actor?.id,
+        actorEmail: actor?.email,
+        action: 'ORDER_STATUS',
+        entityType: 'Order',
+        entityId: orderPublicId,
+        meta: { from: order.status, to: 'CANCELLED', via: 'status_update' },
+      });
+      return prisma.order.findUnique({
+        where: { id: updated.id },
+        include: { orderItems: { include: { product: true } }, user: userForOrderList },
+      });
     }
 
     const updated = await prisma.order.update({
@@ -1447,11 +1478,12 @@ export class OrderService {
         include: { orderItems: true },
       });
       const { restockPaidOrderInTx } = await import('./inventory-restock.service.js');
+      const orderLabel = formatOrderLedgerLabel(order.orderNumber, orderPublicId);
       await restockPaidOrderInTx(tx, withItems, {
         referenceType: 'order',
         referenceId: orderPublicId,
         eventType: 'REFUND_RESTORE',
-        note: 'Stripe refund',
+        note: orderLedgerNote('REFUND_RESTORE', orderLabel),
         actorUserId: actor?.id ?? null,
       });
       return tx.order.update({
@@ -1992,11 +2024,12 @@ export class OrderService {
 
       if (isPaid) {
         const { restockPaidOrderInTx } = await import('./inventory-restock.service.js');
+        const orderLabel = formatOrderLedgerLabel(withItems.orderNumber, orderPublicId);
         await restockPaidOrderInTx(tx, withItems, {
           referenceType: 'order',
           referenceId: orderPublicId,
           eventType: 'REFUND_RESTORE',
-          note: cancellingAll ? 'Customer order cancellation' : 'Customer partial item cancellation',
+          note: orderLedgerNote('REFUND_RESTORE', orderLabel),
           actorUserId,
           itemPublicIds: cancelIds,
         });
@@ -2277,6 +2310,7 @@ export class OrderService {
       if (order.paymentStatus !== 'UNPAID') {
         throw new AppError(400, 'Only unpaid orders can be rejected from this action');
       }
+      await this.releasePendingOrderResources(order.publicId, { actorUserId: await resolveActorUserId(actor) });
       data.status = 'CANCELLED';
       data.fulfillmentStatus = null;
     } else {

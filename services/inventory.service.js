@@ -443,6 +443,10 @@ export class InventoryService {
         reason: e.note,
         referenceType: e.referenceType,
         referenceId: e.referenceId,
+        referenceOrderNumber: e.referenceOrderNumber ?? null,
+        referenceCheckoutIntentId: e.referenceCheckoutIntentId ?? null,
+        referenceReturnNumber: e.referenceReturnNumber ?? null,
+        referenceReturnType: e.referenceReturnType ?? null,
         createdAt: e.createdAt,
         product: e.product,
         variant: e.variant,
@@ -459,13 +463,10 @@ export class InventoryService {
     });
     if (!product) throw new AppError(404, 'Product not found');
 
-    const [ledger, units, orderLines] = await Promise.all([
-      prisma.inventoryLedgerEvent.findMany({
-        where: { productId: product.id },
-        orderBy: { createdAt: 'desc' },
-        take: 100,
-        include: { productVariant: { select: { publicId: true, sku: true } } },
-      }),
+    const { listLedgerHistory } = await import('./inventory-ledger.service.js');
+
+    const [ledgerResult, units, orderLines] = await Promise.all([
+      listLedgerHistory({ productPublicId, page: 1, limit: 100 }),
       prisma.productUnit.findMany({
         where: { productId: product.id },
         orderBy: { updatedAt: 'desc' },
@@ -484,14 +485,19 @@ export class InventoryService {
 
     return {
       product: { id: product.publicId, name: product.name },
-      ledger: ledger.map((e) => ({
-        id: e.publicId,
+      ledger: ledgerResult.entries.map((e) => ({
+        id: e.id,
         eventType: e.eventType,
         quantityDelta: e.quantityDelta,
         referenceType: e.referenceType,
         referenceId: e.referenceId,
+        referenceOrderNumber: e.referenceOrderNumber ?? null,
+        referenceCheckoutIntentId: e.referenceCheckoutIntentId ?? null,
+        referenceReturnNumber: e.referenceReturnNumber ?? null,
+        referenceReturnType: e.referenceReturnType ?? null,
+        note: e.note ?? null,
         createdAt: e.createdAt,
-        variantSku: e.productVariant?.sku ?? null,
+        variantSku: e.variant?.sku ?? null,
       })),
       units: units.map((u) => ({
         id: u.publicId,

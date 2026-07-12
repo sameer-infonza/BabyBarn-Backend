@@ -245,6 +245,29 @@ export async function listFinanceTransactions(
         ${lteRefund}
         ${refundOrderFilter}
     `);
+    parts.push(Prisma.sql`
+      SELECT
+        'cancellation'::text AS "kind",
+        'refund'::text AS "direction",
+        o."publicId" AS "publicId",
+        COALESCE(o."orderNumber", o."publicId") AS "reference",
+        o."totalAmount"::float AS "amount",
+        'CANCELLED'::text AS "status",
+        o."updatedAt" AS "occurredAt",
+        u."email" AS "customerEmail",
+        u."firstName" AS "customerFirstName",
+        u."lastName" AS "customerLastName",
+        u."publicId" AS "userPublicId",
+        o."stripePaymentIntentId" AS "stripeSessionId",
+        NULL::text AS "returnPublicId"
+      FROM "Order" o
+      INNER JOIN "User" u ON o."userId" = u."id"
+      WHERE o."status" = 'CANCELLED'
+        AND o."paymentStatus" IN ('REFUNDED', 'PARTIALLY_REFUNDED')
+        ${gteOrder}
+        ${lteOrder}
+        ${orderFilter}
+    `);
   }
 
   if (!parts.length) {
@@ -426,6 +449,21 @@ export async function getCustomerDetail(userPublicId) {
           status: true,
           type: true,
           createdAt: true,
+          manualTrackingNumber: true,
+          customerShippingSubmittedAt: true,
+          shipByDeadline: true,
+          keepWaitingUntil: true,
+          creditAwarded: true,
+          order: { select: { publicId: true, orderNumber: true } },
+          packageRequests: {
+            orderBy: { createdAt: 'desc' },
+            take: 1,
+            select: {
+              status: true,
+              uspsTrackingNumber: true,
+              expectedDeliveryDate: true,
+            },
+          },
         },
       }),
       prisma.returnRequest.count({ where: { userId: uid.id } }),
@@ -475,7 +513,11 @@ export async function getCustomerDetail(userPublicId) {
     totalSpend: orderAgg._sum.totalAmount ?? 0,
     orderCount: orderAgg._count,
     orders,
-    returns,
+    returns: returns.map((row) => ({
+      ...row,
+      packageRequest: row.packageRequests?.[0] ?? null,
+      packageRequests: undefined,
+    })),
     returnsCount,
     addresses,
     membershipPayments,

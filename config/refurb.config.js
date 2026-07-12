@@ -1,6 +1,18 @@
 /** Refurbishment program configuration — override via environment. */
 export const REFURB_STORE_CREDIT_RATE = Number(process.env.REFURB_STORE_CREDIT_RATE ?? 0.2);
 
+/** Default days until admin expects to receive a refurb return (USPS), from tracking or envelope sent. */
+export const REFURB_SHIP_DEADLINE_DAYS = Number(process.env.REFURB_SHIP_DEADLINE_DAYS ?? 10);
+
+/** @param {Date|string} [from] anchor — customer USPS submission or outbound envelope dispatch */
+export function refurbShipByDeadline(from = new Date()) {
+  const base = from instanceof Date ? from : new Date(from);
+  return new Date(base.getTime() + REFURB_SHIP_DEADLINE_DAYS * 24 * 60 * 60 * 1000);
+}
+
+/** Alias for admin SLA copy — same configurable window as refurbShipByDeadline. */
+export const refurbExpectedReceiveDeadline = refurbShipByDeadline;
+
 /** Default when BusinessSettings row is unset (env override). */
 export const ACCESS_USED_RETURN_WINDOW_DAYS = Number(process.env.ACCESS_USED_RETURN_WINDOW_DAYS ?? 365);
 

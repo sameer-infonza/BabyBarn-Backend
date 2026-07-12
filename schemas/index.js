@@ -551,6 +551,7 @@ export const RETURN_STATUS_VALUES = [
   'INSPECTION_APPROVED',
   'INSPECTION_REJECTED',
   'REJECTED',
+  'CANCELLED',
 ];
 
 export const returnStatusUpdateSchema = z.object({
@@ -581,6 +582,7 @@ export const guestReturnTrackSchema = z.object({
 
 export const returnPackageRequestCreateSchema = z.object({
   orderId: z.string().min(1),
+  returnRequestId: z.string().min(1).optional(),
   reason: z.string().min(3).max(500),
   comments: z.string().max(2000).optional(),
 });
@@ -590,6 +592,17 @@ export const returnPackageRequestUpdateSchema = z.object({
   adminNotes: z.string().max(2000).optional().nullable(),
   dispatchDate: z.string().datetime().optional().nullable(),
   uspsTrackingNumber: z.string().max(120).optional().nullable(),
+  expectedDeliveryDate: z.string().datetime().optional().nullable(),
+});
+
+export const refurbUspsShipmentSchema = z.object({
+  trackingNumber: z.string().min(3).max(120),
+  note: z.string().max(500).optional().nullable(),
+  shippedAt: z.string().datetime().optional().nullable(),
+});
+
+export const returnCancelSchema = z.object({
+  reason: z.string().max(500).optional().nullable(),
 });
 
 export const returnEligibilityReviewSchema = z.object({

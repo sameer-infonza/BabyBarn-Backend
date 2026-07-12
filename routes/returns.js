@@ -78,6 +78,13 @@ router.post(
   returnsOrInspection,
   (req, res, next) => returnsController.bulkMarkReceived(req, res).catch(next)
 );
+router.post(
+  '/:id/keep-waiting',
+  authenticate,
+  authorize('ADMIN', 'ADMIN_TEAM'),
+  returnsOrInspection,
+  (req, res, next) => returnsController.keepWaiting(req, res).catch(next)
+);
 router.post('/guest', (req, res, next) => returnsController.createGuest(req, res).catch(next));
 router.post('/guest/track', (req, res, next) => returnsController.trackGuest(req, res).catch(next));
 router.post(
@@ -114,6 +121,18 @@ router.post('/upload-photo', authenticate, requireFullAccount, (req, res, next) 
   });
 });
 router.get('/:id', authenticate, requireFullAccount, (req, res, next) => returnsController.getMineById(req, res).catch(next));
+router.post(
+  '/:id/usps-shipment',
+  authenticate,
+  requireFullAccount,
+  (req, res, next) => returnsController.submitUspsShipment(req, res).catch(next)
+);
+router.post(
+  '/:id/cancel',
+  authenticate,
+  requireFullAccount,
+  (req, res, next) => returnsController.cancelReturn(req, res).catch(next)
+);
 router.post('/', authenticate, requireFullAccount, (req, res, next) => returnsController.create(req, res).catch(next));
 router.patch(
   '/:id/status',

@@ -57,6 +57,7 @@ enum ReturnStatus {
   INSPECTION_APPROVED
   INSPECTION_REJECTED
   REJECTED
+  CANCELLED
 }
 
 enum RefurbEligibilityDecision {
@@ -678,6 +679,13 @@ model ReturnRequest {
   manualCarrier String?
   manualTrackingNumber String?
   manualShippedAt DateTime?
+  /// Customer-submitted USPS return shipment (refurb path).
+  customerShippingNote String?
+  customerShippingSubmittedAt DateTime?
+  /// Default 10-day window for customer to ship refurb return after approval.
+  shipByDeadline DateTime?
+  /// Admin extended wait — platform tracks status only.
+  keepWaitingUntil DateTime?
   inspectionChecklistJson Json?
   returnLabelUrl String?
   returnTrackingNumber String?
@@ -699,6 +707,7 @@ model ReturnRequest {
   eligibilityQuestionnaire ReturnEligibilityQuestionnaire?
   inspectionRecords RefurbInspectionRecord[]
   statusEvents ReturnStatusEvent[]
+  packageRequests ReturnPackageRequest[]
 
   @@index([userId])
   @@index([orderId])
@@ -726,20 +735,24 @@ model ReturnPackageRequest {
   publicId           String                     @unique @default(cuid())
   userId             Int
   orderId            Int
+  returnRequestId    Int?
   reason             String
   comments           String?
   status             ReturnPackageRequestStatus @default(REQUESTED)
   dispatchDate       DateTime?
   uspsTrackingNumber String?
+  expectedDeliveryDate DateTime?
   adminNotes         String?
   createdAt          DateTime                   @default(now())
   updatedAt          DateTime                   @updatedAt
 
-  user  User  @relation(fields: [userId], references: [id], onDelete: Cascade)
-  order Order @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  user          User           @relation(fields: [userId], references: [id], onDelete: Cascade)
+  order         Order          @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  returnRequest ReturnRequest? @relation(fields: [returnRequestId], references: [id], onDelete: SetNull)
 
   @@index([userId])
   @@index([orderId])
+  @@index([returnRequestId])
   @@index([status])
 }
 

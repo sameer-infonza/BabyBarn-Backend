@@ -175,6 +175,68 @@ export async function listLedgerHistory({
     prisma.inventoryLedgerEvent.count({ where }),
   ]);
 
+  const orderPublicIds = [
+    ...new Set(
+      rows
+        .filter((r) => r.referenceType === 'order' && r.referenceId && !r.referenceId.startsWith('pending:'))
+        .map((r) => r.referenceId)
+    ),
+  ];
+
+  const checkoutRefIds = [
+    ...new Set(
+      rows.filter((r) => r.referenceType === 'checkout_intent' && r.referenceId).map((r) => r.referenceId)
+    ),
+  ];
+  const checkoutIntents =
+    checkoutRefIds.length > 0
+      ? await prisma.checkoutIntent.findMany({
+          where: {
+            OR: [
+              { publicId: { in: checkoutRefIds } },
+              { checkoutSignature: { in: checkoutRefIds } },
+            ],
+          },
+          select: { publicId: true, checkoutSignature: true, orderPublicId: true, status: true },
+        })
+      : [];
+  const checkoutByRef = new Map();
+  for (const intent of checkoutIntents) {
+    checkoutByRef.set(intent.publicId, intent);
+    if (intent.checkoutSignature) checkoutByRef.set(intent.checkoutSignature, intent);
+  }
+
+  const allOrderPublicIds = [
+    ...new Set([
+      ...orderPublicIds,
+      ...checkoutIntents.map((i) => i.orderPublicId).filter(Boolean),
+    ]),
+  ];
+  const orders =
+    allOrderPublicIds.length > 0
+      ? await prisma.order.findMany({
+          where: { publicId: { in: allOrderPublicIds } },
+          select: { publicId: true, orderNumber: true },
+        })
+      : [];
+  const orderNumberByPublicId = new Map(orders.map((o) => [o.publicId, o.orderNumber]));
+
+  const returnPublicIds = [
+    ...new Set(
+      rows.filter((r) => r.referenceType === 'return' && r.referenceId).map((r) => r.referenceId)
+    ),
+  ];
+  const returnRows =
+    returnPublicIds.length > 0
+      ? await prisma.returnRequest.findMany({
+          where: { publicId: { in: returnPublicIds } },
+          select: { publicId: true, returnNumber: true, type: true },
+        })
+      : [];
+  const returnMetaByPublicId = new Map(returnRows.map((rr) => [rr.publicId, rr]));
+
+  const { formatOrderLedgerLabel, resolveLedgerNote } = await import('../lib/inventory-ledger-notes.js');
+
   const actorIds = [...new Set(rows.map((row) => row.actorUserId).filter(Boolean))];
   const actors =
     actorIds.length > 0
@@ -202,13 +264,48 @@ export async function listLedgerHistory({
         actorRow != null
           ? serializeLedgerActor(actorRow)
           : refActorByKey.get(referenceActorKey(r.referenceType, r.referenceId)) ?? null;
+      const returnMeta =
+        r.referenceType === 'return' && r.referenceId
+          ? returnMetaByPublicId.get(r.referenceId)
+          : null;
+      const checkoutMeta =
+        r.referenceType === 'checkout_intent' && r.referenceId
+          ? checkoutByRef.get(r.referenceId) ?? null
+          : null;
+      const linkedCheckoutOrderPublicId = checkoutMeta?.orderPublicId ?? null;
+      const orderNumber =
+        r.referenceType === 'order' && r.referenceId && !r.referenceId.startsWith('pending:')
+          ? orderNumberByPublicId.get(r.referenceId) ?? null
+          : linkedCheckoutOrderPublicId
+            ? orderNumberByPublicId.get(linkedCheckoutOrderPublicId) ?? null
+            : null;
+      const displayOrderNumber =
+        orderNumber != null
+          ? formatOrderLedgerLabel(
+              orderNumber,
+              r.referenceType === 'order' ? r.referenceId : linkedCheckoutOrderPublicId
+            )
+          : null;
       return {
         id: r.publicId,
         eventType: r.eventType,
         quantityDelta: r.quantityDelta,
-        referenceType: r.referenceType,
-        referenceId: r.referenceId,
-        note: r.note,
+        referenceType:
+          checkoutMeta?.orderPublicId && checkoutMeta.status === 'CONSUMED' ? 'order' : r.referenceType,
+        referenceId:
+          checkoutMeta?.orderPublicId && checkoutMeta.status === 'CONSUMED'
+            ? checkoutMeta.orderPublicId
+            : r.referenceId,
+        referenceOrderNumber: displayOrderNumber,
+        referenceCheckoutIntentId: checkoutMeta?.publicId ?? null,
+        referenceReturnNumber: returnMeta?.returnNumber ?? null,
+        referenceReturnType: returnMeta?.type ?? null,
+        note: resolveLedgerNote(r, {
+          orderNumber,
+          orderPublicId: linkedCheckoutOrderPublicId,
+          returnNumber: returnMeta?.returnNumber,
+          returnType: returnMeta?.type,
+        }),
         createdAt: r.createdAt,
         product: {
           id: r.product.publicId,

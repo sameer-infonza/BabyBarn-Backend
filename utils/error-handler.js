@@ -31,6 +31,14 @@ function mapPrismaError(err) {
   if (prismaCode === 'P2025') {
     return new AppError(404, 'Requested record was not found', `PRISMA_${prismaCode}`, { prismaCode });
   }
+  if (prismaCode === 'P2022') {
+    return new AppError(
+      503,
+      'This feature is temporarily unavailable while the database is being updated. Please try again shortly.',
+      'SCHEMA_OUT_OF_DATE',
+      { prismaCode }
+    );
+  }
   if (prismaCode === 'P2002') {
     return new AppError(409, 'Unique constraint failed', `PRISMA_${prismaCode}`, { prismaCode });
   }
@@ -78,10 +86,14 @@ export const errorHandler = (err, req, res, next) => {
   }
 
   if (err?.name === 'MulterError') {
+    const message =
+      err.code === 'LIMIT_FILE_SIZE'
+        ? 'Image must be 5 MB or smaller.'
+        : err.message || 'File upload failed';
     return res.status(400).json({
       success: false,
       code: 'UPLOAD_ERROR',
-      message: err.message || 'File upload failed',
+      message,
     });
   }
   if (err?.message && typeof err.message === 'string' && err.message.includes('JPEG')) {
