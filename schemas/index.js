@@ -587,12 +587,15 @@ export const returnPackageRequestCreateSchema = z.object({
   comments: z.string().max(2000).optional(),
 });
 
+const emptyStringToUndefined = (val) =>
+  typeof val === 'string' && val.trim() === '' ? undefined : val;
+
 export const returnPackageRequestUpdateSchema = z.object({
   status: z.enum(['REQUESTED', 'APPROVED', 'REJECTED', 'SENT']),
   adminNotes: z.string().max(2000).optional().nullable(),
-  dispatchDate: z.string().datetime().optional().nullable(),
-  uspsTrackingNumber: z.string().max(120).optional().nullable(),
-  expectedDeliveryDate: z.string().datetime().optional().nullable(),
+  dispatchDate: z.preprocess(emptyStringToUndefined, z.string().datetime().optional().nullable()),
+  uspsTrackingNumber: z.preprocess(emptyStringToUndefined, z.string().max(120).optional().nullable()),
+  expectedDeliveryDate: z.preprocess(emptyStringToUndefined, z.string().datetime().optional().nullable()),
 });
 
 export const refurbUspsShipmentSchema = z.object({

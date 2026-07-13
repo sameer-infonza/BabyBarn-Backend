@@ -724,9 +724,6 @@ export class ReturnsService {
     for (const publicId of pendingIds) {
       const orderItem = order.orderItems.find((i) => i.publicId === publicId);
       if (!orderItem) throw new AppError(404, 'Order item not found');
-      if (payload.type === 'STANDARD' && orderItem.product?.productType === 'REFURBISHED') {
-        throw new AppError(400, 'Standard returns are only available for eligible new items');
-      }
       const refurbItem = refurbItemById.get(publicId);
       const eligibilityEval = payload.type === 'REFURBISHMENT' ? eligibilityByItemId.get(publicId) : null;
 
