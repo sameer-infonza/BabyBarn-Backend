@@ -316,6 +316,7 @@ export class ProductService {
       else if (s === 'name_asc') orderBy = { name: 'asc' };
       else if (s === 'name_desc') orderBy = { name: 'desc' };
       else if (s === 'newest') orderBy = { updatedAt: 'desc' };
+      else if (s === 'refurbished_newest') orderBy = { refurbishedAt: 'desc' };
     }
 
     const include = {

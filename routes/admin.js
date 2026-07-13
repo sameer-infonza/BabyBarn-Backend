@@ -10,6 +10,12 @@ const router = Router();
 router.use('/notifications', adminNotificationsRoutes);
 
 router.get(
+  '/dashboard/overview',
+  authenticate,
+  authorize('ADMIN', 'ADMIN_TEAM'),
+  (req, res, next) => adminController.getDashboardOverview(req, res).catch(next)
+);
+router.get(
   '/finance/stats',
   authenticate,
   authorize('ADMIN', 'ADMIN_TEAM'),

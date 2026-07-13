@@ -681,6 +681,7 @@ model ReturnRequest {
   manualShippedAt DateTime?
   /// Customer-submitted USPS return shipment (refurb path).
   customerShippingNote String?
+  customerShippingPhotoUrl String?
   customerShippingSubmittedAt DateTime?
   /// Default 10-day window for customer to ship refurb return after approval.
   shipByDeadline DateTime?

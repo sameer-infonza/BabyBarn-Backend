@@ -602,6 +602,15 @@ export const refurbUspsShipmentSchema = z.object({
   trackingNumber: z.string().min(3).max(120),
   note: z.string().max(500).optional().nullable(),
   shippedAt: z.string().datetime().optional().nullable(),
+  photoUrl: z.preprocess(
+    emptyStringToUndefined,
+    z
+      .string()
+      .max(500)
+      .refine((v) => v.startsWith('/uploads/returns/'), 'Invalid photo path')
+      .optional()
+      .nullable()
+  ),
 });
 
 export const returnCancelSchema = z.object({

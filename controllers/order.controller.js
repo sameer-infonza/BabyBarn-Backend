@@ -357,6 +357,20 @@ export class OrderController {
       next(e);
     }
   }
+
+  async getMyOrderInvoicePdf(req, res, next) {
+    try {
+      const { id } = req.params;
+      // Ownership guard: throws 403/404 if the order is not the caller's.
+      await orderService.getOrderById(id, req.user.id);
+      const buf = await orderService.getOrderPdfBuffer(id, 'invoice');
+      res.setHeader('Content-Type', 'application/pdf');
+      res.setHeader('Content-Disposition', `attachment; filename="order-${id}-invoice.pdf"`);
+      res.send(buf);
+    } catch (e) {
+      next(e);
+    }
+  }
 }
 
 export const orderController = new OrderController();

@@ -82,6 +82,61 @@ export async function getFinanceStats({ dateFrom, dateTo } = {}) {
   };
 }
 
+/** Single aggregate for the admin dashboard KPI tiles + alert banners. */
+export async function getDashboardOverview() {
+  const now = new Date();
+  const monthStart = new Date(now.getFullYear(), now.getMonth(), 1);
+  const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  const pendingOrderStatuses = ['PENDING', 'PROCESSING', 'CONFIRMED'];
+  const inspectionStatuses = ['REQUESTED', 'RECEIVED', 'UNDER_INSPECTION'];
+
+  const { productService } = await import('./product.service.js');
+  const { inventoryService } = await import('./inventory.service.js');
+
+  const [
+    newProductStats,
+    refurbishedStats,
+    inventoryStats,
+    totalOrders,
+    pendingOrders,
+    ordersThisMonth,
+    registeredCustomers,
+    activeMembers,
+    pendingInspections,
+    queuedInspectionsToday,
+  ] = await Promise.all([
+    productService.getAdminProductStats('NEW'),
+    productService.getAdminProductStats('REFURBISHED'),
+    inventoryService.getStats(),
+    prisma.order.count(),
+    prisma.order.count({ where: { status: { in: pendingOrderStatuses } } }),
+    prisma.order.count({ where: { createdAt: { gte: monthStart } } }),
+    prisma.user.count({ where: { role: { name: { in: ['CUSTOMER', 'USER'] } } } }),
+    prisma.user.count({ where: { accessMemberUntil: { gt: now } } }),
+    prisma.returnRequest.count({
+      where: { type: 'REFURBISHMENT', status: { in: inspectionStatuses } },
+    }),
+    prisma.returnRequest.count({
+      where: { status: 'UNDER_INSPECTION', createdAt: { gte: todayStart } },
+    }),
+  ]);
+
+  return {
+    totalProductsNew: newProductStats.total,
+    totalRefurbished: refurbishedStats.total,
+    totalOrders,
+    pendingOrders,
+    // pendingFulfillment shares the same status set as pendingOrders; alias for alert copy.
+    pendingFulfillment: pendingOrders,
+    ordersThisMonth,
+    registeredCustomers,
+    activeMembers,
+    pendingInspections,
+    queuedInspectionsToday,
+    lowStockCount: inventoryStats.criticalUnderThreshold,
+  };
+}
+
 function orderDateSqlParts(createdAt) {
   const gtePart = createdAt?.gte ? Prisma.sql`AND o."createdAt" >= ${createdAt.gte}` : Prisma.empty;
   const ltePart = createdAt?.lte ? Prisma.sql`AND o."createdAt" <= ${createdAt.lte}` : Prisma.empty;
@@ -734,6 +789,9 @@ export async function setTeamMemberModules(actorPublicId, targetPublicId, module
   if (!teamRole) throw new AppError(500, 'ADMIN_TEAM role missing');
 
   const normalized = normalizeTeamPermissionModules(modules);
+  if (!normalized || normalized.length === 0) {
+    throw new AppError(400, 'At least one module permission is required');
+  }
 
   const target = await prisma.user.findUnique({
     where: { publicId: targetPublicId },
@@ -789,7 +847,13 @@ export async function updateTeamMember(actorPublicId, targetPublicId, payload) {
   }
   if (payload.roleTitle !== undefined) data.phone = payload.roleTitle ? String(payload.roleTitle).trim() : null;
   if (payload.isActive !== undefined) data.isActive = Boolean(payload.isActive);
-  if (payload.modules !== undefined) data.adminModules = normalizeTeamPermissionModules(payload.modules);
+  if (payload.modules !== undefined) {
+    const normalizedModules = normalizeTeamPermissionModules(payload.modules);
+    if (!normalizedModules || normalizedModules.length === 0) {
+      throw new AppError(400, 'At least one module permission is required');
+    }
+    data.adminModules = normalizedModules;
+  }
 
   const updated = await prisma.user.update({
     where: { id: target.id },

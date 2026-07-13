@@ -31,7 +31,9 @@ export const TEAM_PERMISSION_MODULES = [
 ];
 
 export const TEAM_PERMISSION_TO_ROUTE_MODULES = {
-  'product-management': ['categories', 'products', 'refurbished'],
+  // Category management is ADMIN-only (like Team Management); team members with
+  // product-management can manage products/refurbished but never categories.
+  'product-management': ['products', 'refurbished'],
   'inventory-management': ['inventory', 'inspection'],
   'order-management': ['orders', 'shipping'],
   'returns-refurbishment': ['returns', 'inspection'],
@@ -55,7 +57,9 @@ export function normalizeTeamPermissionModules(modules) {
 }
 
 export function canAccessRouteModule(assignedModules, routeModule) {
-  if (assignedModules == null) return true;
+  // Deny-by-default: null/undefined modules grant no mapped route access.
+  // Always-allowed slugs (dashboard/profile/notifications) are handled by callers.
+  if (assignedModules == null) return false;
   if (!Array.isArray(assignedModules)) return false;
   if (assignedModules.length === 0) return false;
   if (assignedModules.includes(routeModule)) return true;

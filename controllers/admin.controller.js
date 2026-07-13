@@ -1,6 +1,7 @@
 import { listAuditLogs, exportAuditLogs, auditLogsToCsv } from '../services/audit.service.js';
 import {
   getFinanceStats,
+  getDashboardOverview,
   listFinanceTransactions,
   listCustomers,
   getCustomerDetail,
@@ -48,6 +49,11 @@ export class AdminController {
     const dateFrom = req.query.dateFrom ? String(req.query.dateFrom) : undefined;
     const dateTo = req.query.dateTo ? String(req.query.dateTo) : undefined;
     const data = await getFinanceStats({ dateFrom, dateTo });
+    res.status(200).json({ success: true, data: toPublicJson(data) });
+  }
+
+  async getDashboardOverview(req, res) {
+    const data = await getDashboardOverview();
     res.status(200).json({ success: true, data: toPublicJson(data) });
   }
 

@@ -177,6 +177,9 @@ router.patch(
   ordersOrShipping,
   (req, res, next) => orderController.updateTracking(req, res).catch(next)
 );
+router.get('/:id/pdf/invoice', authenticate, requireFullAccount, (req, res, next) =>
+  orderController.getMyOrderInvoicePdf(req, res, next)
+);
 router.get('/:id', authenticate, requireFullAccount, (req, res, next) =>
   orderController.getOrderById(req, res).catch(next)
 );

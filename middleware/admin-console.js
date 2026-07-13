@@ -4,16 +4,18 @@ import { isValidRouteModule, canAccessRouteModule } from '../constants/admin-mod
 /**
  * After authenticate + authorize('ADMIN','ADMIN_TEAM').
  * ADMIN: always allowed.
- * ADMIN_TEAM: adminModules null/undefined = all modules; array = only those slugs (+ dashboard/profile always).
+ * ADMIN_TEAM: deny-by-default. null/undefined/empty modules only grant the
+ * always-allowed slugs (dashboard/profile/notifications); an array grants those
+ * slugs plus the mapped route modules.
  */
 function checkConsoleModuleAccess(user, moduleSlug) {
   const { role, adminModules } = user || {};
   if (role === 'ADMIN') return true;
   if (role !== 'ADMIN_TEAM') return false;
-  if (adminModules === null || adminModules === undefined) return true;
-  if (!Array.isArray(adminModules)) return false;
-  if (adminModules.length === 0) return false;
   const alwaysAllowed = moduleSlug === 'dashboard' || moduleSlug === 'profile' || moduleSlug === 'notifications';
+  if (adminModules === null || adminModules === undefined) return alwaysAllowed;
+  if (!Array.isArray(adminModules)) return false;
+  if (adminModules.length === 0) return alwaysAllowed;
   return alwaysAllowed || canAccessRouteModule(adminModules, moduleSlug);
 }
 

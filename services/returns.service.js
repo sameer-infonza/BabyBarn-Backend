@@ -268,6 +268,7 @@ function buildSubmissionChildItem(row) {
     manualTrackingNumber: row.manualTrackingNumber,
     manualShippedAt: row.manualShippedAt,
     customerShippingNote: row.customerShippingNote ?? null,
+    customerShippingPhotoUrl: row.customerShippingPhotoUrl ?? null,
     customerShippingSubmittedAt: row.customerShippingSubmittedAt ?? null,
     shipByDeadline: row.shipByDeadline ?? null,
     keepWaitingUntil: row.keepWaitingUntil ?? null,
@@ -339,6 +340,8 @@ function buildReturnSubmission(rows, { includeEvents = false } = {}) {
       items.length === 1 ? primary.manualTrackingNumber : latestTrackingRow?.manualTrackingNumber ?? null,
     manualShippedAt: items.length === 1 ? primary.manualShippedAt : latestTrackingRow?.manualShippedAt ?? null,
     customerShippingNote: latestTrackingRow?.customerShippingNote ?? primary.customerShippingNote ?? null,
+    customerShippingPhotoUrl:
+      latestTrackingRow?.customerShippingPhotoUrl ?? primary.customerShippingPhotoUrl ?? null,
     customerShippingSubmittedAt:
       latestTrackingRow?.customerShippingSubmittedAt ?? primary.customerShippingSubmittedAt ?? null,
     shipByDeadline: primary.shipByDeadline ?? latestFirst.find((r) => r.shipByDeadline)?.shipByDeadline ?? null,
@@ -1634,7 +1637,7 @@ export class ReturnsService {
     });
   }
 
-  async submitCustomerUspsShipment(userPublicId, returnPublicId, { trackingNumber, note, shippedAt }) {
+  async submitCustomerUspsShipment(userPublicId, returnPublicId, { trackingNumber, note, shippedAt, photoUrl }) {
     const user = await prisma.user.findUnique({ where: { publicId: userPublicId }, select: { id: true } });
     if (!user) throw new AppError(401, 'Unauthorized');
 
@@ -1650,6 +1653,7 @@ export class ReturnsService {
 
     const shipped = shippedAt ? new Date(shippedAt) : new Date();
     const noteTrimmed = note ? String(note).trim() : null;
+    const photo = photoUrl && String(photoUrl).startsWith('/uploads/returns/') ? String(photoUrl) : null;
 
     const receiveDeadline = refurbShipByDeadline(shipped);
 
@@ -1663,6 +1667,7 @@ export class ReturnsService {
             manualTrackingNumber: tracking,
             manualShippedAt: shipped,
             customerShippingNote: noteTrimmed,
+            customerShippingPhotoUrl: photo,
             customerShippingSubmittedAt: new Date(),
             shipByDeadline: receiveDeadline,
             keepWaitingUntil: null,
