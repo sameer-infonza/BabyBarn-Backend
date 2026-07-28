@@ -58,7 +58,7 @@ export function normalizeTeamPermissionModules(modules) {
 
 export function canAccessRouteModule(assignedModules, routeModule) {
   // Deny-by-default: null/undefined modules grant no mapped route access.
-  // Always-allowed slugs (dashboard/profile/notifications) are handled by callers.
+  // Always-allowed slugs (dashboard/profile) and notification grant are handled by callers.
   if (assignedModules == null) return false;
   if (!Array.isArray(assignedModules)) return false;
   if (assignedModules.length === 0) return false;

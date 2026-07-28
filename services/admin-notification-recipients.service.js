@@ -24,6 +24,7 @@ export async function resolveAdminNotificationRecipients({ module, prefKey }) {
       lastName: true,
       notificationPrefs: true,
       adminModules: true,
+      adminNotificationAccess: true,
       role: { select: { name: true } },
     },
   });
@@ -36,7 +37,28 @@ export async function resolveAdminNotificationRecipients({ module, prefKey }) {
     if (prefKey && prefs[prefKey] === false) continue;
 
     const roleName = user.role?.name;
-    if (!userCanSeeModule({ role: roleName, adminModules: user.adminModules }, module)) {
+    if (
+      !userCanSeeModule(
+        {
+          role: roleName,
+          adminModules: user.adminModules,
+          adminNotificationAccess: user.adminNotificationAccess,
+        },
+        'notifications'
+      )
+    ) {
+      continue;
+    }
+    if (
+      !userCanSeeModule(
+        {
+          role: roleName,
+          adminModules: user.adminModules,
+          adminNotificationAccess: user.adminNotificationAccess,
+        },
+        module
+      )
+    ) {
       continue;
     }
 

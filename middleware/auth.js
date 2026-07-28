@@ -22,6 +22,7 @@ export const authenticate = async (req, res, next) => {
           isActive: true,
           isGuest: true,
           adminModules: true,
+          adminNotificationAccess: true,
           tokenVersion: true,
           role: { select: { name: true } },
         },
@@ -69,6 +70,8 @@ export const authenticate = async (req, res, next) => {
       role: ('role' in dbUser ? dbUser.role?.name : null) || decoded.role,
       isGuest: 'isGuest' in dbUser ? Boolean(dbUser.isGuest) : false,
       adminModules: 'adminModules' in dbUser ? (dbUser.adminModules ?? null) : null,
+      adminNotificationAccess:
+        'adminNotificationAccess' in dbUser ? Boolean(dbUser.adminNotificationAccess) : false,
     };
     next();
   } catch (error) {

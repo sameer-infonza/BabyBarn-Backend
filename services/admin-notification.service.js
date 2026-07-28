@@ -125,6 +125,18 @@ export class AdminNotificationService {
     const userId = await resolveInternalUserId(user);
     if (!userId) throw new AppError(401, 'Unauthorized');
 
+    if (!userCanSeeModule(user, 'notifications')) {
+      return {
+        items: [],
+        pagination: {
+          page: Math.max(Number(page) || 1, 1),
+          limit: Math.min(Math.max(Number(limit) || 20, 1), 100),
+          total: 0,
+        },
+        unreadCount: 0,
+      };
+    }
+
     const take = Math.min(Math.max(Number(limit) || 20, 1), 100);
     const skip = (Math.max(Number(page) || 1, 1) - 1) * take;
 

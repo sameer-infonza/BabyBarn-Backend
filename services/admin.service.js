@@ -691,6 +691,7 @@ export async function listAdminTeamMembers(actorPublicId) {
       lastName: true,
       phone: true,
       adminModules: true,
+      adminNotificationAccess: true,
       isActive: true,
       createdAt: true,
     },
@@ -714,6 +715,7 @@ export async function createAdminTeamMember(actorPublicId, payload) {
   const lastName = payload.lastName ? String(payload.lastName).trim() : null;
   const roleTitle = payload.roleTitle ? String(payload.roleTitle).trim() : null;
   const modules = payload.modules;
+  const adminNotificationAccess = Boolean(payload.adminNotificationAccess);
 
   const existing = await prisma.user.findUnique({ where: { email } });
   if (existing) {
@@ -735,6 +737,7 @@ export async function createAdminTeamMember(actorPublicId, payload) {
       phone: roleTitle,
       roleId: teamRole.id,
       adminModules: normalized,
+      adminNotificationAccess,
       emailVerifiedAt: new Date(),
       isActive: true,
     },
@@ -745,6 +748,7 @@ export async function createAdminTeamMember(actorPublicId, payload) {
       lastName: true,
       phone: true,
       adminModules: true,
+      adminNotificationAccess: true,
       isActive: true,
       createdAt: true,
     },
@@ -754,7 +758,7 @@ export async function createAdminTeamMember(actorPublicId, payload) {
     action: 'TEAM_MEMBER_CREATED',
     entityType: 'User',
     entityId: created.publicId,
-    meta: { modules: normalized, roleTitle },
+    meta: { modules: normalized, roleTitle, adminNotificationAccess },
   });
   try {
     await emailService.sendTemplate({
@@ -811,6 +815,7 @@ export async function setTeamMemberModules(actorPublicId, targetPublicId, module
       lastName: true,
       phone: true,
       adminModules: true,
+      adminNotificationAccess: true,
       isActive: true,
       createdAt: true,
     },
@@ -847,6 +852,9 @@ export async function updateTeamMember(actorPublicId, targetPublicId, payload) {
   }
   if (payload.roleTitle !== undefined) data.phone = payload.roleTitle ? String(payload.roleTitle).trim() : null;
   if (payload.isActive !== undefined) data.isActive = Boolean(payload.isActive);
+  if (payload.adminNotificationAccess !== undefined) {
+    data.adminNotificationAccess = Boolean(payload.adminNotificationAccess);
+  }
   if (payload.modules !== undefined) {
     const normalizedModules = normalizeTeamPermissionModules(payload.modules);
     if (!normalizedModules || normalizedModules.length === 0) {
@@ -865,6 +873,7 @@ export async function updateTeamMember(actorPublicId, targetPublicId, payload) {
       lastName: true,
       phone: true,
       adminModules: true,
+      adminNotificationAccess: true,
       isActive: true,
       createdAt: true,
     },
@@ -880,6 +889,7 @@ export async function updateTeamMember(actorPublicId, targetPublicId, payload) {
       roleTitle: updated.phone || null,
       isActive: updated.isActive,
       modules: updated.adminModules,
+      adminNotificationAccess: updated.adminNotificationAccess,
     },
   });
   return {

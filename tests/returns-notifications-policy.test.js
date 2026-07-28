@@ -18,10 +18,16 @@ test('notification module validation rejects unknown modules', () => {
   );
 });
 
-test('team users can open notifications page without assigned modules', () => {
-  const user = { role: 'ADMIN_TEAM', adminModules: [] };
-  assert.equal(userCanSeeModule(user, 'notifications'), true);
-  assert.equal(userCanSeeModule(user, 'orders'), false);
+test('team users need notification access grant for inbox', () => {
+  const denied = { role: 'ADMIN_TEAM', adminModules: [], adminNotificationAccess: false };
+  const granted = { role: 'ADMIN_TEAM', adminModules: [], adminNotificationAccess: true };
+  assert.equal(userCanSeeModule(denied, 'notifications'), false);
+  assert.equal(userCanSeeModule(granted, 'notifications'), true);
+  assert.equal(userCanSeeModule(granted, 'orders'), false);
+});
+
+test('super admin always has notification access', () => {
+  assert.equal(userCanSeeModule({ role: 'ADMIN' }, 'notifications'), true);
 });
 
 test('standard return window starts from deliveredAt when available', () => {

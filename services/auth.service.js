@@ -130,6 +130,8 @@ function toPublicUser(user) {
   };
   if (roleName === 'ADMIN' || roleName === 'ADMIN_TEAM') {
     out.adminModules = user.adminModules !== undefined ? user.adminModules : null;
+    out.adminNotificationAccess =
+      roleName === 'ADMIN' ? true : Boolean(user.adminNotificationAccess);
   }
   return out;
 }
@@ -338,6 +340,7 @@ export class AuthService {
         notificationPrefs: true,
         membershipShippingAddressJson: true,
         adminModules: true,
+        adminNotificationAccess: true,
         role: { select: { name: true } },
       },
     });
@@ -367,6 +370,8 @@ export class AuthService {
     };
     if (user.role.name === 'ADMIN' || user.role.name === 'ADMIN_TEAM') {
       base.adminModules = user.adminModules ?? null;
+      base.adminNotificationAccess =
+        user.role.name === 'ADMIN' ? true : Boolean(user.adminNotificationAccess);
     }
     return base;
   }
@@ -402,11 +407,13 @@ export class AuthService {
         dateOfBirth: true,
         children: true,
         notificationPrefs: true,
+        adminModules: true,
+        adminNotificationAccess: true,
         role: { select: { name: true } },
       },
     });
 
-    return {
+    const out = {
       id: updated.publicId,
       email: updated.email,
       firstName: updated.firstName ?? undefined,
@@ -418,6 +425,12 @@ export class AuthService {
       notificationPrefs: normalizeNotificationPrefs(updated.notificationPrefs),
       role: updated.role.name,
     };
+    if (updated.role.name === 'ADMIN' || updated.role.name === 'ADMIN_TEAM') {
+      out.adminModules = updated.adminModules ?? null;
+      out.adminNotificationAccess =
+        updated.role.name === 'ADMIN' ? true : Boolean(updated.adminNotificationAccess);
+    }
+    return out;
   }
 
   async changePassword(publicId, currentPassword, newPassword) {

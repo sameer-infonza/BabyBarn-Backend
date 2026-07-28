@@ -224,6 +224,8 @@ model User {
   isActive           Boolean  @default(true)
   // JSON array of admin console module slugs; null = all modules (ADMIN_TEAM).
   adminModules       Json?
+  /// ADMIN_TEAM only: when true, may open inbox / receive operational alert emails.
+  adminNotificationAccess Boolean @default(false)
 
   adminNotificationReads AdminNotificationRead[]
 

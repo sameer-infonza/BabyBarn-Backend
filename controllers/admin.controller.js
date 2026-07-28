@@ -34,6 +34,7 @@ const teamMemberCreateSchema = z.object({
   lastName: z.string().min(1).optional().nullable(),
   roleTitle: z.string().min(1).max(80).optional().nullable(),
   modules: z.union([z.array(z.string()), z.null()]).optional().default(null),
+  adminNotificationAccess: z.boolean().optional().default(false),
 });
 
 const teamMemberUpdateSchema = z.object({
@@ -42,6 +43,7 @@ const teamMemberUpdateSchema = z.object({
   roleTitle: z.string().min(1).max(80).optional().nullable(),
   modules: z.union([z.array(z.string()), z.null()]).optional(),
   isActive: z.boolean().optional(),
+  adminNotificationAccess: z.boolean().optional(),
 });
 
 export class AdminController {
