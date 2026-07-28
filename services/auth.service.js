@@ -34,6 +34,51 @@ async function issueRefreshToken(userId) {
   }
 }
 
+/** Delete all refresh tokens for a user (best-effort if table missing). */
+async function revokeAllRefreshTokens(userId) {
+  try {
+    await prisma.refreshToken.deleteMany({ where: { userId } });
+  } catch (error) {
+    if (error && typeof error === 'object' && (error.code === 'P2021' || error.code === 'P2022')) {
+      return;
+    }
+    console.error('[auth] refresh token revoke failed', error);
+  }
+}
+
+/** Bump tokenVersion and wipe refresh tokens so existing JWTs fail authenticate. */
+async function invalidateAllSessions(userId) {
+  const updated = await prisma.user.update({
+    where: { id: userId },
+    data: { tokenVersion: { increment: 1 } },
+    include: { role: true },
+  });
+  await revokeAllRefreshTokens(userId);
+  return updated;
+}
+
+function buildAccessPayload(user) {
+  const payload = {
+    id: user.publicId,
+    email: user.email,
+    role: user.role.name,
+    tokenVersion: user.tokenVersion ?? 0,
+  };
+  if (user.role.name === 'ADMIN_TEAM') {
+    payload.adminModules = user.adminModules ?? null;
+  }
+  return payload;
+}
+
+async function issueSessionTokens(user) {
+  const token = generateToken(buildAccessPayload(user));
+  const refreshToken = await issueRefreshToken(user.id);
+  return {
+    token,
+    ...(refreshToken ? { refreshToken } : {}),
+  };
+}
+
 function normalizeDateOfBirth(value) {
   if (value === null || value === undefined) return null;
   const str = String(value).trim();
@@ -157,18 +202,11 @@ export class AuthService {
           include: { role: true },
         });
 
-        const payload = {
-          id: user.publicId,
-          email: user.email,
-          role: user.role.name,
-        };
-        const token = generateToken(payload);
-        const refreshToken = await issueRefreshToken(user.id);
+        const tokens = await issueSessionTokens(user);
 
         return {
           user: toPublicUser(user),
-          token,
-          ...(refreshToken ? { refreshToken } : {}),
+          ...tokens,
           convertedFromGuest: true,
           message: 'Account created. Your previous guest orders are now in your dashboard.',
         };
@@ -251,22 +289,11 @@ export class AuthService {
       );
     }
 
-    const payload = {
-      id: user.publicId,
-      email: user.email,
-      role: user.role.name,
-    };
-    if (user.role.name === 'ADMIN_TEAM') {
-      payload.adminModules = user.adminModules ?? null;
-    }
-
-    const token = generateToken(payload);
-    const refreshToken = await issueRefreshToken(user.id);
+    const tokens = await issueSessionTokens(user);
 
     return {
       user: toPublicUser(user),
-      token,
-      ...(refreshToken ? { refreshToken } : {}),
+      ...tokens,
     };
   }
 
@@ -286,18 +313,9 @@ export class AuthService {
       throw new AppError(403, 'This account has been deactivated.');
     }
 
-    const payload = {
-      id: row.user.publicId,
-      email: row.user.email,
-      role: row.user.role.name,
-    };
-    if (row.user.role.name === 'ADMIN_TEAM') {
-      payload.adminModules = row.user.adminModules ?? null;
-    }
-
     return {
       user: toPublicUser(row.user),
-      token: generateToken(payload),
+      token: generateToken(buildAccessPayload(row.user)),
     };
   }
 
@@ -408,7 +426,13 @@ export class AuthService {
     if (!ok) throw new AppError(400, 'Current password is incorrect');
     const hashed = await bcrypt.hash(newPassword, 10);
     await prisma.user.update({ where: { id: user.id }, data: { password: hashed } });
-    return { message: 'Password changed successfully' };
+    const refreshed = await invalidateAllSessions(user.id);
+    const tokens = await issueSessionTokens(refreshed);
+    return {
+      message: 'Password changed successfully. Other devices have been signed out.',
+      ...tokens,
+      user: toPublicUser(refreshed),
+    };
   }
 
   /** Side-effect-free check used by the security page to validate the current password live. */
@@ -441,6 +465,8 @@ export class AuthService {
       include: { role: true },
     });
 
+    await invalidateAllSessions(user.id);
+
     // Send a verification link to the new address (best-effort).
     try {
       const verifyToken = await this.createEmailVerificationToken(user.id);
@@ -459,7 +485,9 @@ export class AuthService {
 
     return {
       user: toPublicUser(updated),
-      message: 'Email updated. Please check your inbox to verify the new address.',
+      message:
+        'Email updated. Please sign in again with your new email. Check your inbox to verify the address.',
+      requireReauth: true,
     };
   }
 
@@ -469,15 +497,37 @@ export class AuthService {
     if (!ok) throw new AppError(400, 'Current password is incorrect');
 
     await prisma.user.update({ where: { id: user.id }, data: { isActive: false } });
-    // Revoke refresh tokens so the paused account is signed out everywhere.
-    try {
-      await prisma.refreshToken.deleteMany({ where: { userId: user.id } });
-    } catch (err) {
-      console.error('[auth] pause-account token revoke failed', err);
-    }
+    await invalidateAllSessions(user.id);
     return {
       message:
         'Your account is paused and you have been signed out. Contact support when you would like to reactivate it.',
+    };
+  }
+
+  async logout(publicId, refreshTokenRaw = null) {
+    const user = await this.getUserByPublicId(publicId);
+    if (refreshTokenRaw && typeof refreshTokenRaw === 'string') {
+      const tokenHash = hashRefreshToken(refreshTokenRaw.trim());
+      try {
+        await prisma.refreshToken.deleteMany({ where: { userId: user.id, tokenHash } });
+      } catch (err) {
+        console.error('[auth] logout token delete failed', err);
+      }
+    } else {
+      await revokeAllRefreshTokens(user.id);
+    }
+    return { message: 'Signed out' };
+  }
+
+  /** Sign out every other device; keep the current session by re-issuing tokens. */
+  async logoutOtherSessions(publicId) {
+    const user = await this.getUserByPublicId(publicId);
+    const refreshed = await invalidateAllSessions(user.id);
+    const tokens = await issueSessionTokens(refreshed);
+    return {
+      message: 'Signed out of all other sessions',
+      ...tokens,
+      user: toPublicUser(refreshed),
     };
   }
 
@@ -490,6 +540,7 @@ export class AuthService {
     return items.map((a) => ({
       id: a.publicId,
       fullName: a.fullName ?? '',
+      company: a.company ?? null,
       addressLine1: a.addressLine1 ?? a.street,
       addressLine2: a.addressLine2 ?? null,
       city: a.city,
@@ -497,6 +548,7 @@ export class AuthService {
       zipCode: a.zipCode,
       country: a.country,
       phoneNumber: a.phoneNumber ?? null,
+      addressType: a.addressType ?? 'HOME',
       isDefault: a.isDefault,
     }));
   }
@@ -558,6 +610,7 @@ export class AuthService {
       data: {
         userId: user.id,
         fullName: payload.fullName,
+        company: payload.company ?? null,
         addressLine1: verified.addressLine1,
         addressLine2: verified.addressLine2,
         street: verified.addressLine1,
@@ -566,6 +619,7 @@ export class AuthService {
         zipCode: verified.zipCode,
         country: verified.country,
         phoneNumber: payload.phoneNumber,
+        addressType: payload.addressType === 'BUSINESS' ? 'BUSINESS' : 'HOME',
         isDefault: Boolean(payload.isDefault),
       },
     });
@@ -585,6 +639,7 @@ export class AuthService {
       where: { id: address.id },
       data: {
         ...(payload.fullName !== undefined ? { fullName: payload.fullName } : {}),
+        ...(payload.company !== undefined ? { company: payload.company } : {}),
         ...(payload.addressLine1 !== undefined
           ? { addressLine1: payload.addressLine1, street: payload.addressLine1 }
           : {}),
@@ -594,6 +649,9 @@ export class AuthService {
         ...(payload.zipCode !== undefined ? { zipCode: payload.zipCode } : {}),
         ...(payload.country !== undefined ? { country: payload.country } : {}),
         ...(payload.phoneNumber !== undefined ? { phoneNumber: payload.phoneNumber } : {}),
+        ...(payload.addressType !== undefined
+          ? { addressType: payload.addressType === 'BUSINESS' ? 'BUSINESS' : 'HOME' }
+          : {}),
         ...(payload.isDefault !== undefined ? { isDefault: payload.isDefault } : {}),
       },
     });
@@ -675,7 +733,9 @@ export class AuthService {
       }),
     ]);
 
-    return { message: 'Password updated successfully' };
+    await invalidateAllSessions(record.userId);
+
+    return { message: 'Password updated successfully. Please sign in with your new password.' };
   }
 
   async verifyEmail(token) {

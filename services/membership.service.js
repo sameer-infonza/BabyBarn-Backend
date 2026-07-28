@@ -3,15 +3,8 @@ import { AppError } from '../utils/error-handler.js';
 import { getBusinessSettings } from './admin.service.js';
 import { emailService } from './email.service.js';
 import { config } from '../config/env.js';
-
-const membershipAddressSchema = {
-  fullName: (v) => typeof v === 'string' && v.trim().length >= 1,
-  addressLine1: (v) => typeof v === 'string' && v.trim().length >= 1,
-  city: (v) => typeof v === 'string' && v.trim().length >= 1,
-  state: (v) => typeof v === 'string' && v.trim().length >= 1,
-  zipCode: (v) => typeof v === 'string' && v.trim().length >= 1,
-  country: (v) => typeof v === 'string' && v.trim().length >= 1,
-};
+import { usAddressSchema } from '../schemas/index.js';
+import { authService } from './auth.service.js';
 
 export function validateMembershipRegistration(payload) {
   if (!payload || typeof payload !== 'object') {
@@ -20,27 +13,21 @@ export function validateMembershipRegistration(payload) {
   const babyName = String(payload.babyName || '').trim();
   if (!babyName) throw new AppError(400, 'Baby name is required');
 
-  const ship = payload.shippingAddress;
-  if (!ship || typeof ship !== 'object') {
-    throw new AppError(400, 'Membership shipping address is required');
-  }
-  for (const [key, check] of Object.entries(membershipAddressSchema)) {
-    if (!check(ship[key])) {
-      throw new AppError(400, `Invalid shipping address: ${key}`);
-    }
+  const parsed = usAddressSchema.safeParse({
+    ...(payload.shippingAddress || {}),
+    fullName: payload.shippingAddress?.fullName || babyName,
+  });
+  if (!parsed.success) {
+    const msg = parsed.error.issues[0]?.message || 'Invalid shipping address';
+    throw new AppError(400, msg);
   }
 
   return {
     babyName,
     shippingAddress: {
-      fullName: String(ship.fullName || babyName).trim(),
-      addressLine1: ship.addressLine1.trim(),
-      addressLine2: ship.addressLine2?.trim() || null,
-      city: ship.city.trim(),
-      state: ship.state.trim(),
-      zipCode: ship.zipCode.trim(),
-      country: ship.country.trim() || 'US',
-      phoneNumber: ship.phoneNumber?.trim() || null,
+      ...parsed.data,
+      company: parsed.data.company || null,
+      addressLine2: parsed.data.addressLine2 || null,
     },
   };
 }
@@ -82,6 +69,26 @@ export async function saveMembershipRegistration(userPublicId, payload) {
       membershipShippingAddressJson: data.shippingAddress,
     },
   });
+
+  // Upsert into Address Book so checkout can reuse the ACCESS shipping address.
+  try {
+    const existing = await prisma.address.findMany({
+      where: { userId: user.id },
+      orderBy: [{ isDefault: 'desc' }, { createdAt: 'desc' }],
+      take: 1,
+    });
+    const payload = {
+      ...data.shippingAddress,
+      isDefault: true,
+    };
+    if (existing[0]) {
+      await authService.updateAddress(userPublicId, existing[0].publicId, payload);
+    } else {
+      await authService.createAddress(userPublicId, payload);
+    }
+  } catch (err) {
+    console.error('[membership] address book upsert failed', err);
+  }
 
   return { saved: true };
 }

@@ -216,6 +216,8 @@ model User {
   isGuest            Boolean  @default(false)
   guestCreatedAt     DateTime?
   convertedAt        DateTime?
+  /// Bumped on password/email change to invalidate existing JWTs.
+  tokenVersion       Int      @default(0)
   /// Set when expired guest PII has been purged (retention policy). Prevents reprocessing.
   guestPurgedAt      DateTime?
   // When false, customer cannot sign in.
@@ -282,11 +284,17 @@ model PasswordResetToken {
   @@index([token])
 }
 
+enum AddressType {
+  HOME
+  BUSINESS
+}
+
 model Address {
   id        Int      @id @default(autoincrement())
   publicId  String   @unique @default(cuid())
   userId    Int
   fullName  String?
+  company   String?
   addressLine1 String?
   addressLine2 String?
   street    String
@@ -295,6 +303,7 @@ model Address {
   zipCode   String
   country   String
   phoneNumber String?
+  addressType AddressType @default(HOME)
   isDefault Boolean  @default(false)
 
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)

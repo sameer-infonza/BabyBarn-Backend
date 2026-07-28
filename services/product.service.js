@@ -215,6 +215,12 @@ export class ProductService {
     if (!admin) {
       where.isDraft = false;
       where.isActiveListing = true;
+      // Refurbished is one-of-one / limited: never list sold-out refurb SKUs on the storefront.
+      // New products stay visible when OOS so shoppers can wishlist / request restock alerts.
+      where.AND = where.AND ?? [];
+      where.AND.push({
+        OR: [{ productType: { not: 'REFURBISHED' } }, { stock: { gt: 0 } }],
+      });
       if (listFilters) {
         const { search, minPrice, maxPrice, sizeAgeGroup } = listFilters;
         if (productTypes.length === 1) {
@@ -446,6 +452,14 @@ export class ProductService {
     const { isRefurbishedEnabled } = await import('../config/feature-flags.js');
     if (!admin && product.productType === 'REFURBISHED' && !isRefurbishedEnabled()) {
       throw new AppError(404, 'Product not found');
+    }
+
+    if (!admin && product.productType === 'REFURBISHED') {
+      const { productAvailableStock } = await import('./inventory-reservation.js');
+      const { isSellableAvailable } = await import('../lib/inventory-stock-rules.js');
+      if (!isSellableAvailable(productAvailableStock(product), 'REFURBISHED')) {
+        throw new AppError(404, 'Product not found');
+      }
     }
 
     return product;
@@ -692,7 +706,7 @@ export class ProductService {
     const hasVariantsKey = Object.prototype.hasOwnProperty.call(data, 'variants');
     const incomingVariants = hasVariantsKey ? variantsPayload ?? [] : null;
 
-    return prisma.$transaction(async (tx) => {
+    const updated = await prisma.$transaction(async (tx) => {
       const updatePayload = { ...rest };
 
       if (isSkuCategoryLockedRefurb) {
@@ -892,6 +906,22 @@ export class ProductService {
         include: { category: true, variants: { orderBy: { sortOrder: 'asc' } } },
       });
     });
+
+    const { productAvailableStock } = await import('./inventory-reservation.js');
+    const { isSellableAvailable } = await import('../lib/inventory-stock-rules.js');
+    const beforeAvailable = productAvailableStock(product);
+    const afterAvailable = productAvailableStock(updated);
+    if (
+      updated.productType === 'NEW' &&
+      !isSellableAvailable(beforeAvailable, 'NEW') &&
+      isSellableAvailable(afterAvailable, 'NEW')
+    ) {
+      import('./stock-alert.service.js')
+        .then(({ notifyProductBackInStock }) => notifyProductBackInStock(updated.id))
+        .catch((err) => console.error('[products] back-in-stock notify failed', err));
+    }
+
+    return updated;
   }
 
   async assertRefurbFeatureEnabled() {

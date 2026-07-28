@@ -22,6 +22,7 @@ export const authenticate = async (req, res, next) => {
           isActive: true,
           isGuest: true,
           adminModules: true,
+          tokenVersion: true,
           role: { select: { name: true } },
         },
       });
@@ -45,6 +46,21 @@ export const authenticate = async (req, res, next) => {
     }
     if ('isActive' in dbUser && dbUser.isActive === false) {
       throw new AppError(403, 'This account has been deactivated.');
+    }
+    if (
+      'tokenVersion' in dbUser &&
+      typeof decoded.tokenVersion === 'number' &&
+      Number(dbUser.tokenVersion ?? 0) !== Number(decoded.tokenVersion)
+    ) {
+      throw new AppError(401, 'Session expired. Please sign in again.', 'SESSION_REVOKED');
+    }
+    // Legacy tokens without tokenVersion are rejected once the user has bumped version.
+    if (
+      'tokenVersion' in dbUser &&
+      decoded.tokenVersion == null &&
+      Number(dbUser.tokenVersion ?? 0) > 0
+    ) {
+      throw new AppError(401, 'Session expired. Please sign in again.', 'SESSION_REVOKED');
     }
     req.user = {
       ...decoded,

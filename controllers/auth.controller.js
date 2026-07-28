@@ -153,6 +153,18 @@ export class AuthController {
     res.status(200).json({ success: true, message: result.message, data: result });
   }
 
+  async logout(req, res) {
+    const refreshToken =
+      typeof req.body?.refreshToken === 'string' ? req.body.refreshToken : null;
+    const result = await authService.logout(req.user.id, refreshToken);
+    res.status(200).json({ success: true, message: result.message, data: result });
+  }
+
+  async logoutOtherSessions(req, res) {
+    const result = await authService.logoutOtherSessions(req.user.id);
+    res.status(200).json({ success: true, message: result.message, data: result });
+  }
+
   async listAddresses(req, res) {
     const items = await authService.listAddresses(req.user.id);
     res.status(200).json({ success: true, data: items });

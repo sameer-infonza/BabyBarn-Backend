@@ -1,5 +1,8 @@
 import { prisma } from '../lib/prisma.js';
 import { AppError } from '../utils/error-handler.js';
+import { productAvailableStock, variantAvailableStock } from './inventory-reservation.js';
+import { isSellableAvailable } from '../lib/inventory-stock-rules.js';
+import { maybeAutoSubscribeWishlistRestock } from './stock-alert.service.js';
 
 export class WishlistService {
   async listForUser(userPublicId) {
@@ -26,17 +29,42 @@ export class WishlistService {
             productType: true,
             isDraft: true,
             isActiveListing: true,
-            variants: { select: { publicId: true, stock: true, reservedStock: true, priceOverride: true } },
+            inventoryModel: true,
+            variants: {
+              select: {
+                publicId: true,
+                stock: true,
+                reservedStock: true,
+                priceOverride: true,
+              },
+            },
           },
         },
         productVariant: {
-          select: { publicId: true, sku: true, stock: true, reservedStock: true, combination: true, priceOverride: true },
+          select: {
+            publicId: true,
+            sku: true,
+            stock: true,
+            reservedStock: true,
+            combination: true,
+            priceOverride: true,
+          },
         },
       },
     });
 
     return rows
-      .filter((row) => row.product && !row.product.isDraft && row.product.isActiveListing)
+      .filter((row) => {
+        if (!row.product || row.product.isDraft || !row.product.isActiveListing) return false;
+        // Sold-out refurbished SKUs are hidden from the storefront — drop from wishlist too.
+        if (row.product.productType === 'REFURBISHED') {
+          const available = row.productVariant
+            ? variantAvailableStock(row.productVariant)
+            : productAvailableStock(row.product);
+          return isSellableAvailable(available, 'REFURBISHED');
+        }
+        return true;
+      })
       .map((row) => ({
         productId: row.product.publicId,
         variantId: row.productVariant?.publicId ?? null,
@@ -55,6 +83,7 @@ export class WishlistService {
     if (!user) throw new AppError(401, 'Unauthorized');
 
     const normalized = [];
+    const autoSubscribe = [];
     for (const item of items) {
       const product = await prisma.product.findUnique({
         where: { publicId: item.productId },
@@ -77,6 +106,7 @@ export class WishlistService {
         productVariantId: variantDbId,
         priceAtAdd,
       });
+      autoSubscribe.push({ product, variantDbId });
     }
 
     await prisma.$transaction([
@@ -90,6 +120,10 @@ export class WishlistService {
           ]
         : []),
     ]);
+
+    for (const row of autoSubscribe) {
+      await maybeAutoSubscribeWishlistRestock(user.id, row.product, row.variantDbId);
+    }
 
     return this.listForUser(userPublicId);
   }
@@ -137,6 +171,9 @@ export class WishlistService {
         priceAtAdd,
       },
     });
+
+    await maybeAutoSubscribeWishlistRestock(user.id, product, variantDbId);
+
     return { wishlisted: true };
   }
 }

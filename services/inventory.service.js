@@ -5,6 +5,7 @@ import { writeInventoryLedger } from './inventory-ledger.service.js';
 import {
   DEFAULT_LOW_STOCK_THRESHOLD,
   assertSellableStock,
+  isSellableAvailable,
   lowStockThresholdFromPar,
   stockStatusFromAvailable,
 } from '../lib/inventory-stock-rules.js';
@@ -363,6 +364,7 @@ export class InventoryService {
         throw new AppError(404, 'Product not found');
       }
 
+      const beforeAvailable = productAvailableStock(product);
       const beforeTotal = computeTotalStock(product);
 
       const { applied } = await adjustManualStock(tx, product, user.id, {
@@ -381,6 +383,7 @@ export class InventoryService {
         quantityChange: applied,
         previousTotal: beforeTotal,
         newTotal: computeTotalStock(updated),
+        beforeAvailable,
       };
     });
 
@@ -392,6 +395,16 @@ export class InventoryService {
     );
     if (status === 'low_stock') {
       notifyLowStock(result.product, available);
+    }
+
+    if (
+      result.product.productType === 'NEW' &&
+      !isSellableAvailable(result.beforeAvailable, 'NEW') &&
+      isSellableAvailable(available, 'NEW')
+    ) {
+      import('./stock-alert.service.js')
+        .then(({ notifyProductBackInStock }) => notifyProductBackInStock(result.product.id))
+        .catch((err) => console.error('[inventory] back-in-stock notify failed', err));
     }
 
     return result;

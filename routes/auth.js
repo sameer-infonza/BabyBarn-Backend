@@ -44,6 +44,12 @@ router.post('/change-email', authenticate, requireFullAccount, (req, res, next) 
 router.post('/pause-account', authenticate, requireFullAccount, (req, res, next) =>
   authController.pauseAccount(req, res).catch(next)
 );
+router.post('/logout', authenticate, requireFullAccount, (req, res, next) =>
+  authController.logout(req, res).catch(next)
+);
+router.post('/logout-others', authenticate, requireFullAccount, (req, res, next) =>
+  authController.logoutOtherSessions(req, res).catch(next)
+);
 router.get('/addresses', authenticate, requireFullAccount, (req, res, next) =>
   authController.listAddresses(req, res).catch(next)
 );

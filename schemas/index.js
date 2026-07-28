@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import { AGE_AXIS_NAME, isAgeAxisKey, isCanonicalAge } from '../lib/age-groups.js';
+import { PERSON_NAME_OR_CITY_RE, US_STATE_CODES, US_ZIP_RE } from '../lib/us-address.js';
 
 /** Age (and Color) are the only buyable variant axes. "Size" and other free-form keys are rejected. */
 function isAllowedAxisKey(key) {
@@ -49,17 +50,75 @@ function validateVariantAxisNames(variantAxes, ctx) {
   });
 }
 
-const phoneInvalidMessage = 'Enter a valid phone number (at least 10 digits)';
-/** Accepts formatted phone strings; requires a plausible number of digits. */
+const phoneInvalidMessage = 'Enter a valid US phone number (10 digits)';
+/** Accepts formatted phone strings; requires 10 US national digits (country code optional). */
 const requiredPhoneSchema = z
   .string()
   .min(6)
   .max(30)
-  .refine((v) => v.replace(/\D+/g, '').length >= 10, phoneInvalidMessage);
+  .refine((v) => {
+    let digits = v.replace(/\D+/g, '');
+    if (digits.length === 11 && digits.startsWith('1')) digits = digits.slice(1);
+    return digits.length === 10;
+  }, phoneInvalidMessage);
 const optionalPhoneSchema = z
   .string()
   .max(30)
-  .refine((v) => v.trim() === '' || v.replace(/\D+/g, '').length >= 10, phoneInvalidMessage);
+  .refine((v) => {
+    if (v.trim() === '') return true;
+    let digits = v.replace(/\D+/g, '');
+    if (digits.length === 11 && digits.startsWith('1')) digits = digits.slice(1);
+    return digits.length === 10;
+  }, phoneInvalidMessage);
+
+const nameOrCityMessage = 'Use letters only (no numbers)';
+
+/** Canonical US address shape for address book, checkout, and ACCESS membership. */
+export const usAddressSchema = z.object({
+  fullName: z
+    .string()
+    .trim()
+    .min(1, 'Full name is required')
+    .max(120)
+    .regex(PERSON_NAME_OR_CITY_RE, nameOrCityMessage),
+  company: z.string().trim().max(120).optional().nullable(),
+  addressLine1: z.string().trim().min(1, 'Address line 1 is required').max(200),
+  addressLine2: z.string().trim().max(200).optional().nullable(),
+  city: z
+    .string()
+    .trim()
+    .min(1, 'City is required')
+    .max(100)
+    .regex(PERSON_NAME_OR_CITY_RE, nameOrCityMessage),
+  state: z
+    .string()
+    .trim()
+    .toUpperCase()
+    .refine((v) => US_STATE_CODES.includes(v), 'Select a valid US state'),
+  zipCode: z
+    .string()
+    .trim()
+    .regex(US_ZIP_RE, 'Enter a valid US ZIP (12345 or 12345-6789)'),
+  country: z
+    .string()
+    .trim()
+    .transform((v) => {
+      const u = String(v || '').trim().toUpperCase();
+      if (!u || u === 'UNITED STATES' || u === 'USA' || u === 'US') return 'US';
+      return u;
+    })
+    .pipe(z.literal('US')),
+  phoneNumber: requiredPhoneSchema,
+  addressType: z.enum(['HOME', 'BUSINESS']).optional().default('HOME'),
+});
+
+export const addressCreateSchema = usAddressSchema.extend({
+  isDefault: z.boolean().optional(),
+});
+
+export const addressUpdateSchema = usAddressSchema.partial().extend({
+  isDefault: z.boolean().optional(),
+});
 
 const passwordComplexityMessage =
   'Password must be at least 8 characters and include uppercase, lowercase, number, and special character';
@@ -138,20 +197,6 @@ export const changeEmailSchema = z.object({
 export const pauseAccountSchema = z.object({
   currentPassword: z.string().min(1, 'Current password is required'),
 });
-
-export const addressCreateSchema = z.object({
-  fullName: z.string().min(1, 'Full name is required'),
-  addressLine1: z.string().min(1, 'Address line 1 is required'),
-  addressLine2: z.string().optional().nullable(),
-  city: z.string().min(1, 'City is required'),
-  state: z.string().min(1, 'State is required'),
-  zipCode: z.string().min(1, 'ZIP code is required'),
-  country: z.string().min(1, 'Country is required'),
-  phoneNumber: requiredPhoneSchema,
-  isDefault: z.boolean().optional(),
-});
-
-export const addressUpdateSchema = addressCreateSchema.partial();
 
 const variantInputSchema = z.object({
   combination: z.record(z.string(), z.string()),
@@ -240,16 +285,8 @@ export const updateProductSchema = createProductBodySchema
     validateVariantAxisNames(data.variantAxes, ctx);
   });
 
-const checkoutAddressPayloadSchema = z.object({
-  fullName: z.string().optional(),
-  addressLine1: z.string().optional(),
-  addressLine2: z.string().optional().nullable(),
-  city: z.string().optional(),
-  state: z.string().optional(),
-  zipCode: z.string().optional(),
-  country: z.string().optional(),
-  phoneNumber: z.string().optional(),
-});
+const checkoutAddressPayloadSchema = usAddressSchema;
+const checkoutAddressLooseSchema = usAddressSchema.partial();
 
 const checkoutParcelSchema = z.object({
   length: z.union([z.number().positive(), z.string().min(1)]),
@@ -301,7 +338,7 @@ export const checkoutQuoteSchema = z.object({
       variantId: z.string().min(1).optional().nullable(),
     })
   ).min(1),
-  shippingAddress: checkoutAddressPayloadSchema.optional(),
+  shippingAddress: checkoutAddressLooseSchema.optional(),
   parcels: z.array(checkoutParcelSchema).optional(),
   selectedRateId: z.string().min(1).optional(),
   storeCreditToApply: z.number().min(0).optional(),
@@ -750,16 +787,7 @@ export const shippingLabelSchema = z.object({
   orderId: z.string().min(1).optional(),
 });
 
-const membershipShippingSchema = z.object({
-  fullName: z.string().min(1).optional(),
-  addressLine1: z.string().min(1),
-  addressLine2: z.string().optional().nullable(),
-  city: z.string().min(1),
-  state: z.string().min(1),
-  zipCode: z.string().min(1),
-  country: z.string().min(1).default('US'),
-  phoneNumber: z.string().min(6).max(30).optional().nullable(),
-});
+const membershipShippingSchema = usAddressSchema;
 
 export const membershipRegistrationSchema = z.object({
   babyName: z.string().min(1, 'Baby name is required'),

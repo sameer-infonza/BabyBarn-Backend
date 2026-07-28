@@ -1,48 +1,9 @@
 import { prisma } from '../lib/prisma.js';
-import { config } from '../config/env.js';
-import { emailService } from './email.service.js';
-import { variantAvailableStock, productAvailableStock } from './inventory-reservation.js';
+import { notifyProductBackInStock } from './stock-alert.service.js';
 
 /** Notify subscribers when a previously out-of-stock SKU becomes available. */
 export async function sendBackInStockAlerts() {
-  const subs = await prisma.stockAlertSubscription.findMany({
-    where: { notifiedAt: null },
-    include: {
-      user: { select: { email: true, firstName: true, lastName: true } },
-      product: { include: { variants: true } },
-      productVariant: true,
-    },
-    take: 100,
-  });
-
-  let sent = 0;
-  for (const sub of subs) {
-    const available = sub.productVariant
-      ? variantAvailableStock(sub.productVariant)
-      : productAvailableStock(sub.product);
-    if (available <= 0) continue;
-
-    const name = [sub.user.firstName, sub.user.lastName].filter(Boolean).join(' ') || 'there';
-    try {
-      await emailService.sendTemplate({
-        to: sub.user.email,
-        template: 'back-in-stock',
-        context: {
-          name,
-          productName: sub.product.name,
-          actionUrl: `${config.frontend.customerUrl}/products/${sub.product.slug}`,
-        },
-      });
-      await prisma.stockAlertSubscription.update({
-        where: { id: sub.id },
-        data: { notifiedAt: new Date() },
-      });
-      sent += 1;
-    } catch (err) {
-      console.error('[engagement] back-in-stock email failed', sub.user.email, err);
-    }
-  }
-  return { sent, checked: subs.length };
+  return notifyProductBackInStock(null);
 }
 
 /** Notify wishlist users when price dropped vs priceAtAdd. */
@@ -68,6 +29,8 @@ export async function sendWishlistPriceDropAlerts() {
 
     const name = [item.user.firstName, item.user.lastName].filter(Boolean).join(' ') || 'there';
     try {
+      const { emailService } = await import('./email.service.js');
+      const { config } = await import('../config/env.js');
       await emailService.sendTemplate({
         to: item.user.email,
         template: 'price-drop',
