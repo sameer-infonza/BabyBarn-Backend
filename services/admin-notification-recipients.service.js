@@ -37,16 +37,8 @@ export async function resolveAdminNotificationRecipients({ module, prefKey }) {
     if (prefKey && prefs[prefKey] === false) continue;
 
     const roleName = user.role?.name;
-    if (
-      !userCanSeeModule(
-        {
-          role: roleName,
-          adminModules: user.adminModules,
-          adminNotificationAccess: user.adminNotificationAccess,
-        },
-        'notifications'
-      )
-    ) {
+    // Operational emails require an explicit grant for team members (ADMIN always eligible).
+    if (roleName === 'ADMIN_TEAM' && !user.adminNotificationAccess) {
       continue;
     }
     if (

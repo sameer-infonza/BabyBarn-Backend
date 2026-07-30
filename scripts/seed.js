@@ -1,5 +1,6 @@
 import { prisma } from '../lib/prisma.js';
 import bcrypt from 'bcryptjs';
+import { PORTAL_SCOPE, findUserByEmailAndPortal, portalScopeFromRoleName } from '../lib/portal-scope.js';
 
 const DEFAULT_ROLES = [
   'ADMIN',
@@ -70,10 +71,11 @@ async function seedUsers() {
     }
 
     const email = seedUser.email.trim().toLowerCase();
-    const existing = await prisma.user.findUnique({ where: { email } });
+    const portalScope = portalScopeFromRoleName(seedUser.role);
+    const existing = await findUserByEmailAndPortal(prisma, email, portalScope);
     if (existing) {
       skipped += 1;
-      console.log(`[SKIP] user already exists: ${email}`);
+      console.log(`[SKIP] user already exists: ${email} (${portalScope})`);
       continue;
     }
 
@@ -90,12 +92,13 @@ async function seedUsers() {
         firstName: seedUser.firstName,
         lastName: seedUser.lastName,
         roleId: role.id,
+        portalScope,
         emailVerifiedAt: new Date(),
       },
     });
 
     created += 1;
-    console.log(`[CREATE] user: ${email} (${seedUser.role})`);
+    console.log(`[CREATE] user: ${email} (${seedUser.role} / ${portalScope})`);
   }
 
   return { created, skipped };

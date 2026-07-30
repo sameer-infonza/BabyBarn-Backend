@@ -6,6 +6,13 @@ import { AppError } from '../utils/error-handler.js';
 import { emailService } from './email.service.js';
 import { addressVerificationService } from './address-verification.service.js';
 import { config } from '../config/env.js';
+import {
+  PORTAL_SCOPE,
+  findUserByEmailAndPortal,
+  normalizeAuthEmail,
+  otherPortalScope,
+  portalToScope,
+} from '../lib/portal-scope.js';
 
 const RESET_TOKEN_BYTES = 32;
 const RESET_TOKEN_TTL_MS = 60 * 60 * 1000;
@@ -62,6 +69,7 @@ function buildAccessPayload(user) {
     id: user.publicId,
     email: user.email,
     role: user.role.name,
+    portalScope: user.portalScope || PORTAL_SCOPE.CUSTOMER,
     tokenVersion: user.tokenVersion ?? 0,
   };
   if (user.role.name === 'ADMIN_TEAM') {
@@ -114,6 +122,7 @@ function toPublicUser(user) {
   const out = {
     id: user.publicId,
     email: user.email,
+    portalScope: user.portalScope || PORTAL_SCOPE.CUSTOMER,
     firstName: user.firstName ?? undefined,
     lastName: user.lastName ?? undefined,
     role: roleName,
@@ -185,8 +194,13 @@ export class AuthService {
   }
 
   async register(email, password, firstName, lastName) {
-    const normalizedEmail = String(email || '').trim().toLowerCase();
-    const existingUser = await prisma.user.findUnique({ where: { email: normalizedEmail } });
+    const normalizedEmail = normalizeAuthEmail(email);
+    const existingUser = await findUserByEmailAndPortal(
+      prisma,
+      normalizedEmail,
+      PORTAL_SCOPE.CUSTOMER,
+      { include: { role: true } }
+    );
 
     if (existingUser) {
       if (existingUser.isGuest) {
@@ -200,6 +214,7 @@ export class AuthService {
             isGuest: false,
             convertedAt: new Date(),
             emailVerifiedAt: existingUser.emailVerifiedAt ?? new Date(),
+            portalScope: PORTAL_SCOPE.CUSTOMER,
           },
           include: { role: true },
         });
@@ -232,6 +247,7 @@ export class AuthService {
         firstName,
         lastName,
         roleId: userRoleId,
+        portalScope: PORTAL_SCOPE.CUSTOMER,
         emailVerifiedAt: null,
       },
       include: { role: true },
@@ -255,13 +271,34 @@ export class AuthService {
     };
   }
 
-  async login(email, password) {
-    const user = await prisma.user.findUnique({
-      where: { email },
+  async login(email, password, portal = 'customer') {
+    const normalizedEmail = normalizeAuthEmail(email);
+    const portalScope = portalToScope(portal);
+    const user = await findUserByEmailAndPortal(prisma, normalizedEmail, portalScope, {
       include: { role: true },
     });
 
     if (!user) {
+      const other = await findUserByEmailAndPortal(
+        prisma,
+        normalizedEmail,
+        otherPortalScope(portalScope),
+        { select: { id: true } }
+      );
+      if (other) {
+        if (portalScope === PORTAL_SCOPE.CUSTOMER) {
+          throw new AppError(
+            403,
+            'This email is registered for the Admin Portal. Sign in there to access team tools.',
+            'WRONG_PORTAL_STAFF'
+          );
+        }
+        throw new AppError(
+          403,
+          'This email is registered for the Customer Portal. Sign in on the shop to continue.',
+          'WRONG_PORTAL_CUSTOMER'
+        );
+      }
       throw new AppError(401, 'Invalid credentials');
     }
 
@@ -460,14 +497,15 @@ export class AuthService {
     const ok = await bcrypt.compare(currentPassword || '', user.password);
     if (!ok) throw new AppError(400, 'Current password is incorrect');
 
-    const normalizedEmail = String(newEmail || '').trim().toLowerCase();
+    const normalizedEmail = normalizeAuthEmail(newEmail);
     if (!normalizedEmail || !normalizedEmail.includes('@')) {
       throw new AppError(400, 'Enter a valid email address');
     }
     if (normalizedEmail === user.email.toLowerCase()) {
       throw new AppError(400, 'That is already your email address');
     }
-    const existing = await prisma.user.findUnique({ where: { email: normalizedEmail } });
+    const scope = user.portalScope || PORTAL_SCOPE.CUSTOMER;
+    const existing = await findUserByEmailAndPortal(prisma, normalizedEmail, scope);
     if (existing && existing.id !== user.id) {
       throw new AppError(400, 'That email is already in use');
     }
@@ -680,44 +718,66 @@ export class AuthService {
     return { message: 'Address deleted' };
   }
 
-  async forgotPassword(email) {
-    const user = await prisma.user.findUnique({
-      where: { email },
+  async forgotPassword(email, portal = 'customer') {
+    const normalizedEmail = normalizeAuthEmail(email);
+    const portalScope = portalToScope(portal);
+    const user = await findUserByEmailAndPortal(prisma, normalizedEmail, portalScope, {
       include: { role: true },
     });
 
-    if (user) {
-      await prisma.passwordResetToken.deleteMany({ where: { userId: user.id } });
-
-      const raw = crypto.randomBytes(RESET_TOKEN_BYTES).toString('hex');
-      const expiresAt = new Date(Date.now() + RESET_TOKEN_TTL_MS);
-
-      await prisma.passwordResetToken.create({
-        data: {
-          token: raw,
-          userId: user.id,
-          expiresAt,
-        },
-      });
-
-      const baseUrl = this.isCustomerRole(user.role?.name || '')
-        ? config.frontend.customerUrl
-        : config.frontend.adminUrl;
-      const resetUrl = `${baseUrl}/reset-password?token=${raw}`;
-
-      await this.sendAuthEmail({
-        to: user.email,
-        template: 'forgot-password',
-        context: {
-          name: [user.firstName, user.lastName].filter(Boolean).join(' ').trim(),
-          actionUrl: resetUrl,
-        },
-      });
-
+    if (!user) {
+      const other = await findUserByEmailAndPortal(
+        prisma,
+        normalizedEmail,
+        otherPortalScope(portalScope),
+        { select: { id: true } }
+      );
+      if (other) {
+        if (portalScope === PORTAL_SCOPE.CUSTOMER) {
+          throw new AppError(
+            403,
+            'This email is registered for the Admin Portal. Use the admin forgot-password page to reset that password.',
+            'WRONG_PORTAL_STAFF'
+          );
+        }
+        throw new AppError(
+          403,
+          'This email is registered for the Customer Portal. Use the shop forgot-password page to reset that password.',
+          'WRONG_PORTAL_CUSTOMER'
+        );
+      }
       return {
         message: 'If an account exists for this email, a reset link has been sent.',
       };
     }
+
+    await prisma.passwordResetToken.deleteMany({ where: { userId: user.id } });
+
+    const raw = crypto.randomBytes(RESET_TOKEN_BYTES).toString('hex');
+    const expiresAt = new Date(Date.now() + RESET_TOKEN_TTL_MS);
+
+    await prisma.passwordResetToken.create({
+      data: {
+        token: raw,
+        userId: user.id,
+        expiresAt,
+      },
+    });
+
+    const baseUrl =
+      portalScope === PORTAL_SCOPE.STAFF
+        ? config.frontend.adminUrl
+        : config.frontend.customerUrl;
+    const resetUrl = `${baseUrl}/reset-password?token=${raw}`;
+
+    await this.sendAuthEmail({
+      to: user.email,
+      template: 'forgot-password',
+      context: {
+        name: [user.firstName, user.lastName].filter(Boolean).join(' ').trim(),
+        actionUrl: resetUrl,
+      },
+    });
 
     return {
       message: 'If an account exists for this email, a reset link has been sent.',
@@ -785,10 +845,12 @@ export class AuthService {
   }
 
   async resendVerification(email) {
-    const user = await prisma.user.findUnique({
-      where: { email },
-      include: { role: true },
-    });
+    const user = await findUserByEmailAndPortal(
+      prisma,
+      normalizeAuthEmail(email),
+      PORTAL_SCOPE.CUSTOMER,
+      { include: { role: true } }
+    );
 
     if (!user || !this.isCustomerRole(user.role.name)) {
       return { message: 'If an account exists, a verification email has been sent.' };

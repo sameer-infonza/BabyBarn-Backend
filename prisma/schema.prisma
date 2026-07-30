@@ -158,6 +158,13 @@ enum ShippingProviderLogLevel {
   ERROR
 }
 
+/// Separates customer-portal identities from staff/admin-portal identities.
+/// Same email may exist once per scope (dual accounts).
+enum PortalScope {
+  CUSTOMER
+  STAFF
+}
+
 model Role {
   id        Int      @id @default(autoincrement())
   publicId  String   @unique @default(cuid())
@@ -170,7 +177,9 @@ model Role {
 model User {
   id         Int      @id @default(autoincrement())
   publicId   String   @unique @default(cuid())
-  email      String   @unique
+  email      String
+  /// CUSTOMER = shop portal; STAFF = admin/team portal. Unique with email.
+  portalScope PortalScope @default(CUSTOMER)
   password   String
   firstName  String?
   lastName   String?
@@ -232,7 +241,9 @@ model User {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
+  @@unique([email, portalScope])
   @@index([email])
+  @@index([portalScope])
   @@index([roleId])
   @@index([publicId])
   @@index([isActive])

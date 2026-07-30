@@ -18,12 +18,22 @@ test('notification module validation rejects unknown modules', () => {
   );
 });
 
-test('team users need notification access grant for inbox', () => {
-  const denied = { role: 'ADMIN_TEAM', adminModules: [], adminNotificationAccess: false };
-  const granted = { role: 'ADMIN_TEAM', adminModules: [], adminNotificationAccess: true };
-  assert.equal(userCanSeeModule(denied, 'notifications'), false);
-  assert.equal(userCanSeeModule(granted, 'notifications'), true);
-  assert.equal(userCanSeeModule(granted, 'orders'), false);
+test('team users always have in-app notification access', () => {
+  const deniedEmail = { role: 'ADMIN_TEAM', adminModules: [], adminNotificationAccess: false };
+  const grantedEmail = { role: 'ADMIN_TEAM', adminModules: [], adminNotificationAccess: true };
+  assert.equal(userCanSeeModule(deniedEmail, 'notifications'), true);
+  assert.equal(userCanSeeModule(grantedEmail, 'notifications'), true);
+  assert.equal(userCanSeeModule(grantedEmail, 'orders'), false);
+});
+
+test('team email eligibility requires adminNotificationAccess', () => {
+  const withoutGrant = { role: 'ADMIN_TEAM', adminModules: ['order-management'], adminNotificationAccess: false };
+  const withGrant = { role: 'ADMIN_TEAM', adminModules: ['order-management'], adminNotificationAccess: true };
+  // Inbox is always allowed; email grant is orthogonal to module visibility.
+  assert.equal(userCanSeeModule(withoutGrant, 'notifications'), true);
+  assert.equal(userCanSeeModule(withGrant, 'notifications'), true);
+  assert.equal(Boolean(withoutGrant.adminNotificationAccess), false);
+  assert.equal(Boolean(withGrant.adminNotificationAccess), true);
 });
 
 test('super admin always has notification access', () => {

@@ -6,6 +6,7 @@ import { emailService } from './email.service.js';
 import { writeAdminAudit } from './audit.service.js';
 import { config } from '../config/env.js';
 import { prisma } from '../lib/prisma.js';
+import { PORTAL_SCOPE, findUserByEmailAndPortal } from '../lib/portal-scope.js';
 
 function isStorefrontCustomerRole(roleName) {
   return roleName === 'CUSTOMER' || roleName === 'USER';
@@ -717,7 +718,7 @@ export async function createAdminTeamMember(actorPublicId, payload) {
   const modules = payload.modules;
   const adminNotificationAccess = Boolean(payload.adminNotificationAccess);
 
-  const existing = await prisma.user.findUnique({ where: { email } });
+  const existing = await findUserByEmailAndPortal(prisma, email, PORTAL_SCOPE.STAFF);
   if (existing) {
     throw new AppError(400, 'Email already registered');
   }
@@ -736,6 +737,7 @@ export async function createAdminTeamMember(actorPublicId, payload) {
       lastName,
       phone: roleTitle,
       roleId: teamRole.id,
+      portalScope: PORTAL_SCOPE.STAFF,
       adminModules: normalized,
       adminNotificationAccess,
       emailVerifiedAt: new Date(),

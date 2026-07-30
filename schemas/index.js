@@ -137,6 +137,8 @@ export const registerSchema = z.object({
 export const loginSchema = z.object({
   email: z.string().email('Invalid email address'),
   password: z.string(),
+  /** Which portal is signing in — scopes email uniqueness and wrong-portal errors. */
+  portal: z.enum(['customer', 'admin']).optional().default('customer'),
 });
 
 export const refreshTokenSchema = z.object({
@@ -145,6 +147,7 @@ export const refreshTokenSchema = z.object({
 
 export const resetPasswordSchema = z.object({
   email: z.string().email('Invalid email address'),
+  portal: z.enum(['customer', 'admin']).optional().default('customer'),
 });
 
 export const confirmPasswordSchema = z.object({

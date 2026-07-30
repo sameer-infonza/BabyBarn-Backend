@@ -3,12 +3,9 @@ import crypto from 'crypto';
 import { prisma } from '../lib/prisma.js';
 import { generateCheckoutToken } from '../utils/jwt.js';
 import { AppError } from '../utils/error-handler.js';
+import { PORTAL_SCOPE, findUserByEmailAndPortal, normalizeAuthEmail } from '../lib/portal-scope.js';
 
 const GUEST_PASSWORD_BYTES = 32;
-
-function normalizeEmail(email) {
-  return String(email || '').trim().toLowerCase();
-}
 
 function toGuestPublicUser(user) {
   return {
@@ -17,6 +14,7 @@ function toGuestPublicUser(user) {
     firstName: user.firstName ?? undefined,
     lastName: user.lastName ?? undefined,
     role: 'CUSTOMER',
+    portalScope: PORTAL_SCOPE.CUSTOMER,
     isGuest: true,
     accessMemberActive: false,
     accessMemberUntil: null,
@@ -25,13 +23,12 @@ function toGuestPublicUser(user) {
 
 export class CheckoutGuestService {
   async createGuestSession({ email, firstName, lastName, phone }) {
-    const normalized = normalizeEmail(email);
+    const normalized = normalizeAuthEmail(email);
     if (!normalized || !normalized.includes('@')) {
       throw new AppError(400, 'A valid email is required');
     }
 
-    const existing = await prisma.user.findUnique({
-      where: { email: normalized },
+    const existing = await findUserByEmailAndPortal(prisma, normalized, PORTAL_SCOPE.CUSTOMER, {
       include: { role: true },
     });
 
@@ -83,6 +80,7 @@ export class CheckoutGuestService {
         lastName: lastName?.trim() || null,
         phone: phone?.trim() || null,
         roleId: defaultRole.id,
+        portalScope: PORTAL_SCOPE.CUSTOMER,
         isGuest: true,
         guestCreatedAt: new Date(),
         emailVerifiedAt: new Date(),
@@ -98,6 +96,7 @@ export class CheckoutGuestService {
       id: user.publicId,
       email: user.email,
       role: user.role?.name || 'CUSTOMER',
+      portalScope: PORTAL_SCOPE.CUSTOMER,
     });
     return {
       user: toGuestPublicUser(user),

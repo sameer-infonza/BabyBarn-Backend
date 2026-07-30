@@ -34,7 +34,7 @@ export class AuthController {
 
   async login(req, res) {
     const data = await validate(loginSchema, req.body);
-    const result = await authService.login(data.email, data.password);
+    const result = await authService.login(data.email, data.password, data.portal);
 
     res.status(200).json({
       success: true,
@@ -64,7 +64,7 @@ export class AuthController {
 
   async forgotPassword(req, res) {
     const data = await validate(resetPasswordSchema, req.body);
-    const result = await authService.forgotPassword(data.email);
+    const result = await authService.forgotPassword(data.email, data.portal);
 
     res.status(200).json({
       success: true,
