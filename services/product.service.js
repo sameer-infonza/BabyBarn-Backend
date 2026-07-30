@@ -42,6 +42,128 @@ function computeAgeGroups(isVariantProduct, variants, sizeAgeGroup) {
   return Array.from(set).sort((a, b) => ageOrderIndex(a) - ageOrderIndex(b));
 }
 
+const RELATED_REFURB_SELECT = {
+  id: true,
+  publicId: true,
+  name: true,
+  slug: true,
+  price: true,
+  stock: true,
+  reservedStock: true,
+  imageUrl: true,
+  isActiveListing: true,
+  isDraft: true,
+  updatedAt: true,
+  sourceProductId: true,
+  variants: {
+    select: { stock: true, reservedStock: true },
+  },
+};
+
+function toRelatedRefurbishedPublic(row) {
+  if (!row) return null;
+  return {
+    id: row.publicId,
+    name: row.name,
+    slug: row.slug,
+    price: row.price,
+    stock: row.stock,
+    imageUrl: row.imageUrl,
+    productType: 'REFURBISHED',
+  };
+}
+
+function toSourceProductPublic(row) {
+  if (!row) return null;
+  return {
+    id: row.publicId,
+    name: row.name,
+    slug: row.slug,
+    sku: row.sku,
+    price: row.price,
+    memberPrice: row.memberPrice,
+    compareAtPrice: row.compareAtPrice,
+    stock: row.stock,
+    imageUrl: row.imageUrl,
+    inventoryModel: row.inventoryModel,
+    productType: 'NEW',
+  };
+}
+
+async function pickSellableRelatedRefurbished(sourceInternalId) {
+  const { productAvailableStock } = await import('./inventory-reservation.js');
+  const { isSellableAvailable } = await import('../lib/inventory-stock-rules.js');
+  const candidates = await prisma.product.findMany({
+    where: {
+      productType: 'REFURBISHED',
+      sourceProductId: sourceInternalId,
+      isDraft: false,
+      isActiveListing: true,
+      stock: { gt: 0 },
+    },
+    select: RELATED_REFURB_SELECT,
+    orderBy: { updatedAt: 'desc' },
+    take: 8,
+  });
+  for (const row of candidates) {
+    if (isSellableAvailable(productAvailableStock(row), 'REFURBISHED')) {
+      return toRelatedRefurbishedPublic(row);
+    }
+  }
+  return null;
+}
+
+async function attachRelatedRefurbishedToProducts(products) {
+  const newProducts = products.filter((p) => p.productType === 'NEW');
+  if (newProducts.length === 0) {
+    return products.map((p) => ({ ...p, relatedRefurbished: null }));
+  }
+
+  const { productAvailableStock } = await import('./inventory-reservation.js');
+  const { isSellableAvailable } = await import('../lib/inventory-stock-rules.js');
+  const sourceIds = newProducts.map((p) => p.id);
+  const refurbListings = await prisma.product.findMany({
+    where: {
+      productType: 'REFURBISHED',
+      sourceProductId: { in: sourceIds },
+      isDraft: false,
+      isActiveListing: true,
+      stock: { gt: 0 },
+    },
+    select: RELATED_REFURB_SELECT,
+    orderBy: { updatedAt: 'desc' },
+  });
+
+  const refurbBySource = new Map();
+  for (const row of refurbListings) {
+    if (!isSellableAvailable(productAvailableStock(row), 'REFURBISHED')) continue;
+    if (!refurbBySource.has(row.sourceProductId)) {
+      refurbBySource.set(row.sourceProductId, row);
+    }
+  }
+
+  return products.map((p) => ({
+    ...p,
+    relatedRefurbished:
+      p.productType === 'NEW' ? toRelatedRefurbishedPublic(refurbBySource.get(p.id)) : null,
+    sourceProduct: p.sourceProduct
+      ? {
+          id: p.sourceProduct.publicId,
+          name: p.sourceProduct.name,
+          slug: p.sourceProduct.slug,
+          sku: p.sourceProduct.sku,
+          price: p.sourceProduct.price,
+          memberPrice: p.sourceProduct.memberPrice,
+          compareAtPrice: p.sourceProduct.compareAtPrice,
+          stock: p.sourceProduct.stock,
+          imageUrl: p.sourceProduct.imageUrl,
+          inventoryModel: p.sourceProduct.inventoryModel,
+          productType: 'NEW',
+        }
+      : null,
+  }));
+}
+
 /** Block catalog activation until required listing fields are complete. */
 function assertProductCanActivate(product, variants = product?.variants ?? []) {
   const errors = [];
@@ -336,6 +458,9 @@ export class ProductService {
           price: true,
           memberPrice: true,
           compareAtPrice: true,
+          stock: true,
+          imageUrl: true,
+          inventoryModel: true,
         },
       },
       ...(admin
@@ -366,8 +491,33 @@ export class ProductService {
       prisma.product.count({ where }),
     ]);
 
+    const storefrontProducts =
+      !admin && refurbishedEnabled
+        ? await attachRelatedRefurbishedToProducts(products)
+        : !admin
+          ? products.map((p) => ({
+              ...p,
+              relatedRefurbished: null,
+              sourceProduct: p.sourceProduct
+                ? {
+                    id: p.sourceProduct.publicId,
+                    name: p.sourceProduct.name,
+                    slug: p.sourceProduct.slug,
+                    sku: p.sourceProduct.sku,
+                    price: p.sourceProduct.price,
+                    memberPrice: p.sourceProduct.memberPrice,
+                    compareAtPrice: p.sourceProduct.compareAtPrice,
+                    stock: p.sourceProduct.stock,
+                    imageUrl: p.sourceProduct.imageUrl,
+                    inventoryModel: p.sourceProduct.inventoryModel,
+                    productType: 'NEW',
+                  }
+                : null,
+            }))
+          : products;
+
     return {
-      products,
+      products: storefrontProducts,
       pagination: {
         total,
         page,
@@ -401,6 +551,9 @@ export class ProductService {
             price: true,
             memberPrice: true,
             compareAtPrice: true,
+            stock: true,
+            imageUrl: true,
+            inventoryModel: true,
           },
         },
         ...(admin
@@ -428,6 +581,9 @@ export class ProductService {
               price: true,
               memberPrice: true,
               compareAtPrice: true,
+              stock: true,
+              imageUrl: true,
+              inventoryModel: true,
             },
           },
           ...(admin
@@ -462,7 +618,20 @@ export class ProductService {
       }
     }
 
-    return product;
+    if (admin) {
+      return product;
+    }
+
+    let relatedRefurbished = null;
+    if (product.productType === 'NEW' && isRefurbishedEnabled()) {
+      relatedRefurbished = await pickSellableRelatedRefurbished(product.id);
+    }
+
+    return {
+      ...product,
+      relatedRefurbished,
+      sourceProduct: toSourceProductPublic(product.sourceProduct),
+    };
   }
 
   async createProduct(data, options = {}) {
