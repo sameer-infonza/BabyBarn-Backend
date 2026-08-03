@@ -1,6 +1,17 @@
 import { verifyToken } from '../utils/jwt.js';
 import { AppError } from '../utils/error-handler.js';
 import { prisma } from '../lib/prisma.js';
+import { PORTAL_SCOPE, isStaffRoleName } from '../lib/portal-scope.js';
+
+function resolvePortalScope(dbUser, decoded, roleName) {
+  if (dbUser && 'portalScope' in dbUser && dbUser.portalScope) {
+    return dbUser.portalScope;
+  }
+  if (decoded?.portalScope === PORTAL_SCOPE.STAFF || decoded?.portalScope === PORTAL_SCOPE.CUSTOMER) {
+    return decoded.portalScope;
+  }
+  return isStaffRoleName(roleName) ? PORTAL_SCOPE.STAFF : PORTAL_SCOPE.CUSTOMER;
+}
 
 export const authenticate = async (req, res, next) => {
   try {
@@ -21,6 +32,7 @@ export const authenticate = async (req, res, next) => {
           email: true,
           isActive: true,
           isGuest: true,
+          portalScope: true,
           adminModules: true,
           adminNotificationAccess: true,
           tokenVersion: true,
@@ -63,11 +75,16 @@ export const authenticate = async (req, res, next) => {
     ) {
       throw new AppError(401, 'Session expired. Please sign in again.', 'SESSION_REVOKED');
     }
+
+    const role = ('role' in dbUser ? dbUser.role?.name : null) || decoded.role;
+    const portalScope = resolvePortalScope(dbUser, decoded, role);
+
     req.user = {
       ...decoded,
       id: dbUser.publicId,
       email: dbUser.email,
-      role: ('role' in dbUser ? dbUser.role?.name : null) || decoded.role,
+      role,
+      portalScope,
       isGuest: 'isGuest' in dbUser ? Boolean(dbUser.isGuest) : false,
       adminModules: 'adminModules' in dbUser ? (dbUser.adminModules ?? null) : null,
       adminNotificationAccess:
@@ -77,6 +94,33 @@ export const authenticate = async (req, res, next) => {
   } catch (error) {
     next(error instanceof AppError ? error : new AppError(401, 'Unauthorized', 'UNAUTHORIZED'));
   }
+};
+
+/**
+ * Require the authenticated user to belong to one of the given portal scopes.
+ * @param {...('CUSTOMER'|'STAFF')} scopes
+ */
+export const requirePortalScope = (...scopes) => {
+  const allowed = new Set(scopes);
+  return (req, res, next) => {
+    void res;
+    if (!req.user) {
+      return next(new AppError(401, 'Unauthorized', 'UNAUTHORIZED'));
+    }
+    const scope = req.user.portalScope || PORTAL_SCOPE.CUSTOMER;
+    if (!allowed.has(scope)) {
+      return next(
+        new AppError(
+          403,
+          scope === PORTAL_SCOPE.STAFF
+            ? 'Access denied. Use the Admin Portal session for staff tools, or sign in on the Customer Portal for shop access.'
+            : 'Access denied. Use the Customer Portal session for shop access, or sign in on the Admin Portal for staff tools.',
+          'WRONG_PORTAL_TOKEN'
+        )
+      );
+    }
+    next();
+  };
 };
 
 export const requireFullAccount = (req, res, next) => {
@@ -98,15 +142,39 @@ export const requireFullAccount = (req, res, next) => {
       )
     );
   }
+  // Customer account APIs must never accept a staff-portal session, even with the same email.
+  const scope = req.user.portalScope || PORTAL_SCOPE.CUSTOMER;
+  if (scope !== PORTAL_SCOPE.CUSTOMER) {
+    return next(
+      new AppError(
+        403,
+        'Access denied. Sign in on the Customer Portal to manage this shop account.',
+        'WRONG_PORTAL_TOKEN'
+      )
+    );
+  }
   next();
 };
 
 export const authorize = (...roles) => {
   return (req, res, next) => {
     if (!req.user || !roles.includes(req.user.role)) {
-      next(new AppError(403, 'Forbidden'));
-    } else {
-      next();
+      return next(new AppError(403, 'Forbidden'));
     }
+    // Staff console roles must present a STAFF-scoped session (not a customer twin).
+    const needsStaffPortal = roles.some((role) => isStaffRoleName(role));
+    if (needsStaffPortal) {
+      const scope = req.user.portalScope || PORTAL_SCOPE.CUSTOMER;
+      if (scope !== PORTAL_SCOPE.STAFF) {
+        return next(
+          new AppError(
+            403,
+            'Access denied. Sign in on the Admin Portal to access staff tools.',
+            'WRONG_PORTAL_TOKEN'
+          )
+        );
+      }
+    }
+    next();
   };
 };

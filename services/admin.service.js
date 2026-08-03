@@ -6,7 +6,7 @@ import { emailService } from './email.service.js';
 import { writeAdminAudit } from './audit.service.js';
 import { config } from '../config/env.js';
 import { prisma } from '../lib/prisma.js';
-import { PORTAL_SCOPE, findUserByEmailAndPortal } from '../lib/portal-scope.js';
+import { PORTAL_SCOPE, findUserByEmailAndPortal, rehomeMisScopedStaffToStaffPortal } from '../lib/portal-scope.js';
 
 function isStorefrontCustomerRole(roleName) {
   return roleName === 'CUSTOMER' || roleName === 'USER';
@@ -718,9 +718,16 @@ export async function createAdminTeamMember(actorPublicId, payload) {
   const modules = payload.modules;
   const adminNotificationAccess = Boolean(payload.adminNotificationAccess);
 
+  // Free CUSTOMER slot if a legacy staff-role user was mis-scoped there.
+  await rehomeMisScopedStaffToStaffPortal(prisma, email);
+
   const existing = await findUserByEmailAndPortal(prisma, email, PORTAL_SCOPE.STAFF);
   if (existing) {
-    throw new AppError(400, 'Email already registered');
+    throw new AppError(
+      400,
+      'An Admin Portal account already exists for this email. Customer Portal accounts with the same email are separate and allowed.',
+      'EMAIL_TAKEN_STAFF'
+    );
   }
 
   const normalized = normalizeTeamPermissionModules(modules);
@@ -729,32 +736,44 @@ export async function createAdminTeamMember(actorPublicId, payload) {
   }
 
   const hashed = await bcrypt.hash(tempPassword, 10);
-  const created = await prisma.user.create({
-    data: {
-      email,
-      password: hashed,
-      firstName,
-      lastName,
-      phone: roleTitle,
-      roleId: teamRole.id,
-      portalScope: PORTAL_SCOPE.STAFF,
-      adminModules: normalized,
-      adminNotificationAccess,
-      emailVerifiedAt: new Date(),
-      isActive: true,
-    },
-    select: {
-      publicId: true,
-      email: true,
-      firstName: true,
-      lastName: true,
-      phone: true,
-      adminModules: true,
-      adminNotificationAccess: true,
-      isActive: true,
-      createdAt: true,
-    },
-  });
+  let created;
+  try {
+    created = await prisma.user.create({
+      data: {
+        email,
+        password: hashed,
+        firstName,
+        lastName,
+        phone: roleTitle,
+        roleId: teamRole.id,
+        portalScope: PORTAL_SCOPE.STAFF,
+        adminModules: normalized,
+        adminNotificationAccess,
+        emailVerifiedAt: new Date(),
+        isActive: true,
+      },
+      select: {
+        publicId: true,
+        email: true,
+        firstName: true,
+        lastName: true,
+        phone: true,
+        adminModules: true,
+        adminNotificationAccess: true,
+        isActive: true,
+        createdAt: true,
+      },
+    });
+  } catch (err) {
+    if (err?.code === 'P2002') {
+      throw new AppError(
+        400,
+        'An Admin Portal account already exists for this email. Customer Portal accounts with the same email are separate and allowed.',
+        'EMAIL_TAKEN_STAFF'
+      );
+    }
+    throw err;
+  }
   await writeAdminAudit({
     actorId: actorPublicId,
     action: 'TEAM_MEMBER_CREATED',

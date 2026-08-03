@@ -12,6 +12,7 @@ import {
   normalizeAuthEmail,
   otherPortalScope,
   portalToScope,
+  rehomeMisScopedStaffToStaffPortal,
 } from '../lib/portal-scope.js';
 
 const RESET_TOKEN_BYTES = 32;
@@ -199,6 +200,10 @@ export class AuthService {
 
   async register(email, password, firstName, lastName) {
     const normalizedEmail = normalizeAuthEmail(email);
+
+    // Legacy: staff-role users stuck on CUSTOMER scope block shop registration — rehome first.
+    await rehomeMisScopedStaffToStaffPortal(prisma, normalizedEmail);
+
     const existingUser = await findUserByEmailAndPortal(
       prisma,
       normalizedEmail,
@@ -232,7 +237,11 @@ export class AuthService {
           message: 'Account created. Your previous guest orders are now in your dashboard.',
         };
       }
-      throw new AppError(400, 'Email already registered');
+      throw new AppError(
+        400,
+        'A Customer Portal account already exists for this email. Sign in or reset your password.',
+        'EMAIL_TAKEN_CUSTOMER'
+      );
     }
 
     const hashedPassword = await bcrypt.hash(password, 10);
@@ -244,18 +253,30 @@ export class AuthService {
       userRoleId = await this.getUserRoleId('CUSTOMER');
     }
 
-    const user = await prisma.user.create({
-      data: {
-        email: normalizedEmail,
-        password: hashedPassword,
-        firstName,
-        lastName,
-        roleId: userRoleId,
-        portalScope: PORTAL_SCOPE.CUSTOMER,
-        emailVerifiedAt: null,
-      },
-      include: { role: true },
-    });
+    let user;
+    try {
+      user = await prisma.user.create({
+        data: {
+          email: normalizedEmail,
+          password: hashedPassword,
+          firstName,
+          lastName,
+          roleId: userRoleId,
+          portalScope: PORTAL_SCOPE.CUSTOMER,
+          emailVerifiedAt: null,
+        },
+        include: { role: true },
+      });
+    } catch (err) {
+      if (err?.code === 'P2002') {
+        throw new AppError(
+          400,
+          'A Customer Portal account already exists for this email. Sign in or reset your password.',
+          'EMAIL_TAKEN_CUSTOMER'
+        );
+      }
+      throw err;
+    }
 
     const verifyToken = await this.createEmailVerificationToken(user.id);
     const actionUrl = `${config.frontend.customerUrl}/verify-email?token=${verifyToken}`;
@@ -293,13 +314,13 @@ export class AuthService {
         if (portalScope === PORTAL_SCOPE.CUSTOMER) {
           throw new AppError(
             403,
-            'This email is registered for the Admin Portal. Sign in there to access team tools.',
+            'Access denied. This email is registered for the Admin Portal only. Sign in there, or create a separate Customer Portal account with the same email.',
             'WRONG_PORTAL_STAFF'
           );
         }
         throw new AppError(
           403,
-          'This email is registered for the Customer Portal. Sign in on the shop to continue.',
+          'Access denied. This email is registered for the Customer Portal only. Sign in on the shop, or ask an admin to invite this email as a team member.',
           'WRONG_PORTAL_CUSTOMER'
         );
       }
@@ -740,13 +761,13 @@ export class AuthService {
         if (portalScope === PORTAL_SCOPE.CUSTOMER) {
           throw new AppError(
             403,
-            'This email is registered for the Admin Portal. Use the admin forgot-password page to reset that password.',
+            'Access denied. This email uses Admin Portal password reset. Use the admin forgot-password page, or create a Customer Portal account first.',
             'WRONG_PORTAL_STAFF'
           );
         }
         throw new AppError(
           403,
-          'This email is registered for the Customer Portal. Use the shop forgot-password page to reset that password.',
+          'Access denied. This email uses Customer Portal password reset. Use the shop forgot-password page.',
           'WRONG_PORTAL_CUSTOMER'
         );
       }
