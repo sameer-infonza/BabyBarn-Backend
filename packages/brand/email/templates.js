@@ -5,6 +5,7 @@ import {
   emailCtaButton,
   emailHeroText,
   emailInfoRows,
+  emailInvoiceBlock,
   emailLinkFallback,
   emailMutedNote,
   emailOrderSummary,
@@ -77,47 +78,60 @@ export function renderBrandedEmailTemplate(template, context = {}, brand) {
   }
 
   if (template === 'order-confirmation') {
-    const subject = 'Your Baby Barn order is confirmed';
-    const lines = Array.isArray(context.lines) ? context.lines : [];
-    const extraRows = [
-      context.tax != null ? { label: 'Tax', value: context.tax } : null,
-      context.storeCredit != null ? { label: 'Store credit', value: context.storeCredit } : null,
-    ].filter(Boolean);
-    const shipBlock = context.shippingAddress
-      ? emailPanel(
-          `<div style="font-size:13px;line-height:1.55;white-space:pre-line;">${escapeHtml(context.shippingAddress)}</div>`,
-          { title: 'Shipping address' }
-        )
-      : '';
-    const payBlock = context.paymentMethod
-      ? emailMutedNote(`Payment method: ${context.paymentMethod}`)
-      : '';
+    const subject = `Invoice ${context.orderId || ''} — Baby Barn order confirmed`.replace(/\s+/g, ' ').trim();
+    const invoiceHtml = emailInvoiceBlock({
+      invoiceNumber: context.orderId,
+      issueDate: context.issueDate,
+      paymentStatus: context.paymentStatus || 'Paid',
+      orderStatus: context.orderStatus,
+      billToLines: context.billToLines,
+      shipToLines: context.shipToLines,
+      lines: Array.isArray(context.lines) ? context.lines : [],
+      subtotal: context.subtotal,
+      shipping: context.shipping,
+      tax: context.tax,
+      storeCredit: context.storeCredit,
+      accessMembership: context.accessMembership,
+      total: context.total,
+      paymentMethod: context.paymentMethod,
+      shippingMethod: context.shippingMethod,
+    });
     const bodyHtml = `
-      ${emailHeroText('Order confirmed', 'We are preparing your items with care.')}
+      ${emailHeroText('Order confirmed', 'Thank you — your invoice is below, and a PDF copy is attached for your records.')}
       ${greet(name)}
-      ${emailOrderSummary({
-        orderId: context.orderId,
-        lines,
-        subtotal: context.subtotal,
-        shipping: context.shipping,
-        total: context.total,
-        extraRows,
-      })}
-      ${shipBlock}
-      ${payBlock}
-      ${emailMutedNote('Your invoice PDF is attached to this email for your records.')}
+      ${emailBodyParagraph(
+        `We've received payment for order <strong>${escapeHtml(context.orderId || '')}</strong> and are preparing your items with care.`
+      )}
+      ${invoiceHtml}
+      ${
+        context.invoiceAttached === false
+          ? emailMutedNote('You can download your invoice anytime from your order details page.')
+          : emailMutedNote('A printable invoice PDF is attached to this email for your records.')
+      }
       ${emailCtaButton(context.actionUrl, context.trackingUrl ? 'View order details' : 'View your order')}
-      ${context.trackingUrl && context.trackingUrl !== context.actionUrl ? emailCtaButton(context.trackingUrl, 'Track your order') : ''}
+      ${context.trackingUrl && context.trackingUrl !== context.actionUrl ? emailCtaButton(context.trackingUrl, 'Track your order', 'secondary') : ''}
       ${context.returnUrl ? emailMutedNote(`Need to start a return? Use this secure link: ${context.returnUrl}`) : ''}
       ${context.includeReturnEnvelope ? emailMutedNote('As an ACCESS member, your package includes a reusable return envelope for eligible used product returns.') : ''}
+      ${emailLinkFallback(context.actionUrl)}
     `;
-    const { html } = doc(subject, `Order ${context.orderId || ''} confirmed`, bodyHtml, brand);
+    const { html } = doc(subject, `Invoice ${context.orderId || ''} — order confirmed`, bodyHtml, brand);
     const trackLine = context.trackingUrl ? ` Track: ${context.trackingUrl}` : '';
     const returnLine = context.returnUrl ? ` Start a return: ${context.returnUrl}` : '';
+    const lineText = (Array.isArray(context.lines) ? context.lines : [])
+      .map((li) => `- ${li.name} x${li.qty}: ${li.amount || li.total || ''}`)
+      .join('\n');
     return {
       subject,
       html,
-      text: `Order ${context.orderId} confirmed. Total ${context.total}. View: ${context.actionUrl}.${trackLine}${returnLine} Invoice PDF attached.`,
+      text: [
+        `Order ${context.orderId} confirmed. Total paid ${context.total}.`,
+        lineText,
+        `Subtotal ${context.subtotal || ''} · Shipping ${context.shipping || ''} · Total ${context.total || ''}`,
+        `View: ${context.actionUrl}.${trackLine}${returnLine}`,
+        'Invoice PDF attached.',
+      ]
+        .filter(Boolean)
+        .join('\n'),
     };
   }
 

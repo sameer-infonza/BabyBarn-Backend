@@ -845,7 +845,24 @@ export class AuthService {
     `;
 
     const record = Array.isArray(rows) ? rows[0] : null;
-    if (!record || record.usedAt || new Date(record.expiresAt) < new Date()) {
+    if (!record) {
+      throw new AppError(400, 'Invalid or expired verification token', 'INVALID_VERIFICATION_TOKEN');
+    }
+
+    // Idempotent: token already consumed (React Strict Mode remount, email link prefetch,
+    // or double-click) — treat as success when the account is already verified.
+    if (record.usedAt) {
+      const existing = await prisma.user.findUnique({
+        where: { id: record.userId },
+        select: { emailVerifiedAt: true },
+      });
+      if (existing?.emailVerifiedAt) {
+        return { message: 'Email verified successfully', alreadyVerified: true };
+      }
+      throw new AppError(400, 'Invalid or expired verification token', 'INVALID_VERIFICATION_TOKEN');
+    }
+
+    if (new Date(record.expiresAt) < new Date()) {
       throw new AppError(400, 'Invalid or expired verification token', 'INVALID_VERIFICATION_TOKEN');
     }
 

@@ -40,7 +40,26 @@ describe('brand email templates', () => {
         total: '$50.00',
         subtotal: '$45.00',
         shipping: '$5.00',
-        lines: [{ name: 'Onesie', qty: 1, total: '$45.00' }],
+        lines: [
+          {
+            name: 'Organic Onesie',
+            meta: 'SKU ON-01 · New · ACCESS price',
+            qty: 1,
+            unitPrice: '$45.00',
+            amount: '$45.00',
+            total: '$45.00',
+          },
+        ],
+        issueDate: 'Aug 3, 2026',
+        paymentStatus: 'Paid',
+        orderStatus: 'Confirmed',
+        billToLines: ['Test User', 'test@example.com', '123 Main St', 'Austin, TX 78701'],
+        shipToLines: ['Test User', '123 Main St', 'Austin, TX 78701'],
+        paymentMethod: 'Visa ending 4242',
+        shippingMethod: 'UPS Ground',
+        tax: '$2.70',
+        storeCredit: null,
+        accessMembership: null,
         trackingNumber: '1Z999',
         carrier: 'UPS',
         status: 'APPROVED',
@@ -67,6 +86,15 @@ describe('brand email templates', () => {
       );
       assert.ok(html.includes('hello@babybarn.co') || html.includes('babybarn.co'));
       assert.equal(typeof text, 'string');
+      if (template === 'order-confirmation') {
+        assert.ok(html.includes('Invoice'));
+        assert.ok(html.includes('Organic Onesie'));
+        assert.ok(html.includes('Billed to'));
+        assert.ok(html.includes('Ship to'));
+        assert.ok(html.includes('Total paid'));
+        assert.ok(html.includes('Visa ending 4242'));
+        assert.ok(subject.toLowerCase().includes('invoice') || subject.toLowerCase().includes('confirmed'));
+      }
     });
   }
 });

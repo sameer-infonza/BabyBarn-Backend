@@ -132,13 +132,23 @@ export function emailAddressBlock(title, lines) {
 
 export function emailOrderSummary({ orderId, lines = [], subtotal, shipping, total, extraRows = [] }) {
   const lineHtml = lines
-    .map(
-      (li) =>
-        `<tr>
-          <td style="padding:6px 0;font-size:13px;color:${t().colors.emailBody};">${escapeHtml(li.name)} × ${escapeHtml(String(li.qty))}</td>
-          <td align="right" style="padding:6px 0;font-size:13px;font-weight:600;color:${t().colors.ink};">${escapeHtml(li.total)}</td>
-        </tr>`
-    )
+    .map((li) => {
+      const meta = li.meta
+        ? `<div style="font-size:11px;line-height:16px;color:${t().colors.inkMuted};margin-top:2px;">${escapeHtml(li.meta)}</div>`
+        : '';
+      const qtyUnit =
+        li.unitPrice != null
+          ? `${escapeHtml(String(li.qty))} × ${escapeHtml(li.unitPrice)}`
+          : `× ${escapeHtml(String(li.qty))}`;
+      return `<tr>
+          <td style="padding:8px 0;font-size:13px;color:${t().colors.emailBody};vertical-align:top;">
+            <div style="font-weight:600;color:${t().colors.ink};">${escapeHtml(li.name)}</div>
+            ${meta}
+            <div style="font-size:12px;color:${t().colors.inkMuted};margin-top:2px;">${qtyUnit}</div>
+          </td>
+          <td align="right" style="padding:8px 0;font-size:13px;font-weight:600;color:${t().colors.ink};vertical-align:top;white-space:nowrap;">${escapeHtml(li.total || li.amount || '')}</td>
+        </tr>`;
+    })
     .join('');
 
   const totals = [
@@ -169,6 +179,125 @@ export function emailOrderSummary({ orderId, lines = [], subtotal, shipping, tot
      <table width="100%" cellpadding="0" cellspacing="0">${totalsHtml}</table>`,
     { title: 'Order summary' }
   );
+}
+
+/**
+ * Full tax-invoice block for customer order confirmation (mirrors PDF invoice fields).
+ * @param {{
+ *   invoiceNumber?: string,
+ *   issueDate?: string,
+ *   paymentStatus?: string,
+ *   orderStatus?: string,
+ *   billToLines?: string[],
+ *   shipToLines?: string[],
+ *   lines?: Array<{ name: string, meta?: string, qty: number|string, unitPrice?: string, amount: string }>,
+ *   subtotal?: string,
+ *   shipping?: string,
+ *   tax?: string|null,
+ *   storeCredit?: string|null,
+ *   accessMembership?: string|null,
+ *   total?: string,
+ *   paymentMethod?: string,
+ *   shippingMethod?: string,
+ * }} opts
+ */
+export function emailInvoiceBlock(opts = {}) {
+  const c = t().colors;
+  const tokens = t();
+  const lines = Array.isArray(opts.lines) ? opts.lines : [];
+
+  const metaRows = emailInfoRows([
+    { label: 'Invoice no.', value: opts.invoiceNumber, bold: true },
+    { label: 'Issue date', value: opts.issueDate },
+    { label: 'Payment', value: opts.paymentStatus, bold: true },
+    { label: 'Order status', value: opts.orderStatus },
+    { label: 'Shipping method', value: opts.shippingMethod },
+    { label: 'Payment method', value: opts.paymentMethod },
+  ]);
+
+  const addressCell = (title, addressLines) => {
+    const body = (addressLines || []).filter(Boolean).length
+      ? addressLines
+          .filter(Boolean)
+          .map(
+            (ln) =>
+              `<div style="margin:2px 0;font-size:13px;line-height:19px;color:${c.emailBody};">${escapeHtml(ln)}</div>`
+          )
+          .join('')
+      : `<div style="font-size:13px;color:${c.inkMuted};">—</div>`;
+    return `<td width="50%" valign="top" style="padding:0 8px 0 0;">
+      <div style="font-size:11px;font-weight:700;letter-spacing:0.06em;text-transform:uppercase;color:${c.purple};margin-bottom:8px;">${escapeHtml(title)}</div>
+      ${body}
+    </td>`;
+  };
+
+  const itemRows = lines
+    .map((li, ri) => {
+      const bg = ri % 2 ? c.white : c.cream;
+      const meta = li.meta
+        ? `<div style="font-size:11px;line-height:16px;color:${c.inkMuted};margin-top:3px;">${escapeHtml(li.meta)}</div>`
+        : '';
+      return `<tr style="background:${bg};">
+        <td style="padding:10px 8px;font-size:13px;color:${c.emailBody};border-bottom:1px solid ${c.border};vertical-align:top;">
+          <div style="font-weight:600;color:${c.ink};">${escapeHtml(li.name)}</div>
+          ${meta}
+        </td>
+        <td align="center" style="padding:10px 6px;font-size:13px;color:${c.ink};border-bottom:1px solid ${c.border};vertical-align:top;white-space:nowrap;">${escapeHtml(String(li.qty))}</td>
+        <td align="right" style="padding:10px 6px;font-size:13px;color:${c.inkSoft};border-bottom:1px solid ${c.border};vertical-align:top;white-space:nowrap;">${escapeHtml(li.unitPrice || '')}</td>
+        <td align="right" style="padding:10px 8px;font-size:13px;font-weight:700;color:${c.ink};border-bottom:1px solid ${c.border};vertical-align:top;white-space:nowrap;">${escapeHtml(li.amount || li.total || '')}</td>
+      </tr>`;
+    })
+    .join('');
+
+  const extraTotals = [
+    opts.tax != null ? { label: 'Tax', value: opts.tax } : null,
+    opts.storeCredit != null ? { label: 'Store credit', value: opts.storeCredit } : null,
+    opts.accessMembership != null ? { label: 'ACCESS membership', value: opts.accessMembership } : null,
+  ].filter(Boolean);
+
+  const totals = [
+    opts.subtotal != null ? { label: 'Subtotal', value: opts.subtotal } : null,
+    opts.shipping != null ? { label: 'Shipping', value: opts.shipping } : null,
+    ...extraTotals,
+    opts.total != null ? { label: 'Total paid', value: opts.total, bold: true } : null,
+  ].filter(Boolean);
+
+  const totalsHtml = totals
+    .map((row, i) => {
+      const last = i === totals.length - 1;
+      return `<tr>
+        <td style="padding:${last ? '12px' : '4px'} 0 4px;font-size:${last ? '15px' : '13px'};font-weight:${last ? 700 : 400};color:${last ? c.purple : c.inkMuted};">${escapeHtml(row.label)}</td>
+        <td align="right" style="padding:${last ? '12px' : '4px'} 0 4px;font-size:${last ? '15px' : '13px'};font-weight:700;color:${c.ink};">${escapeHtml(row.value)}</td>
+      </tr>`;
+    })
+    .join('');
+
+  return `
+    ${emailPanel(`<table width="100%" cellpadding="0" cellspacing="0">${metaRows}</table>`, { title: 'Invoice' })}
+    <table width="100%" cellpadding="0" cellspacing="0" role="presentation" style="margin:16px 0;">
+      <tr>
+        ${addressCell('Billed to', opts.billToLines)}
+        ${addressCell('Ship to', opts.shipToLines)}
+      </tr>
+    </table>
+    <table width="100%" cellpadding="0" cellspacing="0" role="presentation" style="margin:8px 0 16px;border:1px solid ${c.border};border-radius:${tokens.spacing.cardRadius}px;overflow:hidden;">
+      <tr>
+        <td colspan="4" style="padding:12px 14px;background:${c.cream};border-bottom:1px solid ${c.border};font-size:11px;font-weight:700;letter-spacing:0.06em;text-transform:uppercase;color:${c.purple};">Items</td>
+      </tr>
+      <tr style="background:${c.creamDark || c.cream};">
+        <th align="left" style="padding:8px;font-size:11px;text-transform:uppercase;letter-spacing:0.04em;color:${c.inkMuted};border-bottom:1px solid ${c.border};">Description</th>
+        <th align="center" style="padding:8px 6px;font-size:11px;text-transform:uppercase;letter-spacing:0.04em;color:${c.inkMuted};border-bottom:1px solid ${c.border};">Qty</th>
+        <th align="right" style="padding:8px 6px;font-size:11px;text-transform:uppercase;letter-spacing:0.04em;color:${c.inkMuted};border-bottom:1px solid ${c.border};">Unit</th>
+        <th align="right" style="padding:8px;font-size:11px;text-transform:uppercase;letter-spacing:0.04em;color:${c.inkMuted};border-bottom:1px solid ${c.border};">Amount</th>
+      </tr>
+      ${itemRows || `<tr><td colspan="4" style="padding:14px;font-size:13px;color:${c.inkMuted};">No items</td></tr>`}
+      <tr>
+        <td colspan="4" style="padding:8px 14px 14px;background:${c.white};">
+          <table width="100%" cellpadding="0" cellspacing="0">${totalsHtml}</table>
+        </td>
+      </tr>
+    </table>
+  `;
 }
 
 export function emailDataTable(headers, rows) {

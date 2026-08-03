@@ -764,17 +764,77 @@ export async function createOrderCheckoutSession(userPublicId, items, opts = {})
 
 function formatEmailAddress(addr) {
   if (!addr || typeof addr !== 'object') return null;
-  const lines = [
-    [addr.firstName, addr.lastName].filter(Boolean).join(' ').trim(),
-    addr.name,
+  const lines = formatEmailAddressLines(addr);
+  return lines.length ? lines.join('\n') : null;
+}
+
+function formatEmailAddressLines(addr, { name, email, phone } = {}) {
+  const lines = [];
+  const fromName =
+    name ||
+    [addr?.firstName, addr?.lastName].filter(Boolean).join(' ').trim() ||
+    (typeof addr?.name === 'string' ? addr.name.trim() : '');
+  if (fromName) lines.push(fromName);
+  if (email) lines.push(email);
+  if (phone) lines.push(phone);
+  if (!addr || typeof addr !== 'object') return lines;
+  for (const part of [
     addr.line1 || addr.address1 || addr.street,
     addr.line2 || addr.address2,
     [addr.city, addr.state, addr.postalCode || addr.zip].filter(Boolean).join(', '),
     addr.country,
-  ]
-    .map((x) => (typeof x === 'string' ? x.trim() : ''))
-    .filter(Boolean);
-  return lines.length ? lines.join('\n') : null;
+  ]) {
+    const text = typeof part === 'string' ? part.trim() : '';
+    if (text && !lines.includes(text)) lines.push(text);
+  }
+  return lines;
+}
+
+function formatMoneyUsd(value) {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return '$0.00';
+  return `$${n.toFixed(2)}`;
+}
+
+function titleCaseStatus(value) {
+  return String(value || '')
+    .toLowerCase()
+    .replace(/(^|[\s_-])(\w)/g, (_, sep, ch) => `${sep === '_' || sep === '-' ? ' ' : sep}${ch.toUpperCase()}`)
+    .trim();
+}
+
+function formatOrderIssueDate(value) {
+  if (!value) return null;
+  try {
+    return new Date(value).toLocaleDateString('en-US', {
+      month: 'short',
+      day: 'numeric',
+      year: 'numeric',
+    });
+  } catch {
+    return String(value);
+  }
+}
+
+function formatVariantCombination(combination) {
+  if (!combination || typeof combination !== 'object' || Array.isArray(combination)) return '';
+  return Object.entries(combination)
+    .filter(([, v]) => v != null && String(v).trim() !== '')
+    .map(([k, v]) => `${k}: ${v}`)
+    .join(', ');
+}
+
+function orderLineEmailMeta(li) {
+  const parts = [];
+  const sku = li.productVariant?.sku || li.product?.sku;
+  if (sku) parts.push(`SKU ${sku}`);
+  parts.push(li.product?.productType === 'REFURBISHED' ? 'Refurbished' : 'New');
+  if (li.pricingTier === 'ACCESS') parts.push('ACCESS price');
+  const size = li.product?.sizeAgeGroup;
+  if (size) parts.push(size);
+  const variantLabel = formatVariantCombination(li.productVariant?.combination);
+  if (variantLabel) parts.push(variantLabel);
+  return parts.join(' · ');
 }
 
 async function buildInvoiceAttachment(orderPublicId) {
@@ -787,9 +847,17 @@ async function buildInvoiceAttachment(orderPublicId) {
         user: true,
       },
     });
-    if (!order) return null;
+    if (!order) {
+      console.warn('[payment] invoice PDF skipped — order not found', orderPublicId);
+      return null;
+    }
     const buffer = await renderInvoicePdfBuffer(order);
+    if (!Buffer.isBuffer(buffer) || buffer.length === 0) {
+      console.warn('[payment] invoice PDF skipped — empty buffer', orderPublicId);
+      return null;
+    }
     const label = order.orderNumber || order.publicId;
+    console.info('[payment] invoice PDF ready for email', label, `${buffer.length} bytes`);
     return {
       filename: `invoice-${label}.pdf`,
       content: buffer,
@@ -801,21 +869,44 @@ async function buildInvoiceAttachment(orderPublicId) {
   }
 }
 
+async function resolveOrderPaymentMethodLabel(order) {
+  if (!order?.stripePaymentIntentId) return 'Card';
+  try {
+    const stripe = getStripe();
+    if (!stripe) return 'Card';
+    const pi = await stripe.paymentIntents.retrieve(order.stripePaymentIntentId, {
+      expand: ['payment_method'],
+    });
+    const pm = pi.payment_method;
+    if (pm && typeof pm === 'object' && pm.card) {
+      const brand = pm.card.brand ? String(pm.card.brand).replace(/^\w/, (c) => c.toUpperCase()) : 'Card';
+      return `${brand} ending ${pm.card.last4 || '····'}`;
+    }
+  } catch {
+    /* best-effort */
+  }
+  return 'Card';
+}
+
 async function sendOrderConfirmationEmail(orderPublicId) {
   const orderDetail = await prisma.order.findUnique({
     where: { publicId: orderPublicId },
     include: {
-      orderItems: { include: { product: { select: { name: true, sku: true } }, productVariant: true } },
+      orderItems: {
+        include: {
+          product: { select: { name: true, sku: true, productType: true, sizeAgeGroup: true } },
+          productVariant: true,
+        },
+      },
       user: { select: { email: true, firstName: true, lastName: true, isGuest: true } },
+      membershipPayment: { select: { amount: true } },
     },
   });
   const recipientEmail = orderDetail?.contactEmail || orderDetail?.user?.email;
   if (!recipientEmail) return;
 
-  const subtotal = orderDetail.orderItems.reduce(
-    (sum, li) => sum + Number(li.price) * li.quantity,
-    0
-  );
+  const activeItems = (orderDetail.orderItems || []).filter((li) => !li.cancelledAt);
+  const subtotal = activeItems.reduce((sum, li) => sum + Number(li.price) * li.quantity, 0);
   const orderRef = orderDetail.orderNumber || orderDetail.publicId;
   const trackingUrl = buildOrderTrackingUrl({ orderNumber: orderRef, email: recipientEmail });
   const returnUrl = buildGuestReturnUrl({ orderNumber: orderRef, email: recipientEmail });
@@ -825,33 +916,64 @@ async function sendOrderConfirmationEmail(orderPublicId) {
 
   const taxAmount = Number(orderDetail.taxAmount || 0);
   const storeCredit = Number(orderDetail.storeCreditApplied || 0);
+  const accessFee = Number(orderDetail.membershipPayment?.amount || 0);
+  const customerName =
+    [orderDetail.user?.firstName, orderDetail.user?.lastName].filter(Boolean).join(' ').trim() || null;
+  const billToSource = orderDetail.billingAddressJson || orderDetail.shippingAddressJson;
+  const shipToSource = orderDetail.shippingAddressJson || orderDetail.billingAddressJson;
+  const paymentMethod = await resolveOrderPaymentMethodLabel(orderDetail);
   const attachment = await buildInvoiceAttachment(orderPublicId);
 
   await emailService.sendTemplate({
     to: recipientEmail,
     template: 'order-confirmation',
     context: {
-      name: [orderDetail.user?.firstName, orderDetail.user?.lastName].filter(Boolean).join(' '),
+      name: customerName || 'there',
       orderId: orderRef,
-      lines: orderDetail.orderItems.map((li) => ({
-        name: li.product?.name || 'Item',
-        qty: li.quantity,
-        total: `$${(Number(li.price) * li.quantity).toFixed(2)}`,
-      })),
-      subtotal: `$${subtotal.toFixed(2)}`,
-      shipping: `$${Number(orderDetail.shippingCost || 0).toFixed(2)}`,
-      tax: taxAmount > 0 ? `$${taxAmount.toFixed(2)}` : null,
-      storeCredit: storeCredit > 0 ? `-$${storeCredit.toFixed(2)}` : null,
-      total: `$${Number(orderDetail.totalAmount).toFixed(2)}`,
+      issueDate: formatOrderIssueDate(orderDetail.createdAt),
+      paymentStatus: titleCaseStatus(orderDetail.paymentStatus) || 'Paid',
+      orderStatus: titleCaseStatus(orderDetail.status),
+      billToLines: formatEmailAddressLines(billToSource, {
+        name: customerName,
+        email: recipientEmail,
+        phone: orderDetail.contactPhone,
+      }),
+      shipToLines: formatEmailAddressLines(shipToSource, { name: customerName }),
+      lines: activeItems.map((li) => {
+        const unit = Number(li.price);
+        const qty = li.quantity;
+        return {
+          name: li.product?.name || 'Item',
+          meta: orderLineEmailMeta(li),
+          qty,
+          unitPrice: formatMoneyUsd(unit),
+          amount: formatMoneyUsd(unit * qty),
+          total: formatMoneyUsd(unit * qty),
+        };
+      }),
+      subtotal: formatMoneyUsd(subtotal),
+      shipping: formatMoneyUsd(orderDetail.shippingCost || 0),
+      tax: taxAmount > 0 ? formatMoneyUsd(taxAmount) : null,
+      storeCredit: storeCredit > 0 ? `-${formatMoneyUsd(storeCredit)}` : null,
+      accessMembership: accessFee > 0 ? formatMoneyUsd(accessFee) : null,
+      total: formatMoneyUsd(orderDetail.totalAmount),
+      paymentMethod,
+      shippingMethod: orderDetail.selectedRateServiceLevel || orderDetail.shippingCarrier || null,
       shippingAddress: formatEmailAddress(orderDetail.shippingAddressJson),
-      paymentMethod: 'Card (Stripe)',
       actionUrl: dashboardUrl,
       trackingUrl,
       returnUrl,
       includeReturnEnvelope: Boolean(orderDetail.includeReturnEnvelope),
+      invoiceAttached: Boolean(attachment),
     },
     attachments: attachment ? [attachment] : undefined,
   });
+
+  if (attachment) {
+    console.info('[payment] order confirmation emailed with invoice PDF', orderRef, recipientEmail);
+  } else {
+    console.warn('[payment] order confirmation emailed without invoice PDF', orderRef, recipientEmail);
+  }
 }
 
 async function resolvePaymentSucceededForIntent(checkoutIntentPublicId, paymentIntentId) {
