@@ -144,8 +144,8 @@ export function emailOrderSummary({ orderId, lines = [], subtotal, shipping, tot
   const totals = [
     subtotal != null ? { label: 'Subtotal', value: subtotal } : null,
     shipping != null ? { label: 'Shipping', value: shipping } : null,
-    total != null ? { label: 'Total', value: total, bold: true } : null,
     ...extraRows,
+    total != null ? { label: 'Total', value: total, bold: true } : null,
   ].filter(Boolean);
 
   const totalsHtml = totals
@@ -211,5 +211,8 @@ export function emailMutedNote(text) {
 }
 
 export function emailLinkFallback(url) {
-  return emailMutedNote(`If the button does not work, copy and paste this link: ${escapeHtml(url)}`);
+  if (!url) return '';
+  const safe = escapeHtml(url);
+  const c = t().colors;
+  return `<p style="margin:12px 0 0;font-size:12px;line-height:18px;color:${c.inkMuted};">If the button does not work, copy and paste this link:<br /><a href="${safe}" style="color:${c.sage};word-break:break-all;font-weight:600;">${safe}</a></p>`;
 }

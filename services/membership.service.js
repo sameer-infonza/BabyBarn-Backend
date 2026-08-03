@@ -70,24 +70,35 @@ export async function saveMembershipRegistration(userPublicId, payload) {
     },
   });
 
-  // Upsert into Address Book so checkout can reuse the ACCESS shipping address.
-  try {
-    const existing = await prisma.address.findMany({
-      where: { userId: user.id },
-      orderBy: [{ isDefault: 'desc' }, { createdAt: 'desc' }],
-      take: 1,
-    });
-    const payload = {
-      ...data.shippingAddress,
-      isDefault: true,
-    };
-    if (existing[0]) {
-      await authService.updateAddress(userPublicId, existing[0].publicId, payload);
-    } else {
-      await authService.createAddress(userPublicId, payload);
+  // Match-or-create into Address Book so checkout can reuse the ACCESS shipping address
+  // without overwriting an unrelated default address.
+  const shipping = data.shippingAddress;
+  const norm = (v) => String(v ?? '').trim().toLowerCase();
+  const matchesShipping = (row) =>
+    norm(row.fullName) === norm(shipping.fullName) &&
+    norm(row.addressLine1 ?? row.street) === norm(shipping.addressLine1) &&
+    norm(row.addressLine2) === norm(shipping.addressLine2) &&
+    norm(row.city) === norm(shipping.city) &&
+    norm(row.state) === norm(shipping.state) &&
+    norm(row.zipCode) === norm(shipping.zipCode) &&
+    norm(row.country || 'US') === norm(shipping.country || 'US') &&
+    norm(row.phoneNumber) === norm(shipping.phoneNumber);
+
+  const existingRows = await prisma.address.findMany({
+    where: { userId: user.id },
+    orderBy: [{ isDefault: 'desc' }, { createdAt: 'desc' }],
+  });
+  const match = existingRows.find(matchesShipping);
+
+  if (match) {
+    if (!match.isDefault) {
+      await authService.updateAddress(userPublicId, match.publicId, { isDefault: true });
     }
-  } catch (err) {
-    console.error('[membership] address book upsert failed', err);
+  } else {
+    await authService.createAddress(userPublicId, {
+      ...shipping,
+      isDefault: true,
+    });
   }
 
   return { saved: true };

@@ -762,11 +762,50 @@ export async function createOrderCheckoutSession(userPublicId, items, opts = {})
   return { url: session.url, sessionId: session.id, checkoutIntentId: checkoutIntent.publicId };
 }
 
+function formatEmailAddress(addr) {
+  if (!addr || typeof addr !== 'object') return null;
+  const lines = [
+    [addr.firstName, addr.lastName].filter(Boolean).join(' ').trim(),
+    addr.name,
+    addr.line1 || addr.address1 || addr.street,
+    addr.line2 || addr.address2,
+    [addr.city, addr.state, addr.postalCode || addr.zip].filter(Boolean).join(', '),
+    addr.country,
+  ]
+    .map((x) => (typeof x === 'string' ? x.trim() : ''))
+    .filter(Boolean);
+  return lines.length ? lines.join('\n') : null;
+}
+
+async function buildInvoiceAttachment(orderPublicId) {
+  try {
+    const { renderInvoicePdfBuffer } = await import('./pdf/order-documents.service.js');
+    const order = await prisma.order.findUnique({
+      where: { publicId: orderPublicId },
+      include: {
+        orderItems: { include: { product: true, productVariant: true } },
+        user: true,
+      },
+    });
+    if (!order) return null;
+    const buffer = await renderInvoicePdfBuffer(order);
+    const label = order.orderNumber || order.publicId;
+    return {
+      filename: `invoice-${label}.pdf`,
+      content: buffer,
+      contentType: 'application/pdf',
+    };
+  } catch (err) {
+    console.error('[payment] invoice PDF for email failed', orderPublicId, err);
+    return null;
+  }
+}
+
 async function sendOrderConfirmationEmail(orderPublicId) {
   const orderDetail = await prisma.order.findUnique({
     where: { publicId: orderPublicId },
     include: {
-      orderItems: { include: { product: { select: { name: true } } } },
+      orderItems: { include: { product: { select: { name: true, sku: true } }, productVariant: true } },
       user: { select: { email: true, firstName: true, lastName: true, isGuest: true } },
     },
   });
@@ -784,11 +823,15 @@ async function sendOrderConfirmationEmail(orderPublicId) {
     ? trackingUrl
     : `${config.frontend.customerUrl}/dashboard/orders/${orderDetail.publicId}`;
 
+  const taxAmount = Number(orderDetail.taxAmount || 0);
+  const storeCredit = Number(orderDetail.storeCreditApplied || 0);
+  const attachment = await buildInvoiceAttachment(orderPublicId);
+
   await emailService.sendTemplate({
     to: recipientEmail,
     template: 'order-confirmation',
     context: {
-      name: [orderDetail.user.firstName, orderDetail.user.lastName].filter(Boolean).join(' '),
+      name: [orderDetail.user?.firstName, orderDetail.user?.lastName].filter(Boolean).join(' '),
       orderId: orderRef,
       lines: orderDetail.orderItems.map((li) => ({
         name: li.product?.name || 'Item',
@@ -797,12 +840,17 @@ async function sendOrderConfirmationEmail(orderPublicId) {
       })),
       subtotal: `$${subtotal.toFixed(2)}`,
       shipping: `$${Number(orderDetail.shippingCost || 0).toFixed(2)}`,
+      tax: taxAmount > 0 ? `$${taxAmount.toFixed(2)}` : null,
+      storeCredit: storeCredit > 0 ? `-$${storeCredit.toFixed(2)}` : null,
       total: `$${Number(orderDetail.totalAmount).toFixed(2)}`,
+      shippingAddress: formatEmailAddress(orderDetail.shippingAddressJson),
+      paymentMethod: 'Card (Stripe)',
       actionUrl: dashboardUrl,
       trackingUrl,
       returnUrl,
       includeReturnEnvelope: Boolean(orderDetail.includeReturnEnvelope),
     },
+    attachments: attachment ? [attachment] : undefined,
   });
 }
 

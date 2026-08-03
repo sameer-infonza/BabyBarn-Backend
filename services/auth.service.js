@@ -53,7 +53,11 @@ async function revokeAllRefreshTokens(userId) {
   }
 }
 
-/** Bump tokenVersion and wipe refresh tokens so existing JWTs fail authenticate. */
+/**
+ * Enterprise session revoke on credential change:
+ * bump tokenVersion (JWTs with old version get SESSION_REVOKED) and wipe all refresh tokens.
+ * Used by changePassword, changeEmail, pauseAccount, logoutOtherSessions, and resetPassword.
+ */
 async function invalidateAllSessions(userId) {
   const updated = await prisma.user.update({
     where: { id: userId },

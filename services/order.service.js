@@ -1198,7 +1198,13 @@ export class OrderService {
 
       const paid = await tx.order.update({
         where: { id: order.id },
-        data: { paymentStatus: 'PAID', status: 'PROCESSING', fulfillmentStatus: 'NEW_ORDER' },
+        data: {
+          paymentStatus: 'PAID',
+          status: 'PROCESSING',
+          // Auto-accept on payment — no admin Accept step; customer cancel is time-windowed.
+          fulfillmentStatus: 'ACCEPTED',
+          fulfillmentAcceptedAt: new Date(),
+        },
         include: { orderItems: true },
       });
       const { createUnitsForPaidOrder } = await import('./product-unit.service.js');
@@ -2287,17 +2293,19 @@ export class OrderService {
     const action = String(body.action || '').trim();
     const data = {};
     if (action === 'accept') {
-      if (order.paymentStatus !== 'PAID') {
-        throw new AppError(400, 'Only paid orders can be accepted into fulfillment');
-      }
-      if (order.fulfillmentStatus && order.fulfillmentStatus !== 'NEW_ORDER') {
-        throw new AppError(400, 'Order is not awaiting acceptance');
-      }
-      data.fulfillmentStatus = 'ACCEPTED';
-      data.fulfillmentAcceptedAt = new Date();
+      throw new AppError(
+        400,
+        'Orders are accepted automatically on payment. Use Mark picked when ready to fulfill.'
+      );
     } else if (action === 'pickup_ready') {
+      if (order.paymentStatus !== 'PAID' && order.paymentStatus !== 'PARTIALLY_REFUNDED') {
+        throw new AppError(400, 'Only paid orders can be marked picked');
+      }
       data.fulfillmentStatus = 'PICKUP_READY';
       data.pickupReadyAt = new Date();
+      if (!order.fulfillmentAcceptedAt) {
+        data.fulfillmentAcceptedAt = new Date();
+      }
     } else if (action === 'mark_shipped') {
       data.fulfillmentStatus = 'SHIPPED';
       data.outboundShippedAt = new Date();

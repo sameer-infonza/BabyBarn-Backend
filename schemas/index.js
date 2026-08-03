@@ -524,18 +524,54 @@ export const returnRequestCreateSchema = z
     orderItemIds: z.array(z.string().min(1)).min(1).max(50).optional(),
     refurbItems: z.array(refurbReturnItemSchema).min(1).max(50).optional(),
     type: z.enum(['STANDARD', 'REFURBISHMENT']).optional().default('STANDARD'),
-    reason: z.string().min(3).max(1000),
+    reason: z.string().min(1).max(1000).optional(),
+    reasons: z.record(z.string().min(1), z.string().min(1).max(1000)).optional(),
     notes: z.string().max(2000).optional(),
+    notesByItem: z.record(z.string().min(1), z.string().max(2000)).optional(),
     quantity: z.number().int().min(1).max(99).optional(),
     quantities: z.record(z.string().min(1), z.number().int().min(1).max(99)).optional(),
     questionnaire: refurbQuestionnaireSchema.optional(),
     photoUrls: z.union([refurbPhotoUrlsSchema, standardPhotoUrlsSchema]).optional(),
+    photoUrlsByItem: z
+      .record(
+        z.string().min(1),
+        z
+          .array(z.string().min(1))
+          .max(5)
+          .refine(
+            (arr) => arr.every((p) => p.startsWith('/uploads/returns/')),
+            { message: 'Invalid photo upload paths' }
+          )
+      )
+      .optional(),
   })
   .refine(
     (body) => Boolean(body.orderItemId) || (body.orderItemIds?.length ?? 0) > 0 || (body.refurbItems?.length ?? 0) > 0,
     {
       message: 'At least one order item is required',
       path: ['orderItemIds'],
+    }
+  )
+  .refine(
+    (body) => {
+      if (body.type === 'REFURBISHMENT') {
+        return Boolean(body.reason?.trim()) || (body.refurbItems?.length ?? 0) > 0;
+      }
+      const ids =
+        body.orderItemIds?.length
+          ? body.orderItemIds
+          : body.orderItemId
+            ? [body.orderItemId]
+            : [];
+      if (ids.length === 0) return true;
+      const fallback = typeof body.reason === 'string' ? body.reason.trim() : '';
+      if (fallback.length >= 1) return true;
+      const map = body.reasons ?? {};
+      return ids.every((id) => String(map[id] ?? '').trim().length >= 1);
+    },
+    {
+      message: 'Select a return reason for each selected item',
+      path: ['reasons'],
     }
   )
   .refine(

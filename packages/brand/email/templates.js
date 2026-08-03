@@ -32,11 +32,11 @@ export function renderBrandedEmailTemplate(template, context = {}, brand) {
     const bodyHtml = `
       ${greet(name)}
       ${emailBodyParagraph('Thanks for signing up. Please verify your email to activate your account and start shopping with member pricing.')}
-      ${emailCtaButton(context.actionUrl, 'Verify email')}
-      ${emailLinkFallback(context.actionUrl)}
+      ${emailCtaButton(actionUrl, 'Verify email')}
+      ${emailLinkFallback(actionUrl)}
     `;
     const { html } = doc(subject, 'Verify your email to activate your account.', bodyHtml, brand);
-    return { subject, html, text: `Hi ${name}, verify your account: ${context.actionUrl}` };
+    return { subject, html, text: `Hi ${name}, verify your account: ${actionUrl}` };
   }
 
   if (template === 'forgot-password') {
@@ -44,12 +44,12 @@ export function renderBrandedEmailTemplate(template, context = {}, brand) {
     const bodyHtml = `
       ${greet(name)}
       ${emailBodyParagraph('We received a request to reset your password. This link expires in <strong>60 minutes</strong>.')}
-      ${emailCtaButton(context.actionUrl, 'Reset password')}
+      ${emailCtaButton(actionUrl, 'Reset password')}
       ${emailMutedNote('If you did not request this, you can safely ignore this email.')}
-      ${emailLinkFallback(context.actionUrl)}
+      ${emailLinkFallback(actionUrl)}
     `;
     const { html } = doc(subject, 'Password reset instructions inside.', bodyHtml, brand);
-    return { subject, html, text: `Reset your password (expires in 60 minutes): ${context.actionUrl}` };
+    return { subject, html, text: `Reset your password (expires in 60 minutes): ${actionUrl}` };
   }
 
   if (template === 'welcome') {
@@ -79,6 +79,19 @@ export function renderBrandedEmailTemplate(template, context = {}, brand) {
   if (template === 'order-confirmation') {
     const subject = 'Your Baby Barn order is confirmed';
     const lines = Array.isArray(context.lines) ? context.lines : [];
+    const extraRows = [
+      context.tax != null ? { label: 'Tax', value: context.tax } : null,
+      context.storeCredit != null ? { label: 'Store credit', value: context.storeCredit } : null,
+    ].filter(Boolean);
+    const shipBlock = context.shippingAddress
+      ? emailPanel(
+          `<div style="font-size:13px;line-height:1.55;white-space:pre-line;">${escapeHtml(context.shippingAddress)}</div>`,
+          { title: 'Shipping address' }
+        )
+      : '';
+    const payBlock = context.paymentMethod
+      ? emailMutedNote(`Payment method: ${context.paymentMethod}`)
+      : '';
     const bodyHtml = `
       ${emailHeroText('Order confirmed', 'We are preparing your items with care.')}
       ${greet(name)}
@@ -88,7 +101,11 @@ export function renderBrandedEmailTemplate(template, context = {}, brand) {
         subtotal: context.subtotal,
         shipping: context.shipping,
         total: context.total,
+        extraRows,
       })}
+      ${shipBlock}
+      ${payBlock}
+      ${emailMutedNote('Your invoice PDF is attached to this email for your records.')}
       ${emailCtaButton(context.actionUrl, context.trackingUrl ? 'View order details' : 'View your order')}
       ${context.trackingUrl && context.trackingUrl !== context.actionUrl ? emailCtaButton(context.trackingUrl, 'Track your order') : ''}
       ${context.returnUrl ? emailMutedNote(`Need to start a return? Use this secure link: ${context.returnUrl}`) : ''}
@@ -100,7 +117,7 @@ export function renderBrandedEmailTemplate(template, context = {}, brand) {
     return {
       subject,
       html,
-      text: `Order ${context.orderId} confirmed. Total ${context.total}. View: ${context.actionUrl}.${trackLine}${returnLine}`,
+      text: `Order ${context.orderId} confirmed. Total ${context.total}. View: ${context.actionUrl}.${trackLine}${returnLine} Invoice PDF attached.`,
     };
   }
 
@@ -473,16 +490,41 @@ export function renderBrandedEmailTemplate(template, context = {}, brand) {
 
   if (template === 'admin-new-order') {
     const subject = `[Admin] New paid order ${context.orderNumber || ''}`.trim();
+    const lines = Array.isArray(context.lines) ? context.lines : [];
+    const extraRows = [
+      context.tax != null ? { label: 'Tax', value: context.tax } : null,
+      context.storeCredit != null ? { label: 'Store credit', value: context.storeCredit } : null,
+    ].filter(Boolean);
+    const shipBlock = context.shippingAddress
+      ? emailPanel(
+          `<div style="font-size:13px;line-height:1.55;white-space:pre-line;">${escapeHtml(context.shippingAddress)}</div>`,
+          { title: 'Shipping' }
+        )
+      : '';
     const bodyHtml = `
-      ${emailHeroText('New paid order', 'A customer order was paid and is ready to fulfill.')}
+      ${emailHeroText('New paid order', 'Auto-accepted on payment — fulfill after the 60-minute cancel window.')}
       ${emailPanel(
         `<table width="100%">${emailInfoRows([
           { label: 'Order', value: context.orderNumber, bold: true },
-          { label: 'Total', value: context.amount },
-          { label: 'Customer', value: context.customerEmail },
-        ])}</table>`,
+          { label: 'Customer', value: context.customerName || context.customerEmail },
+          { label: 'Email', value: context.customerEmail },
+          { label: 'Phone', value: context.customerPhone },
+          { label: 'Total', value: context.amount, bold: true },
+        ].filter((r) => r.value))}</table>`,
         { title: 'Order' }
       )}
+      ${lines.length
+        ? emailOrderSummary({
+            orderId: context.orderNumber,
+            lines,
+            subtotal: context.subtotal,
+            shipping: context.shipping,
+            total: context.amount,
+            extraRows,
+          })
+        : ''}
+      ${shipBlock}
+      ${emailMutedNote('Invoice PDF is attached when available.')}
       ${context.actionUrl ? emailCtaButton(context.actionUrl, 'Open order') : ''}
       ${context.actionUrl ? emailLinkFallback(context.actionUrl) : ''}
     `;
@@ -490,7 +532,7 @@ export function renderBrandedEmailTemplate(template, context = {}, brand) {
     return {
       subject,
       html,
-      text: `New order ${context.orderNumber}${context.amount ? ` (${context.amount})` : ''}. ${context.actionUrl || ''}`,
+      text: `New order ${context.orderNumber}${context.amount ? ` (${context.amount})` : ''}. ${context.customerEmail || ''} ${context.actionUrl || ''}`,
     };
   }
 

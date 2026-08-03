@@ -80,9 +80,17 @@ class EmailService {
   }
 
   /**
-   * @param {{ to: string; subject: string; html: string; text: string; replyTo?: string }} payload
+   * @param {{
+   *   to: string;
+   *   subject: string;
+   *   html: string;
+   *   text: string;
+   *   replyTo?: string;
+   *   attachments?: Array<{ filename: string; content: Buffer; contentType?: string }>;
+   *   disableClickTracking?: boolean;
+   * }} payload
    */
-  async sendMessage({ to, subject, html, text, replyTo }) {
+  async sendMessage({ to, subject, html, text, replyTo, attachments, disableClickTracking }) {
     this.assertConfigured();
 
     const from = parseMailAddress(config.mail.from);
@@ -103,6 +111,24 @@ class EmailService {
         if (replyTo) {
           msg.replyTo = parseMailAddress(replyTo);
         }
+        // Default: keep real hrefs (localhost / app URLs). SendGrid link branding otherwise
+        // rewrites buttons to urlNNNN.mybabybarn.com/ls/click?...
+        const turnOffClicks =
+          disableClickTracking === true ||
+          (disableClickTracking !== false && !config.mail.sendgridClickTracking);
+        if (turnOffClicks) {
+          msg.trackingSettings = {
+            clickTracking: { enable: false, enableText: false },
+          };
+        }
+        if (Array.isArray(attachments) && attachments.length > 0) {
+          msg.attachments = attachments.map((a) => ({
+            filename: a.filename,
+            type: a.contentType || 'application/pdf',
+            disposition: 'attachment',
+            content: Buffer.isBuffer(a.content) ? a.content.toString('base64') : String(a.content),
+          }));
+        }
         await sgMail.send(msg);
         return { sent: true, provider: 'sendgrid' };
       }
@@ -119,6 +145,15 @@ class EmailService {
         html,
         text,
         ...(replyTo ? { replyTo } : {}),
+        ...(Array.isArray(attachments) && attachments.length
+          ? {
+              attachments: attachments.map((a) => ({
+                filename: a.filename,
+                content: a.content,
+                contentType: a.contentType || 'application/pdf',
+              })),
+            }
+          : {}),
       });
       return { sent: true, provider: 'smtp' };
     } catch (err) {
@@ -131,10 +166,10 @@ class EmailService {
     }
   }
 
-  async sendTemplate({ to, template, context }) {
+  async sendTemplate({ to, template, context, attachments }) {
     const brand = getBrandContext();
     const { subject, html, text } = renderBrandedEmailTemplate(template, context, brand);
-    await this.sendMessage({ to, subject, html, text });
+    await this.sendMessage({ to, subject, html, text, attachments });
     return { queued: true };
   }
 

@@ -124,7 +124,7 @@ export function resolveStandardReturnWindowStart(order) {
   return null;
 }
 
-export function standardReturnWindowDaysLeft(order, windowDays = 14) {
+export function standardReturnWindowDaysLeft(order, windowDays = 30) {
   const start = resolveStandardReturnWindowStart(order);
   if (!start) return 0;
   const end = start.getTime() + windowDays * 24 * 60 * 60 * 1000;
@@ -625,11 +625,21 @@ export class ReturnsService {
     }
 
     if (payload.type === 'STANDARD') {
+      const reasonMap =
+        payload.reasons && typeof payload.reasons === 'object' ? payload.reasons : {};
+      const fallbackReason = typeof payload.reason === 'string' ? payload.reason.trim() : '';
+      const missingReason = itemPublicIds.find((id) => {
+        const fromMap = typeof reasonMap[id] === 'string' ? reasonMap[id].trim() : '';
+        return !fromMap && !fallbackReason;
+      });
+      if (missingReason) {
+        throw new AppError(400, 'Select a return reason for each selected item');
+      }
       if (!resolveStandardReturnWindowStart(order)) {
         throw new AppError(400, 'Standard returns become available after delivery');
       }
       if (standardReturnWindowDaysLeft(order) <= 0) {
-        throw new AppError(400, 'Standard return window (14 days from delivery) has passed');
+        throw new AppError(400, 'Standard return window (30 days from delivery) has passed');
       }
     }
 
@@ -743,6 +753,33 @@ export class ReturnsService {
           : Number(payload.quantities?.[publicId] ?? payload.quantity ?? 1);
       const quantity = Math.min(purchasedQty, Math.max(1, Number.isFinite(requestedQty) ? requestedQty : 1));
 
+      const reasonMap =
+        payload.reasons && typeof payload.reasons === 'object' ? payload.reasons : {};
+      const lineReason =
+        (typeof reasonMap[publicId] === 'string' ? reasonMap[publicId].trim() : '') ||
+        (typeof payload.reason === 'string' ? payload.reason.trim() : '') ||
+        null;
+
+      const notesMap =
+        payload.notesByItem && typeof payload.notesByItem === 'object' ? payload.notesByItem : {};
+      const itemNotes =
+        typeof notesMap[publicId] === 'string' ? String(notesMap[publicId]).trim() : '';
+      const sharedNotes = payload.notes ? String(payload.notes).trim() : '';
+      const lineNotes =
+        [itemNotes, sharedNotes].filter(Boolean).join('\n\n') || null;
+
+      const photosMap =
+        payload.photoUrlsByItem && typeof payload.photoUrlsByItem === 'object'
+          ? payload.photoUrlsByItem
+          : {};
+      const itemPhotos = Array.isArray(photosMap[publicId]) ? photosMap[publicId] : null;
+      const linePhotos =
+        payload.type === 'STANDARD'
+          ? itemPhotos?.length
+            ? itemPhotos
+            : payload.photoUrls || undefined
+          : undefined;
+
       const row = await prisma.$transaction(async (tx) => {
         const rr = await tx.returnRequest.create({
           data: {
@@ -751,10 +788,9 @@ export class ReturnsService {
             orderId: order.id,
             orderItemId: orderItem.id,
             type: payload.type,
-            reason: payload.reason,
-            notes: payload.notes ? String(payload.notes).trim() : null,
-            photoUrlsJson:
-              payload.type === 'STANDARD' && payload.photoUrls ? payload.photoUrls : undefined,
+            reason: lineReason,
+            notes: lineNotes,
+            photoUrlsJson: linePhotos,
             status: initialStatus,
             quantity,
           },

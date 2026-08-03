@@ -58,6 +58,11 @@ export const config = {
     provider: (process.env.EMAIL_PROVIDER || 'auto').trim().toLowerCase(),
     /** SendGrid REST API — verified sender must match MAIL_FROM domain. */
     sendgridApiKey: (process.env.SENDGRID_API_KEY || '').trim(),
+    /**
+     * SendGrid click tracking rewrites links to urlNNNN.yourdomain.com/ls/click?...
+     * Off by default so CTAs keep real app URLs (verify-email, orders, etc.).
+     */
+    sendgridClickTracking: process.env.SENDGRID_CLICK_TRACKING === 'true',
     /** Optional override for SMTP From (defaults to SMTP_USER display name). */
     smtpFrom: (process.env.MAIL_SMTP_FROM || '').trim(),
     host: process.env.SMTP_HOST || '',

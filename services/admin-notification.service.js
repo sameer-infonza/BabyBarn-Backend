@@ -55,7 +55,7 @@ function adminActionUrl(href) {
   return `${base}${path}`;
 }
 
-function fireAdminOperationalEmail({ prefKey, module, template, context, href }) {
+function fireAdminOperationalEmail({ prefKey, module, template, context, href, attachments }) {
   void (async () => {
     try {
       const recipients = await resolveAdminNotificationRecipients({ module, prefKey });
@@ -70,6 +70,7 @@ function fireAdminOperationalEmail({ prefKey, module, template, context, href })
             to: recipient.email,
             template,
             context: { name: recipient.name, ...enriched },
+            attachments,
           })
         )
       );
@@ -279,32 +280,101 @@ function returnNotifyModule(returnRow) {
 
 export function notifyNewPaidOrder(order) {
   if (!order?.publicId) return;
-  const label = formatOrderLabel(order);
-  const amount =
-    order.totalAmount != null && Number.isFinite(Number(order.totalAmount))
-      ? `$${Number(order.totalAmount).toFixed(2)}`
-      : null;
   const href = `/admin/orders/${order.publicId}`;
+
   notifyAdmin({
     type: 'NEW_ORDER',
-    title: `New order ${label}`,
-    body: amount ? `Paid order ${amount} — review and fulfill.` : 'New paid order — review and fulfill.',
+    title: `New order ${formatOrderLabel(order)}`,
+    body:
+      order.totalAmount != null && Number.isFinite(Number(order.totalAmount))
+        ? `Paid order $${Number(order.totalAmount).toFixed(2)} — auto-accepted; wait for cancel window before picking.`
+        : 'New paid order — auto-accepted; wait for cancel window before picking.',
     href,
     entityType: 'Order',
     entityId: order.publicId,
     module: 'orders',
   });
-  fireAdminOperationalEmail({
-    prefKey: 'newOrders',
-    module: 'orders',
-    template: 'admin-new-order',
-    href,
-    context: {
-      orderNumber: order.orderNumber || order.publicId,
-      amount,
-      customerEmail: order.user?.email || order.contactEmail,
-    },
-  });
+
+  void (async () => {
+    try {
+      const { prisma } = await import('../lib/prisma.js');
+      const { renderInvoicePdfBuffer } = await import('./pdf/order-documents.service.js');
+      const full = await prisma.order.findUnique({
+        where: { publicId: order.publicId },
+        include: {
+          orderItems: { include: { product: true, productVariant: true } },
+          user: true,
+        },
+      });
+      if (!full) return;
+
+      const label = formatOrderLabel(full);
+      const amount =
+        full.totalAmount != null && Number.isFinite(Number(full.totalAmount))
+          ? `$${Number(full.totalAmount).toFixed(2)}`
+          : null;
+      const lines = (full.orderItems || []).map((li) => ({
+        name: li.product?.name || 'Item',
+        qty: li.quantity,
+        total: `$${(Number(li.price) * Number(li.quantity || 1)).toFixed(2)}`,
+      }));
+      const subtotal = (full.orderItems || []).reduce(
+        (sum, li) => sum + Number(li.price) * Number(li.quantity || 1),
+        0
+      );
+      const taxAmount = Number(full.taxAmount || 0);
+      const storeCredit = Number(full.storeCreditApplied || 0);
+      const ship = full.shippingAddressJson;
+      const shippingAddress =
+        ship && typeof ship === 'object'
+          ? [
+              [ship.firstName, ship.lastName].filter(Boolean).join(' ').trim(),
+              ship.line1 || ship.address1,
+              ship.line2 || ship.address2,
+              [ship.city, ship.state, ship.postalCode || ship.zip].filter(Boolean).join(', '),
+            ]
+              .filter(Boolean)
+              .join('\n')
+          : null;
+
+      let attachments;
+      try {
+        const buffer = await renderInvoicePdfBuffer(full);
+        attachments = [
+          {
+            filename: `invoice-${full.orderNumber || full.publicId}.pdf`,
+            content: buffer,
+            contentType: 'application/pdf',
+          },
+        ];
+      } catch (err) {
+        console.error('[admin-notification] invoice attach failed', full.publicId, err);
+      }
+
+      fireAdminOperationalEmail({
+        prefKey: 'newOrders',
+        module: 'orders',
+        template: 'admin-new-order',
+        href,
+        attachments,
+        context: {
+          orderNumber: full.orderNumber || full.publicId || label,
+          amount,
+          subtotal: `$${subtotal.toFixed(2)}`,
+          shipping: `$${Number(full.shippingCost || 0).toFixed(2)}`,
+          tax: taxAmount > 0 ? `$${taxAmount.toFixed(2)}` : null,
+          storeCredit: storeCredit > 0 ? `-$${storeCredit.toFixed(2)}` : null,
+          customerEmail: full.user?.email || full.contactEmail,
+          customerName: [full.user?.firstName, full.user?.lastName].filter(Boolean).join(' ') || null,
+          customerPhone: full.contactPhone || ship?.phone || ship?.phoneNumber || null,
+          shippingAddress,
+          lines,
+        },
+      });
+    } catch (err) {
+      console.error('[admin-notification] new order email failed', order.publicId, err);
+    }
+  })();
 }
 
 export function notifyReturnRequest(returnRow) {

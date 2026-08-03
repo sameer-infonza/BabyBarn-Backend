@@ -51,25 +51,42 @@ const RELATED_REFURB_SELECT = {
   stock: true,
   reservedStock: true,
   imageUrl: true,
+  inventoryModel: true,
   isActiveListing: true,
   isDraft: true,
   updatedAt: true,
   sourceProductId: true,
   variants: {
-    select: { stock: true, reservedStock: true },
+    select: {
+      publicId: true,
+      sku: true,
+      combination: true,
+      stock: true,
+      reservedStock: true,
+      sortOrder: true,
+    },
+    orderBy: { sortOrder: 'asc' },
   },
 };
 
 function toRelatedRefurbishedPublic(row) {
   if (!row) return null;
+  const variants = (row.variants ?? []).map((v) => ({
+    id: v.publicId,
+    sku: v.sku,
+    combination: v.combination,
+    stock: Math.max(0, Number(v.stock ?? 0) - Number(v.reservedStock ?? 0)),
+  }));
   return {
     id: row.publicId,
     name: row.name,
     slug: row.slug,
     price: row.price,
-    stock: row.stock,
+    stock: Math.max(0, Number(row.stock ?? 0) - Number(row.reservedStock ?? 0)),
     imageUrl: row.imageUrl,
     productType: 'REFURBISHED',
+    inventoryModel: row.inventoryModel ?? 'simple',
+    variants,
   };
 }
 
@@ -610,13 +627,8 @@ export class ProductService {
       throw new AppError(404, 'Product not found');
     }
 
-    if (!admin && product.productType === 'REFURBISHED') {
-      const { productAvailableStock } = await import('./inventory-reservation.js');
-      const { isSellableAvailable } = await import('../lib/inventory-stock-rules.js');
-      if (!isSellableAvailable(productAvailableStock(product), 'REFURBISHED')) {
-        throw new AppError(404, 'Product not found');
-      }
-    }
+    // Refurbished OOS still opens the PDP (marked unavailable), same as NEW.
+    // Hiding via 404 made single-qty refurbs vanish mid-checkout while stock is reserved.
 
     if (admin) {
       return product;

@@ -2,7 +2,7 @@
 
 ## Summary
 
-Customers can cancel an order from **My Account → Order details** while the warehouse has **not** started processing it. Cancellation is immediate — no admin review queue for new requests.
+Customers can cancel an order from **My Account → Order details** for **60 minutes after payment**. Paid orders are **auto-accepted** into fulfillment (`fulfillmentStatus = ACCEPTED`) — there is no admin Accept step. Cancellation is immediate — no admin review queue for new requests.
 
 ## When cancellation is allowed
 
@@ -12,18 +12,19 @@ All of the following must be true:
 | --- | --- | --- |
 | Order status | `PENDING`, `PROCESSING`, `CONFIRMED` | `CANCELLED`, `SHIPPED`, `DELIVERED`, `RETURNED`, `REFUNDED` |
 | Delivery | Not delivered (`deliveredAt` is null) | Delivered |
-| Fulfillment | `null` or `NEW_ORDER` | `ACCEPTED` and any later warehouse/carrier stage |
+| Time window | Within 60 minutes of `fulfillmentAcceptedAt` (set on payment) | Window expired |
+| Fulfillment | `ACCEPTED` or legacy `NEW_ORDER` | `PICKUP_READY` and any later warehouse/carrier stage |
 | Review state | No pending legacy review | `cancellationReviewStatus = PENDING` |
 
-**Rule of thumb:** cancel is available until the warehouse **accepts** the order for picking/packing (`fulfillmentStatus` becomes `ACCEPTED`).
+**Rule of thumb:** cancel is available for one hour after payment. The admin order list highlights rows still in that window so the warehouse does not pick/pack early.
 
 ## When cancellation is blocked
 
 Once any of these happen, the **Cancel Order** action is hidden and `PATCH /api/orders/:id/cancel` returns `400`:
 
-- Warehouse accepts the order (`ACCEPTED`)
-- Pick/pack or label generation begins (`PICKUP_READY`, `LABEL_GENERATED`)
-- Shipment or delivery milestones (`SHIPPED` and later fulfillment stages, or order `status` is terminal)
+- 60-minute window expires
+- Warehouse marks picked (`PICKUP_READY`) or later
+- Shipment or delivery milestones
 
 ## API
 
@@ -35,36 +36,3 @@ Body: {
   "itemIds": ["optional order line publicIds — omit to cancel the whole order"]
 }
 ```
-
-### Success responses
-
-- **Unpaid order (full):** order `status` → `CANCELLED`; reserved inventory and store-credit holds are released.
-- **Paid order (full, pre-warehouse):** Stripe refund for the order total; inventory restocked; redeemed store credit restored; order `status` → `CANCELLED`, `paymentStatus` → `REFUNDED`.
-- **Partial (selected `itemIds`):** only those lines are marked cancelled; inventory restored for those lines; Stripe/store-credit refund is proportional to cancelled merchandise. Remaining lines stay active; paid orders become `paymentStatus = PARTIALLY_REFUNDED` until the last active line is cancelled.
-
-### Error responses
-
-| Code | When |
-| --- | --- |
-| `400` | Order is not eligible (warehouse started, delivered, already cancelled, etc.) |
-| `403` | Order belongs to another customer |
-| `404` | Order not found |
-| `503` | Paid cancellation requested but Stripe is not configured |
-
-## Customer UX
-
-On the order detail page, if the order is **not delivered** and eligible, the returns column shows a **Cancel Order** card instead of return options.
-
-Confirmation copy explains that cancellation is only available before warehouse processing begins.
-
-## Legacy admin review
-
-Older requests may still have `cancellationReviewStatus = PENDING` from a previous review-based flow. Admins can approve or reject those from the admin order console. Approval runs the same cancellation side effects (restock, refund when paid).
-
-New customer cancellations do **not** create a pending review record.
-
-## Implementation references
-
-- Eligibility: `backend/lib/customer-order-cancellation.js`
-- Cancel handler: `orderService.cancelOrderByUser()` in `backend/services/order.service.js`
-- Customer UI: `customer-fe/lib/account/orders.ts` (`canCancelOrderOnline`), `OrderDetailView.tsx`
