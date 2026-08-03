@@ -1,6 +1,6 @@
 import { Router } from 'express';
 import { orderController } from '../controllers/order.controller.js';
-import { authenticate, authorize, requireFullAccount } from '../middleware/auth.js';
+import { authenticate, authorize, requireCustomerFullAccount } from '../middleware/auth.js';
 import { requireConsoleModule, requireConsoleModuleAny } from '../middleware/admin-console.js';
 
 const router = Router();
@@ -8,8 +8,8 @@ const ordersOrShipping = requireConsoleModuleAny(['orders', 'shipping']);
 
 router.get('/track', (req, res, next) => orderController.trackOrder(req, res).catch(next));
 router.post('/guest/cancel', (req, res, next) => orderController.cancelGuestOrder(req, res).catch(next));
-router.get('/', authenticate, requireFullAccount, (req, res, next) => orderController.getUserOrders(req, res).catch(next));
-router.get('/stats', authenticate, requireFullAccount, (req, res, next) => orderController.getUserOrderStats(req, res).catch(next));
+router.get('/', authenticate, ...requireCustomerFullAccount, (req, res, next) => orderController.getUserOrders(req, res).catch(next));
+router.get('/stats', authenticate, ...requireCustomerFullAccount, (req, res, next) => orderController.getUserOrderStats(req, res).catch(next));
 router.post('/', authenticate, (req, res, next) => orderController.createOrder(req, res).catch(next));
 router.post('/quote', authenticate, (req, res, next) => orderController.getCheckoutQuote(req, res).catch(next));
 
@@ -177,10 +177,10 @@ router.patch(
   ordersOrShipping,
   (req, res, next) => orderController.updateTracking(req, res).catch(next)
 );
-router.get('/:id/pdf/invoice', authenticate, requireFullAccount, (req, res, next) =>
+router.get('/:id/pdf/invoice', authenticate, ...requireCustomerFullAccount, (req, res, next) =>
   orderController.getMyOrderInvoicePdf(req, res, next)
 );
-router.get('/:id', authenticate, requireFullAccount, (req, res, next) =>
+router.get('/:id', authenticate, ...requireCustomerFullAccount, (req, res, next) =>
   orderController.getOrderById(req, res).catch(next)
 );
 

@@ -1,6 +1,6 @@
 import { Router } from 'express';
 import { authController } from '../controllers/auth.controller.js';
-import { authenticate, requireFullAccount } from '../middleware/auth.js';
+import { authenticate, requireFullAccount, requireCustomerFullAccount } from '../middleware/auth.js';
 import { avatarImageUpload } from '../utils/product-upload.js';
 
 const router = Router();
@@ -50,16 +50,16 @@ router.post('/logout', authenticate, requireFullAccount, (req, res, next) =>
 router.post('/logout-others', authenticate, requireFullAccount, (req, res, next) =>
   authController.logoutOtherSessions(req, res).catch(next)
 );
-router.get('/addresses', authenticate, requireFullAccount, (req, res, next) =>
+router.get('/addresses', authenticate, ...requireCustomerFullAccount, (req, res, next) =>
   authController.listAddresses(req, res).catch(next)
 );
-router.post('/addresses', authenticate, requireFullAccount, (req, res, next) =>
+router.post('/addresses', authenticate, ...requireCustomerFullAccount, (req, res, next) =>
   authController.createAddress(req, res).catch(next)
 );
-router.patch('/addresses/:addressId', authenticate, requireFullAccount, (req, res, next) =>
+router.patch('/addresses/:addressId', authenticate, ...requireCustomerFullAccount, (req, res, next) =>
   authController.updateAddress(req, res).catch(next)
 );
-router.delete('/addresses/:addressId', authenticate, requireFullAccount, (req, res, next) =>
+router.delete('/addresses/:addressId', authenticate, ...requireCustomerFullAccount, (req, res, next) =>
   authController.deleteAddress(req, res).catch(next)
 );
 

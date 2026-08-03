@@ -725,8 +725,9 @@ export async function createAdminTeamMember(actorPublicId, payload) {
   if (existing) {
     throw new AppError(
       400,
-      'An Admin Portal account already exists for this email. Customer Portal accounts with the same email are separate and allowed.',
-      'EMAIL_TAKEN_STAFF'
+      'This email is already a team member. Open Admin → Team to edit their access.',
+      'EMAIL_TAKEN_STAFF',
+      { existingTeamMemberId: existing.publicId }
     );
   }
 
@@ -768,7 +769,7 @@ export async function createAdminTeamMember(actorPublicId, payload) {
     if (err?.code === 'P2002') {
       throw new AppError(
         400,
-        'An Admin Portal account already exists for this email. Customer Portal accounts with the same email are separate and allowed.',
+        'This email is already a team member. Open Admin → Team to edit their access.',
         'EMAIL_TAKEN_STAFF'
       );
     }

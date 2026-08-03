@@ -1,5 +1,5 @@
 import { Router } from 'express';
-import { authenticate, requireFullAccount } from '../middleware/auth.js';
+import { authenticate, requireCustomerFullAccount } from '../middleware/auth.js';
 import {
   getEligibility,
   getPaymentHistory,
@@ -9,9 +9,9 @@ import {
 
 const router = Router();
 
-router.post('/registration', authenticate, requireFullAccount, saveRegistration);
-router.get('/eligibility', authenticate, requireFullAccount, getEligibility);
-router.get('/payments/history', authenticate, requireFullAccount, getPaymentHistory);
-router.get('/savings', authenticate, requireFullAccount, getSavings);
+router.post('/registration', authenticate, ...requireCustomerFullAccount, saveRegistration);
+router.get('/eligibility', authenticate, ...requireCustomerFullAccount, getEligibility);
+router.get('/payments/history', authenticate, ...requireCustomerFullAccount, getPaymentHistory);
+router.get('/savings', authenticate, ...requireCustomerFullAccount, getSavings);
 
 export default router;

@@ -1,5 +1,5 @@
 import { Router } from 'express';
-import { authenticate, authorize, requireFullAccount } from '../middleware/auth.js';
+import { authenticate, authorize, requireCustomerFullAccount } from '../middleware/auth.js';
 import { requireConsoleModuleAny } from '../middleware/admin-console.js';
 
 const returnsOrInspection = requireConsoleModuleAny(['returns', 'inspection']);
@@ -90,13 +90,13 @@ router.post('/guest/track', (req, res, next) => returnsController.trackGuest(req
 router.post(
   '/package-requests',
   authenticate,
-  requireFullAccount,
+  ...requireCustomerFullAccount,
   (req, res, next) => returnsController.createPackageRequest(req, res).catch(next)
 );
 router.get(
   '/package-requests/mine',
   authenticate,
-  requireFullAccount,
+  ...requireCustomerFullAccount,
   (req, res, next) => returnsController.listPackageRequestsMine(req, res).catch(next)
 );
 router.get(
@@ -113,27 +113,27 @@ router.patch(
   returnsOrInspection,
   (req, res, next) => returnsController.updatePackageRequest(req, res).catch(next)
 );
-router.get('/', authenticate, requireFullAccount, (req, res, next) => returnsController.listMine(req, res).catch(next));
-router.post('/upload-photo', authenticate, requireFullAccount, (req, res, next) => {
+router.get('/', authenticate, ...requireCustomerFullAccount, (req, res, next) => returnsController.listMine(req, res).catch(next));
+router.post('/upload-photo', authenticate, ...requireCustomerFullAccount, (req, res, next) => {
   returnPhotoUpload.single('image')(req, res, (err) => {
     if (err) return next(err);
     returnsController.uploadPhoto(req, res);
   });
 });
-router.get('/:id', authenticate, requireFullAccount, (req, res, next) => returnsController.getMineById(req, res).catch(next));
+router.get('/:id', authenticate, ...requireCustomerFullAccount, (req, res, next) => returnsController.getMineById(req, res).catch(next));
 router.post(
   '/:id/usps-shipment',
   authenticate,
-  requireFullAccount,
+  ...requireCustomerFullAccount,
   (req, res, next) => returnsController.submitUspsShipment(req, res).catch(next)
 );
 router.post(
   '/:id/cancel',
   authenticate,
-  requireFullAccount,
+  ...requireCustomerFullAccount,
   (req, res, next) => returnsController.cancelReturn(req, res).catch(next)
 );
-router.post('/', authenticate, requireFullAccount, (req, res, next) => returnsController.create(req, res).catch(next));
+router.post('/', authenticate, ...requireCustomerFullAccount, (req, res, next) => returnsController.create(req, res).catch(next));
 router.patch(
   '/:id/status',
   authenticate,

@@ -142,19 +142,14 @@ export const requireFullAccount = (req, res, next) => {
       )
     );
   }
-  // Customer account APIs must never accept a staff-portal session, even with the same email.
-  const scope = req.user.portalScope || PORTAL_SCOPE.CUSTOMER;
-  if (scope !== PORTAL_SCOPE.CUSTOMER) {
-    return next(
-      new AppError(
-        403,
-        'Access denied. Sign in on the Customer Portal to manage this shop account.',
-        'WRONG_PORTAL_TOKEN'
-      )
-    );
-  }
   next();
 };
+
+/** Full non-guest customer session — blocks staff-portal twins from shop account APIs. */
+export const requireCustomerFullAccount = [
+  requireFullAccount,
+  requirePortalScope(PORTAL_SCOPE.CUSTOMER),
+];
 
 export const authorize = (...roles) => {
   return (req, res, next) => {
