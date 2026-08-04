@@ -675,6 +675,19 @@ export const returnInspectLineSchema = z.object({
   complete: z.boolean().optional(),
 });
 
+/** Warehouse partial package receipt — quantities received in this shipment. */
+export const returnReceivePackageSchema = z.object({
+  note: z.string().max(1000).optional().nullable(),
+  items: z
+    .array(
+      z.object({
+        lineId: z.string().min(1),
+        quantity: z.number().int().min(0),
+      })
+    )
+    .min(1),
+});
+
 export const guestReturnTrackSchema = z.object({
   returnId: z.string().min(1),
   email: z.string().email(),

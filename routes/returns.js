@@ -161,6 +161,13 @@ router.patch(
   (req, res, next) => returnsController.inspectLine(req, res).catch(next)
 );
 router.post(
+  '/:id/receive-package',
+  authenticate,
+  authorize('ADMIN', 'ADMIN_TEAM'),
+  returnsOrInspection,
+  (req, res, next) => returnsController.receivePackage(req, res).catch(next)
+);
+router.post(
   '/:id/refund',
   authenticate,
   authorize('ADMIN', 'ADMIN_TEAM'),

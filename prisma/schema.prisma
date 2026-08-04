@@ -203,6 +203,7 @@ model User {
   stockAlertSubscriptions StockAlertSubscription[]
   eligibilityReviews ReturnEligibilityQuestionnaire[] @relation("EligibilityReviewedBy")
   refurbInspections  RefurbInspectionRecord[]         @relation("RefurbInspector")
+  returnReceivePackages ReturnReceivePackage[]        @relation("ReturnReceivePackages")
 
   stripeCustomerId   String?
   accessNumber       String?   @unique
@@ -686,6 +687,8 @@ model ReturnRequest {
   type ReturnType @default(STANDARD)
   status ReturnStatus @default(REQUESTED)
   quantity Int @default(1)
+  /// Units physically received across all packages (may be partial until fully received).
+  receivedQuantity Int @default(0)
   /// Units approved for refund/restock after inspection (may be partial).
   acceptedQuantity Int?
   /// Units rejected after inspection (may be partial).
@@ -745,12 +748,43 @@ model ReturnRequest {
   inspectionRecords RefurbInspectionRecord[]
   statusEvents ReturnStatusEvent[]
   packageRequests ReturnPackageRequest[]
+  receivePackageLines ReturnReceivePackageLine[]
 
   @@index([userId])
   @@index([orderId])
   @@index([status])
   @@index([submissionPublicId])
   @@index([returnNumber])
+}
+
+model ReturnReceivePackage {
+  id                 Int      @id @default(autoincrement())
+  publicId           String   @unique @default(cuid())
+  submissionPublicId String
+  packageNumber      Int
+  receivedByUserId   Int?
+  note               String?
+  createdAt          DateTime @default(now())
+
+  receivedBy User?                     @relation("ReturnReceivePackages", fields: [receivedByUserId], references: [id], onDelete: SetNull)
+  lines      ReturnReceivePackageLine[]
+
+  @@unique([submissionPublicId, packageNumber])
+  @@index([submissionPublicId])
+}
+
+model ReturnReceivePackageLine {
+  id               Int @id @default(autoincrement())
+  publicId         String @unique @default(cuid())
+  packageId        Int
+  returnRequestId  Int
+  quantityReceived Int
+
+  package       ReturnReceivePackage @relation(fields: [packageId], references: [id], onDelete: Cascade)
+  returnRequest ReturnRequest        @relation(fields: [returnRequestId], references: [id], onDelete: Cascade)
+
+  @@index([packageId])
+  @@index([returnRequestId])
 }
 
 model ReturnStatusEvent {

@@ -42,9 +42,11 @@ function isMissingWalletTableError(error) {
   );
 }
 
-/** Strict standard ladder: Received → Inspection → Approve/Reject; refund/restock are separate actions. */
+/** Strict standard ladder: Received → Inspection → Approve/Reject; refund/restock are separate actions.
+ * REQUESTED → UNDER_INSPECTION is allowed only when the line already has receivedQuantity > 0 (enforced in updateStatus/inspectLine).
+ */
 const STANDARD_TRANSITIONS = {
-  REQUESTED: ['RECEIVED'],
+  REQUESTED: ['RECEIVED', 'UNDER_INSPECTION'],
   RECEIVED: ['UNDER_INSPECTION'],
   UNDER_INSPECTION: ['APPROVED', 'REJECTED'],
   APPROVED: [],
@@ -162,6 +164,18 @@ function computeRowRefundPreview(row) {
   return computeStandardReturnRefundAmount(row.orderItem, qty);
 }
 
+function lineRequestedQty(row) {
+  return Math.max(1, Number(row.quantity ?? 1));
+}
+
+function lineReceivedQty(row) {
+  return Math.max(0, Number(row.receivedQuantity ?? 0));
+}
+
+function lineHasRemaining(row) {
+  return lineReceivedQty(row) < lineRequestedQty(row);
+}
+
 function deriveSubmissionStatus(rows) {
   if (!rows.length) return 'REQUESTED';
   const statuses = rows.map((row) => row.status);
@@ -169,12 +183,29 @@ function deriveSubmissionStatus(rows) {
 
   const type = rows[0].type;
   if (type === 'STANDARD') {
-    if (statuses.every((status) => status === 'APPROVED')) return 'APPROVED';
-    if (statuses.every((status) => status === 'REJECTED')) return 'REJECTED';
-    if (statuses.includes('UNDER_INSPECTION')) return 'UNDER_INSPECTION';
-    if (statuses.includes('RECEIVED')) return 'RECEIVED';
-    if (statuses.includes('REQUESTED')) return 'REQUESTED';
-    if (statuses.includes('APPROVED')) return 'APPROVED';
+    const hasRemaining = rows.some((row) => lineHasRemaining(row));
+    const anyInspecting = statuses.includes('UNDER_INSPECTION');
+    const anyReceived = statuses.includes('RECEIVED');
+    const anyRequested = statuses.includes('REQUESTED');
+    const anyApproved = statuses.includes('APPROVED');
+    const anyRejected = statuses.includes('REJECTED');
+
+    // Active inspection on any received line takes display priority.
+    if (anyInspecting) return 'UNDER_INSPECTION';
+
+    // Mixed decisions while other lines still arriving / waiting.
+    if (anyApproved || anyRejected) {
+      if (anyReceived) return 'RECEIVED';
+      if (anyRequested || hasRemaining) return 'REQUESTED';
+      if (anyApproved && !anyRejected) return 'APPROVED';
+      if (anyRejected && !anyApproved) return 'REJECTED';
+      return 'APPROVED';
+    }
+
+    // Partial receive: one line RECEIVED, siblings still REQUESTED — stay receivable.
+    if (anyReceived && (anyRequested || hasRemaining)) return 'REQUESTED';
+    if (anyReceived) return 'RECEIVED';
+    if (anyRequested) return 'REQUESTED';
     return statuses[0];
   }
 
@@ -270,6 +301,11 @@ function buildSubmissionChildItem(row) {
     type: row.type,
     status: row.status,
     quantity: row.quantity,
+    receivedQuantity: Math.max(0, Number(row.receivedQuantity ?? 0)),
+    remainingQuantity: Math.max(
+      0,
+      Math.max(1, Number(row.quantity ?? 1)) - Math.max(0, Number(row.receivedQuantity ?? 0))
+    ),
     acceptedQuantity: row.acceptedQuantity ?? null,
     rejectedQuantity: row.rejectedQuantity ?? null,
     reason: row.reason,
@@ -509,6 +545,16 @@ export class ReturnsService {
     }));
     const submission = buildReturnSubmission(rowsWithPreview, { includeEvents: false });
     const packageRequest = await this.getPackageRequestForSubmission(submissionItems);
+    const receivePackages = await this.listReceivePackages(returnSubmissionKey(row));
+    const receivedQuantityTotal = submissionItems.reduce(
+      (sum, item) => sum + Math.max(0, Number(item.receivedQuantity ?? 0)),
+      0
+    );
+    const remainingQuantityTotal = submissionItems.reduce((sum, item) => {
+      const requested = Math.max(1, Number(item.quantity ?? 1));
+      const received = Math.max(0, Number(item.receivedQuantity ?? 0));
+      return sum + Math.max(0, requested - received);
+    }, 0);
   return {
       ...submission,
       id: row.publicId,
@@ -522,6 +568,9 @@ export class ReturnsService {
       ),
       submissionStatus: deriveSubmissionStatus(submissionItems),
       submissionQuantity: submissionItems.reduce((sum, item) => sum + Math.max(1, Number(item.quantity ?? 1)), 0),
+      receivedQuantity: receivedQuantityTotal,
+      remainingQuantity: remainingQuantityTotal,
+      receivePackages,
       refundAmount: submissionItems.some((i) => i.refundAmount != null)
         ? submissionItems.reduce((sum, i) => sum + Number(i.refundAmount || 0), 0)
         : row.refundAmount,
@@ -1323,6 +1372,29 @@ export class ReturnsService {
     }
     if (!rr) throw new AppError(404, 'Return request not found');
 
+    // STANDARD: "Mark received" must go through partial receive (or receive remaining).
+    if (rr.type === 'STANDARD' && status === 'RECEIVED' && (rr.status === 'REQUESTED' || rr.status === 'RECEIVED')) {
+      const siblings = await prisma.returnRequest.findMany({
+        where: { submissionPublicId: returnSubmissionKey(rr) },
+        orderBy: { createdAt: 'asc' },
+      });
+      const items = siblings
+        .map((line) => {
+          const requested = Math.max(1, Number(line.quantity ?? 1));
+          const already = Math.max(0, Number(line.receivedQuantity ?? 0));
+          const remaining = Math.max(0, requested - already);
+          return remaining > 0 ? { lineId: line.publicId, quantity: remaining } : null;
+        })
+        .filter(Boolean);
+      if (!items.length) {
+        if (siblings.every((l) => Number(l.receivedQuantity ?? 0) >= Math.max(1, Number(l.quantity ?? 1)))) {
+          return this.getById(returnPublicId);
+        }
+        throw new AppError(400, 'Nothing left to receive for this return');
+      }
+      return this.receivePackage(returnPublicId, { items, note: notes || body.adminNotes || null }, actor);
+    }
+
     if (
       manualCarrier !== undefined ||
       manualTrackingNumber !== undefined ||
@@ -1404,6 +1476,84 @@ export class ReturnsService {
         entityId: returnPublicId,
         meta: { adminNotes: updatedNotes.adminNotes },
       });
+      return this.getById(returnPublicId);
+    }
+
+    // STANDARD: start inspection only on lines that already have received qty; leave others REQUESTED.
+    if (rr.type === 'STANDARD' && status === 'UNDER_INSPECTION') {
+      const siblings = await prisma.returnRequest.findMany({
+        where: { submissionPublicId: returnSubmissionKey(rr) },
+        orderBy: { createdAt: 'asc' },
+      });
+      const targets = siblings.filter(
+        (s) =>
+          lineReceivedQty(s) > 0 &&
+          ['REQUESTED', 'RECEIVED'].includes(s.status)
+      );
+      if (!targets.length) {
+        if (siblings.some((s) => s.status === 'UNDER_INSPECTION')) {
+          return this.getById(returnPublicId);
+        }
+        throw new AppError(400, 'Receive units before starting inspection');
+      }
+
+      const actorUserId = await resolveActorUserId(actor);
+      const notesVal =
+        notes !== undefined
+          ? notes
+            ? String(notes).trim()
+            : null
+          : body.adminNotes !== undefined
+            ? body.adminNotes
+              ? String(body.adminNotes).trim()
+              : null
+            : undefined;
+
+      await prisma.$transaction(async (tx) => {
+        for (const line of targets) {
+          await tx.returnRequest.update({
+            where: { id: line.id },
+            data: {
+              status: 'UNDER_INSPECTION',
+              ...(notesVal !== undefined ? { adminNotes: notesVal } : {}),
+            },
+          });
+          await appendReturnStatusEvent(tx, {
+            returnRequestId: line.id,
+            fromStatus: line.status,
+            toStatus: 'UNDER_INSPECTION',
+            actorUserId,
+            note: notesVal || 'Inspection started for received units',
+          });
+        }
+      });
+
+      await writeAdminAudit({
+        actorId: actor?.id,
+        actorEmail: actor?.email,
+        action: 'RETURN_STATUS',
+        entityType: 'ReturnRequest',
+        entityId: returnPublicId,
+        meta: {
+          from: 'mixed',
+          to: 'UNDER_INSPECTION',
+          lineIds: targets.map((t) => t.publicId),
+        },
+      });
+
+      try {
+        const updated = await prisma.returnRequest.findUnique({
+          where: { id: targets[0].id },
+          include: {
+            user: { select: { email: true, firstName: true, lastName: true } },
+            order: { select: { publicId: true } },
+          },
+        });
+        if (updated) notifyInspectionQueued(updated);
+      } catch (err) {
+        console.error('[returns] inspection queued notification failed', returnPublicId, err);
+      }
+
       return this.getById(returnPublicId);
     }
 
@@ -1614,14 +1764,20 @@ export class ReturnsService {
     if (rr.type !== 'STANDARD') {
       throw new AppError(400, 'Line inspection applies to standard returns only');
     }
-    if (rr.status !== 'UNDER_INSPECTION' && rr.status !== 'RECEIVED' && rr.status !== 'APPROVED' && rr.status !== 'REJECTED') {
+    const receivedQty = lineReceivedQty(rr);
+    if (receivedQty <= 0) {
+      throw new AppError(400, 'No units have been received for this line yet');
+    }
+    if (
+      !['REQUESTED', 'RECEIVED', 'UNDER_INSPECTION', 'APPROVED', 'REJECTED'].includes(rr.status)
+    ) {
       throw new AppError(400, `Cannot inspect line in status ${rr.status}`);
     }
     if (rr.stripeRefundId) {
       throw new AppError(400, 'Cannot change inspection after refund has been processed');
     }
 
-    const returnedQty = Math.max(1, Number(rr.quantity || 1));
+    const returnedQty = receivedQty;
     const acceptedQuantity =
       body.acceptedQuantity !== undefined
         ? Math.max(0, Number(body.acceptedQuantity) || 0)
@@ -1634,7 +1790,7 @@ export class ReturnsService {
     if (acceptedQuantity + rejectedQuantity !== returnedQty) {
       throw new AppError(
         400,
-        `Accepted (${acceptedQuantity}) + rejected (${rejectedQuantity}) must equal returned quantity (${returnedQty})`
+        `Accepted (${acceptedQuantity}) + rejected (${rejectedQuantity}) must equal received quantity (${returnedQty})`
       );
     }
 
@@ -1680,10 +1836,10 @@ export class ReturnsService {
         : rr.dispositionQuantity;
 
     const nextStatus = acceptedQuantity > 0 ? 'APPROVED' : 'REJECTED';
+    const promoteToInspection = ['REQUESTED', 'RECEIVED'].includes(rr.status);
     const shouldTransition =
       Boolean(body.complete) &&
-      rr.status === 'UNDER_INSPECTION' &&
-      this.validateTransition(rr.status, nextStatus, rr.type);
+      (rr.status === 'UNDER_INSPECTION' || promoteToInspection);
 
     const actorUserId = await resolveActorUserId(actor);
     const data = {
@@ -1697,7 +1853,11 @@ export class ReturnsService {
         : {}),
       ...(disposition !== undefined ? { disposition } : {}),
       ...(dispositionQuantity !== undefined ? { dispositionQuantity } : {}),
-      ...(shouldTransition ? { status: nextStatus } : {}),
+      ...(shouldTransition
+        ? { status: nextStatus }
+        : promoteToInspection
+          ? { status: 'UNDER_INSPECTION' }
+          : {}),
     };
 
     await prisma.$transaction(async (tx) => {
@@ -1706,15 +1866,43 @@ export class ReturnsService {
         data,
       });
       if (shouldTransition) {
+        if (promoteToInspection) {
+          await appendReturnStatusEvent(tx, {
+            returnRequestId: rr.id,
+            fromStatus: rr.status,
+            toStatus: 'UNDER_INSPECTION',
+            actorUserId,
+            note: 'Inspection started for received units',
+          });
+          await appendReturnStatusEvent(tx, {
+            returnRequestId: rr.id,
+            fromStatus: 'UNDER_INSPECTION',
+            toStatus: nextStatus,
+            actorUserId,
+            note:
+              nextStatus === 'REJECTED'
+                ? rejectionReason
+                : `Inspected: accepted ${acceptedQuantity}, rejected ${rejectedQuantity}`,
+          });
+        } else {
+          await appendReturnStatusEvent(tx, {
+            returnRequestId: rr.id,
+            fromStatus: rr.status,
+            toStatus: nextStatus,
+            actorUserId,
+            note:
+              nextStatus === 'REJECTED'
+                ? rejectionReason
+                : `Inspected: accepted ${acceptedQuantity}, rejected ${rejectedQuantity}`,
+          });
+        }
+      } else if (promoteToInspection) {
         await appendReturnStatusEvent(tx, {
           returnRequestId: rr.id,
           fromStatus: rr.status,
-          toStatus: nextStatus,
+          toStatus: 'UNDER_INSPECTION',
           actorUserId,
-          note:
-            nextStatus === 'REJECTED'
-              ? rejectionReason
-              : `Inspected: accepted ${acceptedQuantity}, rejected ${rejectedQuantity}`,
+          note: 'Inspection started for received units',
         });
       } else {
         await appendReturnActionNote(tx, {
@@ -2137,6 +2325,203 @@ export class ReturnsService {
       }
     }
     return rows;
+  }
+
+  /**
+   * Record a warehouse package receipt (partial or full) for a STANDARD return submission.
+   * Increments receivedQuantity per line; marks that line RECEIVED when its own qty is complete.
+   * Sibling lines may still be awaiting packages or already under inspection.
+   */
+  async receivePackage(returnPublicId, body, actor) {
+    const items = Array.isArray(body?.items) ? body.items : [];
+    if (!items.length) throw new AppError(400, 'At least one line quantity is required');
+
+    let anchor = await prisma.returnRequest.findUnique({ where: { publicId: returnPublicId } });
+    if (!anchor) {
+      anchor = await prisma.returnRequest.findFirst({
+        where: {
+          OR: [{ submissionPublicId: returnPublicId }, { returnNumber: returnPublicId }],
+        },
+        orderBy: { createdAt: 'asc' },
+      });
+    }
+    if (!anchor) throw new AppError(404, 'Return request not found');
+    if (anchor.type !== 'STANDARD') {
+      throw new AppError(400, 'Package receiving applies to standard returns only');
+    }
+
+    const submissionKey = returnSubmissionKey(anchor);
+    const siblings = await prisma.returnRequest.findMany({
+      where: { submissionPublicId: submissionKey },
+      orderBy: { createdAt: 'asc' },
+    });
+    if (!siblings.length) throw new AppError(404, 'Return request not found');
+
+    const byPublicId = new Map(siblings.map((s) => [s.publicId, s]));
+    const receiveNow = [];
+    for (const raw of items) {
+      const lineId = String(raw.lineId || '').trim();
+      const qty = Math.max(0, Number(raw.quantity) || 0);
+      if (!lineId) continue;
+      const line = byPublicId.get(lineId);
+      if (!line) throw new AppError(400, `Unknown return line: ${lineId}`);
+      // Decided lines are locked; other siblings may still receive while inspection continues.
+      if (['APPROVED', 'REJECTED'].includes(line.status)) {
+        throw new AppError(400, `Cannot receive units for line in status ${line.status}`);
+      }
+      if (!['REQUESTED', 'RECEIVED', 'UNDER_INSPECTION'].includes(line.status)) {
+        throw new AppError(400, `Cannot receive units for line in status ${line.status}`);
+      }
+      const requested = lineRequestedQty(line);
+      const already = lineReceivedQty(line);
+      const remaining = Math.max(0, requested - already);
+      if (qty > remaining) {
+        throw new AppError(
+          400,
+          `Cannot receive ${qty} for line (requested ${requested}, already received ${already}, remaining ${remaining})`
+        );
+      }
+      if (qty > 0) receiveNow.push({ line, qty, requested, already });
+    }
+
+    if (!receiveNow.length) {
+      throw new AppError(400, 'Enter at least one received quantity greater than zero');
+    }
+
+    const actorUserId = await resolveActorUserId(actor);
+    const note = body?.note ? String(body.note).trim() : null;
+
+    const result = await prisma.$transaction(async (tx) => {
+      const last = await tx.returnReceivePackage.findFirst({
+        where: { submissionPublicId: submissionKey },
+        orderBy: { packageNumber: 'desc' },
+        select: { packageNumber: true },
+      });
+      const packageNumber = (last?.packageNumber || 0) + 1;
+
+      const pkg = await tx.returnReceivePackage.create({
+        data: {
+          submissionPublicId: submissionKey,
+          packageNumber,
+          receivedByUserId: actorUserId,
+          note,
+          lines: {
+            create: receiveNow.map(({ line, qty }) => ({
+              returnRequestId: line.id,
+              quantityReceived: qty,
+            })),
+          },
+        },
+        include: {
+          lines: true,
+          receivedBy: {
+            select: { publicId: true, firstName: true, lastName: true, email: true },
+          },
+        },
+      });
+
+      for (const { line, qty, requested, already } of receiveNow) {
+        const nextReceived = already + qty;
+        const lineFull = nextReceived >= requested;
+        // Per-line RECEIVED when this product's qty is complete; leave UNDER_INSPECTION as-is.
+        const promoteReceived = lineFull && line.status === 'REQUESTED';
+        const data = {
+          receivedQuantity: nextReceived,
+          ...(promoteReceived
+            ? { status: 'RECEIVED', receivedAt: line.receivedAt || new Date() }
+            : {}),
+        };
+        await tx.returnRequest.update({ where: { id: line.id }, data });
+        await appendReturnStatusEvent(tx, {
+          returnRequestId: line.id,
+          fromStatus: line.status,
+          toStatus: promoteReceived ? 'RECEIVED' : line.status,
+          actorUserId,
+          note: `Package #${packageNumber}: received ${qty} of ${requested} (total ${nextReceived}/${requested})`,
+        });
+        if (promoteReceived) {
+          await markUnitsReturnedForReturn(tx, line.id);
+        }
+      }
+
+      const refreshed = await tx.returnRequest.findMany({
+        where: { submissionPublicId: submissionKey },
+      });
+      const allFull = refreshed.every((l) => !lineHasRemaining(l));
+
+      return { pkg, allFull, packageNumber };
+    });
+
+    await writeAdminAudit({
+      actorId: actor?.id,
+      actorEmail: actor?.email,
+      action: 'RETURN_RECEIVE_PACKAGE',
+      entityType: 'ReturnRequest',
+      entityId: returnPublicId,
+      meta: {
+        packageNumber: result.packageNumber,
+        allFull: result.allFull,
+        items: receiveNow.map(({ line, qty }) => ({ lineId: line.publicId, quantity: qty })),
+      },
+    });
+
+    return this.getById(returnPublicId);
+  }
+
+  async listReceivePackages(submissionPublicId) {
+    const rows = await prisma.returnReceivePackage.findMany({
+      where: { submissionPublicId },
+      orderBy: { packageNumber: 'asc' },
+      include: {
+        receivedBy: {
+          select: { publicId: true, firstName: true, lastName: true, email: true },
+        },
+        lines: {
+          include: {
+            returnRequest: {
+              select: {
+                publicId: true,
+                quantity: true,
+                receivedQuantity: true,
+                orderItem: {
+                  include: {
+                    product: { select: { name: true, sku: true } },
+                    productVariant: { select: { sku: true, combination: true } },
+                  },
+                },
+              },
+            },
+          },
+        },
+      },
+    });
+    return rows.map((pkg) => ({
+      id: pkg.publicId,
+      packageNumber: pkg.packageNumber,
+      note: pkg.note,
+      createdAt: pkg.createdAt,
+      receivedBy: pkg.receivedBy
+        ? {
+            publicId: pkg.receivedBy.publicId,
+            name:
+              [pkg.receivedBy.firstName, pkg.receivedBy.lastName].filter(Boolean).join(' ') ||
+              pkg.receivedBy.email,
+            email: pkg.receivedBy.email,
+          }
+        : null,
+      lines: pkg.lines.map((ln) => ({
+        id: ln.publicId,
+        lineId: ln.returnRequest.publicId,
+        quantityReceived: ln.quantityReceived,
+        productName: ln.returnRequest.orderItem?.product?.name || 'Item',
+        sku:
+          ln.returnRequest.orderItem?.productVariant?.sku ||
+          ln.returnRequest.orderItem?.product?.sku ||
+          null,
+        requestedQuantity: ln.returnRequest.quantity,
+        totalReceivedQuantity: ln.returnRequest.receivedQuantity,
+      })),
+    }));
   }
 
   async bulkMarkReceived(returnPublicIds, actor) {

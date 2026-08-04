@@ -13,6 +13,7 @@ import {
   refurbUspsShipmentSchema,
   returnCancelSchema,
   RETURN_STATUS_VALUES,
+  returnReceivePackageSchema,
 } from '../schemas/index.js';
 import { returnsService } from '../services/returns.service.js';
 import { returnPackageRequestService } from '../services/return-package-request.service.js';
@@ -81,6 +82,13 @@ export class ReturnsController {
     const body = await validate(returnInspectLineSchema, req.body ?? {});
     const actor = { id: req.user?.id, email: req.user?.email };
     const data = await returnsService.inspectLine(req.params.id, body, actor);
+    res.status(200).json({ success: true, data: toPublicJson(data) });
+  }
+
+  async receivePackage(req, res) {
+    const body = await validate(returnReceivePackageSchema, req.body ?? {});
+    const actor = { id: req.user?.id, email: req.user?.email };
+    const data = await returnsService.receivePackage(req.params.id, body, actor);
     res.status(200).json({ success: true, data: toPublicJson(data) });
   }
 
