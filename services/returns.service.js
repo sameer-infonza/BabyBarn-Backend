@@ -93,7 +93,16 @@ const returnInclude = {
   orderItem: {
     include: {
       product: {
-        select: { publicId: true, name: true, productType: true, sku: true, slug: true, sizeAgeGroup: true },
+        select: {
+          publicId: true,
+          name: true,
+          productType: true,
+          sku: true,
+          slug: true,
+          sizeAgeGroup: true,
+          imageUrl: true,
+          gallery: true,
+        },
       },
       productVariant: {
         select: { publicId: true, sku: true, combination: true },
@@ -139,10 +148,18 @@ function returnSubmissionKey(row) {
   return row?.submissionPublicId || row?.submissionId || row?.publicId || row?.id;
 }
 
+/** Units eligible for refund/restock preview after inspection outcomes. */
+function refundableQuantityForRow(row) {
+  if (row?.acceptedQuantity != null) return Math.max(0, Number(row.acceptedQuantity));
+  if (row?.status === 'REJECTED') return 0;
+  return Math.max(1, Number(row.quantity ?? 1));
+}
+
 function computeRowRefundPreview(row) {
-  return row?.type === 'STANDARD' && row?.orderItem
-    ? computeStandardReturnRefundAmount(row.orderItem, row.quantity)
-    : null;
+  if (row?.type !== 'STANDARD' || !row?.orderItem) return null;
+  const qty = refundableQuantityForRow(row);
+  if (qty <= 0) return 0;
+  return computeStandardReturnRefundAmount(row.orderItem, qty);
 }
 
 function deriveSubmissionStatus(rows) {
@@ -245,6 +262,7 @@ async function loadOpenPackageOrderIds(orderIds = []) {
 }
 
 function buildSubmissionChildItem(row) {
+  const customerNotes = row.customerNotes ?? row.notes ?? null;
   return {
     id: row.publicId,
     submissionId: returnSubmissionKey(row),
@@ -252,10 +270,18 @@ function buildSubmissionChildItem(row) {
     type: row.type,
     status: row.status,
     quantity: row.quantity,
+    acceptedQuantity: row.acceptedQuantity ?? null,
+    rejectedQuantity: row.rejectedQuantity ?? null,
     reason: row.reason,
-    notes: row.notes,
+    notes: customerNotes,
+    customerNotes,
+    adminNotes: row.adminNotes ?? null,
     rejectionReason: row.rejectionReason,
     photoUrlsJson: row.photoUrlsJson,
+    inspectorPhotoUrlsJson: row.inspectorPhotoUrlsJson ?? null,
+    inspectionChecklistJson: row.inspectionChecklistJson ?? null,
+    disposition: row.disposition ?? null,
+    dispositionQuantity: row.dispositionQuantity ?? null,
     creditAwarded: row.creditAwarded,
     refundAmount: row.refundAmount,
     stripeRefundId: row.stripeRefundId,
@@ -322,7 +348,9 @@ function buildReturnSubmission(rows, { includeEvents = false } = {}) {
     type: primary.type,
     status: deriveSubmissionStatus(items),
     reason: primary.reason,
-    notes: primary.notes,
+    notes: primary.customerNotes ?? primary.notes,
+    customerNotes: primary.customerNotes ?? primary.notes,
+    adminNotes: items.length === 1 ? primary.adminNotes ?? null : null,
     rejectionReason: items.length === 1 ? primary.rejectionReason : null,
     createdAt: primary.createdAt,
     updatedAt: latestFirst[0]?.updatedAt ?? primary.updatedAt,
@@ -511,7 +539,10 @@ export class ReturnsService {
       type: row.type,
       status: deriveSubmissionStatus(submissionItems),
       reason: row.reason,
-      notes: row.notes,
+      notes: row.customerNotes ?? row.notes,
+      customerNotes: row.customerNotes ?? row.notes,
+      adminNotes: row.adminNotes ?? null,
+      inspectionChecklistJson: row.inspectionChecklistJson ?? null,
       createdAt: row.createdAt,
       updatedAt: row.updatedAt,
     };
@@ -790,6 +821,7 @@ export class ReturnsService {
             type: payload.type,
             reason: lineReason,
             notes: lineNotes,
+            customerNotes: lineNotes,
             photoUrlsJson: linePhotos,
             status: initialStatus,
             quantity,
@@ -1311,11 +1343,24 @@ export class ReturnsService {
     }
 
     if (!status) {
-      if (notes === undefined && inspectionChecklist === undefined) return this.getById(returnPublicId);
+      if (
+        notes === undefined &&
+        inspectionChecklist === undefined &&
+        body.adminNotes === undefined
+      ) {
+        return this.getById(returnPublicId);
+      }
       const updatedNotes = await prisma.returnRequest.update({
         where: { id: rr.id },
         data: {
-          ...(notes !== undefined ? { notes: notes ? String(notes).trim() : null } : {}),
+          ...(notes !== undefined
+            ? {
+                adminNotes: notes ? String(notes).trim() : null,
+              }
+            : {}),
+          ...(body.adminNotes !== undefined
+            ? { adminNotes: body.adminNotes ? String(body.adminNotes).trim() : null }
+            : {}),
           ...(inspectionChecklist !== undefined ? { inspectionChecklistJson: inspectionChecklist } : {}),
         },
         include: returnInclude,
@@ -1334,16 +1379,21 @@ export class ReturnsService {
         action: inspectionChecklist !== undefined ? 'RETURN_CHECKLIST' : 'RETURN_NOTES',
         entityType: 'ReturnRequest',
         entityId: returnPublicId,
-        meta: { notes: updatedNotes.notes, inspectionChecklist },
+        meta: { adminNotes: updatedNotes.adminNotes, inspectionChecklist },
       });
       return this.getById(returnPublicId);
     }
 
     if (rr.status === status) {
-      if (notes === undefined) return this.getById(returnPublicId);
+      if (notes === undefined && body.adminNotes === undefined) return this.getById(returnPublicId);
       const updatedNotes = await prisma.returnRequest.update({
         where: { id: rr.id },
-        data: { notes: notes ? String(notes).trim() : null },
+        data: {
+          ...(notes !== undefined ? { adminNotes: notes ? String(notes).trim() : null } : {}),
+          ...(body.adminNotes !== undefined
+            ? { adminNotes: body.adminNotes ? String(body.adminNotes).trim() : null }
+            : {}),
+        },
         include: returnInclude,
       });
       await writeAdminAudit({
@@ -1352,7 +1402,7 @@ export class ReturnsService {
         action: 'RETURN_NOTES',
         entityType: 'ReturnRequest',
         entityId: returnPublicId,
-        meta: { notes: updatedNotes.notes },
+        meta: { adminNotes: updatedNotes.adminNotes },
       });
       return this.getById(returnPublicId);
     }
@@ -1377,7 +1427,10 @@ export class ReturnsService {
     }
 
     const data = { status };
-    if (notes !== undefined) data.notes = notes ? String(notes).trim() : null;
+    if (notes !== undefined) data.adminNotes = notes ? String(notes).trim() : null;
+    if (body.adminNotes !== undefined) {
+      data.adminNotes = body.adminNotes ? String(body.adminNotes).trim() : null;
+    }
     if (rejectionReason !== undefined) {
       data.rejectionReason = rejectionReason ? String(rejectionReason).trim() : null;
     }
@@ -1387,11 +1440,33 @@ export class ReturnsService {
     if (status === 'RECEIVED') data.receivedAt = new Date();
     if (status === 'INSPECTION_APPROVED') data.inspectionApprovedAt = new Date();
 
+    // Quantity outcomes when approving/rejecting a STANDARD line without inspect-line.
+    if (rr.type === 'STANDARD' && status === 'APPROVED' && rr.status === 'UNDER_INSPECTION') {
+      if (data.acceptedQuantity == null && body.acceptedQuantity == null) {
+        data.acceptedQuantity = rr.quantity;
+        data.rejectedQuantity = 0;
+      }
+    }
+    if (rr.type === 'STANDARD' && status === 'REJECTED' && rr.status === 'UNDER_INSPECTION') {
+      if (data.rejectedQuantity == null && body.rejectedQuantity == null) {
+        data.rejectedQuantity = rr.quantity;
+        data.acceptedQuantity = 0;
+      }
+    }
+    if (body.acceptedQuantity !== undefined) {
+      data.acceptedQuantity = Math.max(0, Number(body.acceptedQuantity) || 0);
+    }
+    if (body.rejectedQuantity !== undefined) {
+      data.rejectedQuantity = Math.max(0, Number(body.rejectedQuantity) || 0);
+    }
+
     const actorUserId = await resolveActorUserId(actor);
 
-    // Keep multi-item STANDARD submissions in sync on status transitions.
+    // Package-level transitions stay in sync for STANDARD; approve/reject are per-line.
+    const isLineDecision =
+      rr.type === 'STANDARD' && (status === 'APPROVED' || status === 'REJECTED');
     const siblingIds =
-      rr.type === 'STANDARD'
+      rr.type === 'STANDARD' && !isLineDecision
         ? (
             await prisma.returnRequest.findMany({
               where: { submissionPublicId: rr.submissionPublicId },
@@ -1415,7 +1490,7 @@ export class ReturnsService {
           fromStatus: rr.status,
           toStatus: status,
           actorUserId,
-          note: data.notes || data.rejectionReason || null,
+          note: data.adminNotes || data.rejectionReason || null,
         });
         if (sid === rr.id) primary = row;
       }
@@ -1428,7 +1503,13 @@ export class ReturnsService {
       action: 'RETURN_STATUS',
       entityType: 'ReturnRequest',
       entityId: returnPublicId,
-      meta: { from: rr.status, to: status, notes: data.notes, rejectionReason: data.rejectionReason },
+      meta: {
+        from: rr.status,
+        to: status,
+        adminNotes: data.adminNotes,
+        rejectionReason: data.rejectionReason,
+        lineOnly: isLineDecision,
+      },
     });
 
     if (status === 'RECEIVED') {
@@ -1499,7 +1580,185 @@ export class ReturnsService {
   }
 
   /**
-   * Process Stripe refunds for all APPROVED STANDARD lines in a submission (no auto on approve).
+   * Per-line STANDARD inspection: checklist + accepted/rejected qty + evidence.
+   * Sets line status to APPROVED when any units accepted, else REJECTED.
+   */
+  async inspectLine(returnPublicId, body, actor) {
+    const lineId = body.lineId ? String(body.lineId) : returnPublicId;
+    let rr = await prisma.returnRequest.findUnique({
+      where: { publicId: lineId },
+      include: {
+        user: { select: { email: true, firstName: true, lastName: true } },
+        order: { select: { publicId: true } },
+      },
+    });
+    if (!rr) {
+      // Allow submission id + lineId
+      const submission = await prisma.returnRequest.findFirst({
+        where: {
+          OR: [{ submissionPublicId: returnPublicId }, { returnNumber: returnPublicId }],
+        },
+        select: { submissionPublicId: true },
+      });
+      if (submission && body.lineId) {
+        rr = await prisma.returnRequest.findUnique({
+          where: { publicId: String(body.lineId) },
+          include: {
+            user: { select: { email: true, firstName: true, lastName: true } },
+            order: { select: { publicId: true } },
+          },
+        });
+      }
+    }
+    if (!rr) throw new AppError(404, 'Return line not found');
+    if (rr.type !== 'STANDARD') {
+      throw new AppError(400, 'Line inspection applies to standard returns only');
+    }
+    if (rr.status !== 'UNDER_INSPECTION' && rr.status !== 'RECEIVED' && rr.status !== 'APPROVED' && rr.status !== 'REJECTED') {
+      throw new AppError(400, `Cannot inspect line in status ${rr.status}`);
+    }
+    if (rr.stripeRefundId) {
+      throw new AppError(400, 'Cannot change inspection after refund has been processed');
+    }
+
+    const returnedQty = Math.max(1, Number(rr.quantity || 1));
+    const acceptedQuantity =
+      body.acceptedQuantity !== undefined
+        ? Math.max(0, Number(body.acceptedQuantity) || 0)
+        : rr.acceptedQuantity ?? 0;
+    const rejectedQuantity =
+      body.rejectedQuantity !== undefined
+        ? Math.max(0, Number(body.rejectedQuantity) || 0)
+        : rr.rejectedQuantity ?? 0;
+
+    if (acceptedQuantity + rejectedQuantity !== returnedQty) {
+      throw new AppError(
+        400,
+        `Accepted (${acceptedQuantity}) + rejected (${rejectedQuantity}) must equal returned quantity (${returnedQty})`
+      );
+    }
+
+    const inspectionChecklist =
+      body.inspectionChecklist !== undefined ? body.inspectionChecklist : rr.inspectionChecklistJson;
+    if (!checklistComplete(inspectionChecklist)) {
+      throw new AppError(400, 'Complete the inspection checklist for this line');
+    }
+
+    const rejectionReason =
+      body.rejectionReason !== undefined
+        ? body.rejectionReason
+          ? String(body.rejectionReason).trim()
+          : null
+        : rr.rejectionReason;
+    if (rejectedQuantity > 0 && !rejectionReason) {
+      throw new AppError(400, 'Rejection reason is required when rejecting units');
+    }
+
+    const inspectorPhotoUrls =
+      body.inspectorPhotoUrls !== undefined
+        ? Array.isArray(body.inspectorPhotoUrls)
+          ? body.inspectorPhotoUrls.filter((u) => typeof u === 'string' && u.trim())
+          : null
+        : rr.inspectorPhotoUrlsJson;
+
+    if (rejectedQuantity > 0 && body.complete && (!inspectorPhotoUrls || !inspectorPhotoUrls.length)) {
+      // Evidence recommended but not hard-required for v1 partial rejects without photos on complete
+    }
+
+    const disposition =
+      body.disposition !== undefined
+        ? body.disposition
+          ? String(body.disposition).toUpperCase()
+          : null
+        : rr.disposition;
+    if (disposition && !['RESTOCK', 'DISCARD', 'REFURB'].includes(disposition)) {
+      throw new AppError(400, 'disposition must be RESTOCK, DISCARD, or REFURB');
+    }
+    const dispositionQuantity =
+      body.dispositionQuantity !== undefined
+        ? Math.max(0, Number(body.dispositionQuantity) || 0)
+        : rr.dispositionQuantity;
+
+    const nextStatus = acceptedQuantity > 0 ? 'APPROVED' : 'REJECTED';
+    const shouldTransition =
+      Boolean(body.complete) &&
+      rr.status === 'UNDER_INSPECTION' &&
+      this.validateTransition(rr.status, nextStatus, rr.type);
+
+    const actorUserId = await resolveActorUserId(actor);
+    const data = {
+      acceptedQuantity,
+      rejectedQuantity,
+      inspectionChecklistJson: inspectionChecklist,
+      rejectionReason: rejectedQuantity > 0 ? rejectionReason : null,
+      inspectorPhotoUrlsJson: inspectorPhotoUrls,
+      ...(body.adminNotes !== undefined
+        ? { adminNotes: body.adminNotes ? String(body.adminNotes).trim() : null }
+        : {}),
+      ...(disposition !== undefined ? { disposition } : {}),
+      ...(dispositionQuantity !== undefined ? { dispositionQuantity } : {}),
+      ...(shouldTransition ? { status: nextStatus } : {}),
+    };
+
+    await prisma.$transaction(async (tx) => {
+      await tx.returnRequest.update({
+        where: { id: rr.id },
+        data,
+      });
+      if (shouldTransition) {
+        await appendReturnStatusEvent(tx, {
+          returnRequestId: rr.id,
+          fromStatus: rr.status,
+          toStatus: nextStatus,
+          actorUserId,
+          note:
+            nextStatus === 'REJECTED'
+              ? rejectionReason
+              : `Inspected: accepted ${acceptedQuantity}, rejected ${rejectedQuantity}`,
+        });
+      } else {
+        await appendReturnActionNote(tx, {
+          returnRequestId: rr.id,
+          status: rr.status,
+          actorUserId,
+          note: `Line inspection saved · accepted ${acceptedQuantity} / rejected ${rejectedQuantity}`,
+        });
+      }
+    });
+
+    await writeAdminAudit({
+      actorId: actor?.id,
+      actorEmail: actor?.email,
+      action: shouldTransition ? 'RETURN_LINE_DECIDE' : 'RETURN_LINE_INSPECT',
+      entityType: 'ReturnRequest',
+      entityId: rr.publicId,
+      meta: { acceptedQuantity, rejectedQuantity, nextStatus: shouldTransition ? nextStatus : null },
+    });
+
+    if (shouldTransition && rr.user?.email) {
+      const emailNote =
+        nextStatus === 'REJECTED'
+          ? rejectionReason || 'See return details for more information.'
+          : rejectedQuantity > 0
+            ? `Partial approval: ${acceptedQuantity} unit(s) accepted, ${rejectedQuantity} rejected.`
+            : 'Your return was approved. Your refund will be processed next. Original shipping charges are not refunded.';
+      await emailService.sendTemplate({
+        to: rr.user.email,
+        template: 'return-status',
+        context: {
+          name: [rr.user.firstName, rr.user.lastName].filter(Boolean).join(' '),
+          status: nextStatus,
+          note: emailNote,
+          actionUrl: `${config.frontend.customerUrl}/dashboard/returns/${rr.submissionPublicId || returnPublicId}`,
+        },
+      });
+    }
+
+    return this.getById(rr.submissionPublicId || returnPublicId);
+  }
+
+  /**
+   * Process Stripe refunds for APPROVED STANDARD lines with acceptedQuantity > 0.
    */
   async processRefund(returnPublicId, actor) {
     const detail = await this.getById(returnPublicId);
@@ -1513,20 +1772,43 @@ export class ReturnsService {
             id: detail.primaryItemId || detail.id,
             status: detail.status,
             stripeRefundId: detail.stripeRefundId,
+            acceptedQuantity: detail.acceptedQuantity,
           },
         ];
 
-    const pending = items.filter((item) => item.status === 'APPROVED' && !item.stripeRefundId);
+    const pending = items.filter((item) => {
+      const accepted =
+        item.acceptedQuantity != null
+          ? Number(item.acceptedQuantity)
+          : item.status === 'APPROVED'
+            ? Math.max(1, Number(item.quantity ?? 1))
+            : 0;
+      return item.status === 'APPROVED' && accepted > 0 && !item.stripeRefundId;
+    });
     if (!pending.length) {
-      const alreadyDone = items.every((item) => item.stripeRefundId || item.refundAmount != null);
+      const alreadyDone = items.every(
+        (item) =>
+          item.stripeRefundId ||
+          item.refundAmount != null ||
+          item.status === 'REJECTED' ||
+          Number(item.acceptedQuantity ?? 0) === 0
+      );
       if (alreadyDone) return this.getById(returnPublicId);
-      throw new AppError(400, 'Return must be approved before processing a refund');
+      throw new AppError(400, 'Return must be approved with accepted units before processing a refund');
     }
 
     for (const item of pending) {
       const row = await prisma.returnRequest.findUnique({
         where: { publicId: item.id },
-        select: { id: true, publicId: true, type: true, stripeRefundId: true, status: true },
+        select: {
+          id: true,
+          publicId: true,
+          type: true,
+          stripeRefundId: true,
+          status: true,
+          acceptedQuantity: true,
+          quantity: true,
+        },
       });
       if (!row) continue;
       try {
@@ -1560,24 +1842,43 @@ export class ReturnsService {
       include: { orderItem: true },
       orderBy: { createdAt: 'asc' },
     });
-    if (!siblings.every((s) => s.status === 'APPROVED')) {
-      throw new AppError(400, 'Approve the return before restocking inventory');
+    const restockable = siblings.filter((s) => {
+      const accepted =
+        s.acceptedQuantity != null
+          ? Number(s.acceptedQuantity)
+          : s.status === 'APPROVED'
+            ? Math.max(1, Number(s.quantity || 1))
+            : 0;
+      return (s.status === 'APPROVED' || accepted > 0) && accepted > 0;
+    });
+    if (!restockable.length) {
+      throw new AppError(400, 'Approve accepted units before restocking inventory');
+    }
+    if (!siblings.every((s) => s.status === 'APPROVED' || s.status === 'REJECTED')) {
+      throw new AppError(400, 'Finish inspection on all lines before restocking');
     }
 
     const selections = Array.isArray(body?.items) ? body.items : null;
     const actorUserId = await resolveActorUserId(actor);
 
     await prisma.$transaction(async (tx) => {
-      for (const sibling of siblings) {
+      for (const sibling of restockable) {
         if (sibling.restockedAt) continue;
-        let qty = Math.max(1, Number(sibling.quantity || 1));
+        const maxQty =
+          sibling.acceptedQuantity != null
+            ? Math.max(0, Number(sibling.acceptedQuantity))
+            : Math.max(1, Number(sibling.quantity || 1));
+        if (maxQty <= 0) continue;
+        let qty = maxQty;
         if (selections) {
           const sel = selections.find(
             (s) => s.returnItemId === sibling.publicId || s.id === sibling.publicId
           );
           if (!sel) continue;
-          qty = Math.min(qty, Math.max(1, Number(sel.quantity ?? qty)));
+          qty = Math.min(maxQty, Math.max(1, Number(sel.quantity ?? maxQty)));
         }
+        // Disposition DISCARD skips restock unless explicitly selected
+        if (!selections && sibling.disposition === 'DISCARD') continue;
         if (!sibling.orderItem) continue;
         const product = await tx.product.findUnique({
           where: { id: sibling.orderItem.productId },
@@ -1603,7 +1904,12 @@ export class ReturnsService {
         );
         await tx.returnRequest.update({
           where: { id: sibling.id },
-          data: { restockedAt: new Date(), restockedQuantity: qty },
+          data: {
+            restockedAt: new Date(),
+            restockedQuantity: qty,
+            disposition: sibling.disposition || 'RESTOCK',
+            dispositionQuantity: qty,
+          },
         });
         await appendReturnActionNote(tx, {
           returnRequestId: sibling.id,

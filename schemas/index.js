@@ -633,7 +633,10 @@ export const RETURN_STATUS_VALUES = [
 export const returnStatusUpdateSchema = z.object({
   status: z.enum(RETURN_STATUS_VALUES).optional(),
   notes: z.string().max(2000).optional().nullable(),
+  adminNotes: z.string().max(2000).optional().nullable(),
   rejectionReason: z.string().max(500).optional().nullable(),
+  acceptedQuantity: z.number().int().min(0).optional(),
+  rejectedQuantity: z.number().int().min(0).optional(),
   inspectionChecklist: z
     .object({
       correctProduct: z.boolean().optional(),
@@ -649,6 +652,27 @@ export const returnStatusUpdateSchema = z.object({
   manualCarrier: z.string().max(50).optional().nullable(),
   manualTrackingNumber: z.string().max(120).optional().nullable(),
   manualShippedAt: z.string().datetime().optional().nullable(),
+});
+
+export const returnInspectLineSchema = z.object({
+  lineId: z.string().min(1).optional(),
+  acceptedQuantity: z.number().int().min(0),
+  rejectedQuantity: z.number().int().min(0),
+  inspectionChecklist: z.object({
+    correctProduct: z.boolean().optional(),
+    unused: z.boolean().optional(),
+    tagsAttached: z.boolean().optional(),
+    packagingAvailable: z.boolean().optional(),
+    noStains: z.boolean().optional(),
+    noDamage: z.boolean().optional(),
+    noMissingAccessories: z.boolean().optional(),
+  }),
+  rejectionReason: z.string().max(500).optional().nullable(),
+  inspectorPhotoUrls: z.array(z.string().min(1).max(500)).max(12).optional().nullable(),
+  adminNotes: z.string().max(2000).optional().nullable(),
+  disposition: z.enum(['RESTOCK', 'DISCARD', 'REFURB']).optional().nullable(),
+  dispositionQuantity: z.number().int().min(0).optional().nullable(),
+  complete: z.boolean().optional(),
 });
 
 export const guestReturnTrackSchema = z.object({

@@ -120,6 +120,18 @@ router.post('/upload-photo', authenticate, ...requireCustomerFullAccount, (req, 
     returnsController.uploadPhoto(req, res);
   });
 });
+router.post(
+  '/admin/upload-photo',
+  authenticate,
+  authorize('ADMIN', 'ADMIN_TEAM'),
+  returnsOrInspection,
+  (req, res, next) => {
+    returnPhotoUpload.single('image')(req, res, (err) => {
+      if (err) return next(err);
+      returnsController.uploadPhoto(req, res);
+    });
+  }
+);
 router.get('/:id', authenticate, ...requireCustomerFullAccount, (req, res, next) => returnsController.getMineById(req, res).catch(next));
 router.post(
   '/:id/usps-shipment',
@@ -140,6 +152,13 @@ router.patch(
   authorize('ADMIN', 'ADMIN_TEAM'),
   returnsOrInspection,
   (req, res, next) => returnsController.updateStatus(req, res).catch(next)
+);
+router.patch(
+  '/:id/inspect-line',
+  authenticate,
+  authorize('ADMIN', 'ADMIN_TEAM'),
+  returnsOrInspection,
+  (req, res, next) => returnsController.inspectLine(req, res).catch(next)
 );
 router.post(
   '/:id/refund',

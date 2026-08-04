@@ -13,7 +13,8 @@ async function resolveActorUserId(actor) {
 
 /** Product-value refund for a standard return line (excludes shipping). */
 export function computeStandardReturnRefundAmount(orderItem, quantity = 1) {
-  const qty = Math.max(1, Number(quantity || 1));
+  const qty = Math.max(0, Number(quantity || 0));
+  if (qty <= 0) return 0;
   const unit = Number(orderItem?.price ?? 0);
   return Math.round(unit * qty * 100) / 100;
 }
@@ -81,7 +82,10 @@ export async function processStandardReturnRefund(returnRequest, actor) {
     throw new AppError(400, 'Order is not in a refundable payment state');
   }
 
-  const refundAmountUsd = computeStandardReturnRefundAmount(full.orderItem, full.quantity);
+  const refundAmountUsd = computeStandardReturnRefundAmount(
+    full.orderItem,
+    full.acceptedQuantity != null ? full.acceptedQuantity : full.quantity
+  );
   if (refundAmountUsd <= 0) {
     throw new AppError(400, 'Refund amount must be greater than zero');
   }

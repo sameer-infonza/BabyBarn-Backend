@@ -2,6 +2,7 @@ import { validate } from '../utils/validation.js';
 import {
   returnRequestCreateSchema,
   returnStatusUpdateSchema,
+  returnInspectLineSchema,
   returnEligibilityReviewSchema,
   refurbInspectionCreateSchema,
   returnLabelGenerateSchema,
@@ -60,11 +61,26 @@ export class ReturnsController {
 
   async updateStatus(req, res) {
     const body = await validate(returnStatusUpdateSchema, req.body);
-    if (!body.status && body.manualCarrier === undefined && body.manualTrackingNumber === undefined && body.manualShippedAt === undefined && body.notes === undefined && body.inspectionChecklist === undefined) {
+    if (
+      !body.status &&
+      body.manualCarrier === undefined &&
+      body.manualTrackingNumber === undefined &&
+      body.manualShippedAt === undefined &&
+      body.notes === undefined &&
+      body.adminNotes === undefined &&
+      body.inspectionChecklist === undefined
+    ) {
       throw new AppError(400, 'No updates provided');
     }
     const actor = { id: req.user?.id, email: req.user?.email };
     const data = await returnsService.updateStatus(req.params.id, body, actor);
+    res.status(200).json({ success: true, data: toPublicJson(data) });
+  }
+
+  async inspectLine(req, res) {
+    const body = await validate(returnInspectLineSchema, req.body ?? {});
+    const actor = { id: req.user?.id, email: req.user?.email };
+    const data = await returnsService.inspectLine(req.params.id, body, actor);
     res.status(200).json({ success: true, data: toPublicJson(data) });
   }
 

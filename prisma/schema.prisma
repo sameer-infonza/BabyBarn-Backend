@@ -686,10 +686,24 @@ model ReturnRequest {
   type ReturnType @default(STANDARD)
   status ReturnStatus @default(REQUESTED)
   quantity Int @default(1)
+  /// Units approved for refund/restock after inspection (may be partial).
+  acceptedQuantity Int?
+  /// Units rejected after inspection (may be partial).
+  rejectedQuantity Int?
   reason String?
+  /// Legacy shared notes field; prefer customerNotes / adminNotes.
   notes String?
+  /// Customer-facing comments submitted with the return line.
+  customerNotes String?
+  /// Internal warehouse/admin notes (not shown to customer).
+  adminNotes String?
   rejectionReason String?
   photoUrlsJson Json?
+  /// Inspector evidence photos when units are rejected (shown to customer).
+  inspectorPhotoUrlsJson Json?
+  /// RESTOCK | DISCARD | REFURB after accept.
+  disposition String?
+  dispositionQuantity Int?
   creditAwarded Float @default(0)
   refundAmount Float?
   stripeRefundId String?
