@@ -543,6 +543,7 @@ export class OrderService {
               ...orderItemCustomerInclude,
               returnRequests: {
                 select: {
+                  id: true,
                   publicId: true,
                   submissionPublicId: true,
                   status: true,
@@ -637,6 +638,7 @@ export class OrderService {
               ...orderItemCustomerInclude,
               returnRequests: {
                 select: {
+                  id: true,
                   publicId: true,
                   submissionPublicId: true,
                   status: true,

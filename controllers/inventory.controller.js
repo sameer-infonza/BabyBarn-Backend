@@ -90,6 +90,11 @@ export class InventoryController {
     const data = await inventoryService.getProductTimeline(req.params.id);
     res.status(200).json({ success: true, data: toPublicJson(data) });
   }
+
+  async productOverview(req, res) {
+    const data = await inventoryService.getProductOverview(req.params.id);
+    res.status(200).json({ success: true, data: toPublicJson(data) });
+  }
 }
 
 export const inventoryController = new InventoryController();

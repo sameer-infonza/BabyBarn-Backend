@@ -1,7 +1,7 @@
 import { Router } from 'express';
 import { inventoryController } from '../controllers/inventory.controller.js';
 import { authenticate, authorize } from '../middleware/auth.js';
-import { requireConsoleModule } from '../middleware/admin-console.js';
+import { requireConsoleModule, requireConsoleModuleAny } from '../middleware/admin-console.js';
 
 const router = Router();
 
@@ -35,6 +35,14 @@ router.post(
   authorize('ADMIN', 'ADMIN_TEAM'),
   requireConsoleModule('inventory'),
   (req, res, next) => inventoryController.adjust(req, res).catch(next)
+);
+
+router.get(
+  '/products/:id/overview',
+  authenticate,
+  authorize('ADMIN', 'ADMIN_TEAM'),
+  requireConsoleModuleAny(['inventory', 'returns']),
+  (req, res, next) => inventoryController.productOverview(req, res).catch(next)
 );
 
 router.get(

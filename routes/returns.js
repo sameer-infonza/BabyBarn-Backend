@@ -37,6 +37,40 @@ router.get(
   (req, res, next) => returnsController.listAll(req, res).catch(next)
 );
 router.get(
+  '/admin/package-requests',
+  authenticate,
+  authorize('ADMIN', 'ADMIN_TEAM'),
+  returnsOrInspection,
+  (req, res, next) => returnsController.listPackageRequestsAdmin(req, res).catch(next)
+);
+router.patch(
+  '/admin/package-requests/:id',
+  authenticate,
+  authorize('ADMIN', 'ADMIN_TEAM'),
+  returnsOrInspection,
+  (req, res, next) => returnsController.updatePackageRequest(req, res).catch(next)
+);
+router.post(
+  '/admin/bulk-received',
+  authenticate,
+  authorize('ADMIN', 'ADMIN_TEAM'),
+  returnsOrInspection,
+  (req, res, next) => returnsController.bulkMarkReceived(req, res).catch(next)
+);
+router.post(
+  '/admin/upload-photo',
+  authenticate,
+  authorize('ADMIN', 'ADMIN_TEAM'),
+  returnsOrInspection,
+  (req, res, next) => {
+    returnPhotoUpload.single('image')(req, res, (err) => {
+      if (err) return next(err);
+      returnsController.uploadPhoto(req, res);
+    });
+  }
+);
+// Param route must stay after static /admin/* paths above.
+router.get(
   '/admin/:id',
   authenticate,
   authorize('ADMIN', 'ADMIN_TEAM'),
@@ -72,13 +106,6 @@ router.post(
   (req, res, next) => returnsController.createInspection(req, res).catch(next)
 );
 router.post(
-  '/admin/bulk-received',
-  authenticate,
-  authorize('ADMIN', 'ADMIN_TEAM'),
-  returnsOrInspection,
-  (req, res, next) => returnsController.bulkMarkReceived(req, res).catch(next)
-);
-router.post(
   '/:id/keep-waiting',
   authenticate,
   authorize('ADMIN', 'ADMIN_TEAM'),
@@ -99,20 +126,6 @@ router.get(
   ...requireCustomerFullAccount,
   (req, res, next) => returnsController.listPackageRequestsMine(req, res).catch(next)
 );
-router.get(
-  '/admin/package-requests',
-  authenticate,
-  authorize('ADMIN', 'ADMIN_TEAM'),
-  returnsOrInspection,
-  (req, res, next) => returnsController.listPackageRequestsAdmin(req, res).catch(next)
-);
-router.patch(
-  '/admin/package-requests/:id',
-  authenticate,
-  authorize('ADMIN', 'ADMIN_TEAM'),
-  returnsOrInspection,
-  (req, res, next) => returnsController.updatePackageRequest(req, res).catch(next)
-);
 router.get('/', authenticate, ...requireCustomerFullAccount, (req, res, next) => returnsController.listMine(req, res).catch(next));
 router.post('/upload-photo', authenticate, ...requireCustomerFullAccount, (req, res, next) => {
   returnPhotoUpload.single('image')(req, res, (err) => {
@@ -120,18 +133,6 @@ router.post('/upload-photo', authenticate, ...requireCustomerFullAccount, (req, 
     returnsController.uploadPhoto(req, res);
   });
 });
-router.post(
-  '/admin/upload-photo',
-  authenticate,
-  authorize('ADMIN', 'ADMIN_TEAM'),
-  returnsOrInspection,
-  (req, res, next) => {
-    returnPhotoUpload.single('image')(req, res, (err) => {
-      if (err) return next(err);
-      returnsController.uploadPhoto(req, res);
-    });
-  }
-);
 router.get('/:id', authenticate, ...requireCustomerFullAccount, (req, res, next) => returnsController.getMineById(req, res).catch(next));
 router.post(
   '/:id/usps-shipment',

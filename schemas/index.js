@@ -658,18 +658,22 @@ export const returnInspectLineSchema = z.object({
   lineId: z.string().min(1).optional(),
   acceptedQuantity: z.number().int().min(0),
   rejectedQuantity: z.number().int().min(0),
-  inspectionChecklist: z.object({
-    correctProduct: z.boolean().optional(),
-    unused: z.boolean().optional(),
-    tagsAttached: z.boolean().optional(),
-    packagingAvailable: z.boolean().optional(),
-    noStains: z.boolean().optional(),
-    noDamage: z.boolean().optional(),
-    noMissingAccessories: z.boolean().optional(),
-  }),
+  inspectionChecklist: z
+    .object({
+      correctProduct: z.boolean().optional(),
+      unused: z.boolean().optional(),
+      tagsAttached: z.boolean().optional(),
+      packagingAvailable: z.boolean().optional(),
+      noStains: z.boolean().optional(),
+      noDamage: z.boolean().optional(),
+      noMissingAccessories: z.boolean().optional(),
+    })
+    .optional()
+    .nullable(),
   rejectionReason: z.string().max(500).optional().nullable(),
   inspectorPhotoUrls: z.array(z.string().min(1).max(500)).max(12).optional().nullable(),
   adminNotes: z.string().max(2000).optional().nullable(),
+  notes: z.string().max(2000).optional().nullable(),
   disposition: z.enum(['RESTOCK', 'DISCARD', 'REFURB']).optional().nullable(),
   dispositionQuantity: z.number().int().min(0).optional().nullable(),
   complete: z.boolean().optional(),
@@ -733,6 +737,8 @@ export const returnCancelSchema = z.object({
 export const returnEligibilityReviewSchema = z.object({
   decision: z.enum(['approve', 'reject']),
   notes: z.string().max(2000).optional().nullable(),
+  /** Optional subset of submission line publicIds; default = all pending eligibility lines */
+  lineIds: z.array(z.string().min(1)).optional(),
 });
 
 export const refurbInspectionCreateSchema = z.object({

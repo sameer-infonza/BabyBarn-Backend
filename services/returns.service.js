@@ -5,6 +5,7 @@ import { writeAdminAudit } from './audit.service.js';
 import { emailService } from './email.service.js';
 import { getBusinessSettings } from './admin.service.js';
 import { restockOrderLineStock } from './inventory-reservation.js';
+import { writeInventoryLedger } from './inventory-ledger.service.js';
 import { refurbishmentService } from './refurbishment.service.js';
 import { markUnitsReturnedForReturn } from './product-unit.service.js';
 import { shippingService } from './shipping.service.js';
@@ -150,6 +151,34 @@ function returnSubmissionKey(row) {
   return row?.submissionPublicId || row?.submissionId || row?.publicId || row?.id;
 }
 
+/**
+ * Resolve a return by line publicId, shared submissionPublicId, or SRT-/RRT- returnNumber.
+ * Admin list/detail URLs use submission ids; some actions still pass a line publicId.
+ */
+async function resolveReturnRequestRow(returnPublicId, opts = {}) {
+  const include = Object.prototype.hasOwnProperty.call(opts, 'include') ? opts.include : returnInclude;
+  const raw = String(returnPublicId || '').trim();
+  if (!raw) return null;
+
+  const findArgs = include === undefined ? {} : { include };
+
+  let row = await prisma.returnRequest.findUnique({
+    where: { publicId: raw },
+    ...findArgs,
+  });
+  if (row) return row;
+
+  const upper = raw.toUpperCase();
+  const or = [{ submissionPublicId: raw }, { returnNumber: raw }];
+  if (upper !== raw) or.push({ returnNumber: upper });
+
+  return prisma.returnRequest.findFirst({
+    where: { OR: or },
+    ...findArgs,
+    orderBy: { createdAt: 'asc' },
+  });
+}
+
 /** Units eligible for refund/restock preview after inspection outcomes. */
 function refundableQuantityForRow(row) {
   if (row?.acceptedQuantity != null) return Math.max(0, Number(row.acceptedQuantity));
@@ -264,15 +293,36 @@ function computeRefurbCreditPreview(row) {
   if (row?.type !== 'REFURBISHMENT' || !row.orderItem) return null;
   if (row.orderItem.product?.productType === 'REFURBISHED') return 0;
   const unit = Number(row.orderItem.memberPriceSnapshot ?? row.orderItem.price ?? 0);
-  const qty = Math.max(1, Number(row.quantity ?? 1));
+  const qty =
+    row.acceptedQuantity != null
+      ? Math.max(0, Number(row.acceptedQuantity))
+      : Math.max(1, Number(row.quantity ?? 1));
   return Math.round(computeRefurbStoreCredit(unit) * qty * 100) / 100;
 }
 
-/** Admin refurb queue: hide APPROVED until customer submits USPS tracking or requests envelope. */
+/** Units available to inspect on a refurb line (received if tracked, else requested qty). */
+function refurbInspectableQty(row) {
+  const received = Math.max(0, Number(row.receivedQuantity ?? 0));
+  if (received > 0) return received;
+  return Math.max(1, Number(row.quantity ?? 1));
+}
+
+/** Admin refurb queue: keep returns visible from eligibility through inspection. */
 function isRefurbVisibleToAdmin(row, openPackageOrderIds = new Set()) {
   if (row.type !== 'REFURBISHMENT') return true;
-  if (row.status === 'ELIGIBILITY_REVIEW') return true;
-  if (['IN_TRANSIT', 'RECEIVED', 'UNDER_INSPECTION', 'INSPECTION_APPROVED', 'INSPECTION_REJECTED'].includes(row.status)) {
+  // Always show while awaiting customer ship (even before tracking) and through warehouse stages.
+  if (
+    [
+      'ELIGIBILITY_REVIEW',
+      'APPROVED',
+      'LABEL_GENERATED',
+      'IN_TRANSIT',
+      'RECEIVED',
+      'UNDER_INSPECTION',
+      'INSPECTION_APPROVED',
+      'INSPECTION_REJECTED',
+    ].includes(row.status)
+  ) {
     return true;
   }
   if (row.customerShippingSubmittedAt || row.manualTrackingNumber) return true;
@@ -513,22 +563,11 @@ export class ReturnsService {
   }
 
   async getById(returnPublicId) {
-    let row = await prisma.returnRequest.findUnique({
-      where: { publicId: returnPublicId },
-      include: returnInclude,
-    });
-    if (!row) {
-      row = await prisma.returnRequest.findFirst({
-        where: {
-          OR: [{ submissionPublicId: returnPublicId }, { returnNumber: returnPublicId }],
-        },
-        include: returnInclude,
-        orderBy: { createdAt: 'asc' },
-      });
-    }
-    if (!row) throw new AppError(404, 'Return request not found');
+    const row = await resolveReturnRequestRow(returnPublicId);
+    if (!row) throw new AppError(404, 'Return request not found', 'RETURN_NOT_FOUND');
+    const submissionKey = returnSubmissionKey(row);
     const submissionItems = await prisma.returnRequest.findMany({
-      where: { submissionPublicId: returnSubmissionKey(row) },
+      where: { submissionPublicId: submissionKey },
       include: returnInclude,
       orderBy: { createdAt: 'asc' },
     });
@@ -545,7 +584,7 @@ export class ReturnsService {
     }));
     const submission = buildReturnSubmission(rowsWithPreview, { includeEvents: false });
     const packageRequest = await this.getPackageRequestForSubmission(submissionItems);
-    const receivePackages = await this.listReceivePackages(returnSubmissionKey(row));
+    const receivePackages = await this.listReceivePackages(submissionKey);
     const receivedQuantityTotal = submissionItems.reduce(
       (sum, item) => sum + Math.max(0, Number(item.receivedQuantity ?? 0)),
       0
@@ -555,13 +594,16 @@ export class ReturnsService {
       const received = Math.max(0, Number(item.receivedQuantity ?? 0));
       return sum + Math.max(0, requested - received);
     }, 0);
+    const primary = submissionItems[0] || row;
   return {
       ...submission,
-      id: row.publicId,
-      primaryItemId: row.publicId,
+      // Keep list/detail URL stable on the shared submission id (not a single line publicId).
+      id: submissionKey,
+      primaryItemId: primary.publicId,
       statusEvents,
       returnNumber: submissionReturnNumber,
-      submissionId: returnSubmissionKey(row),
+      submissionId: submissionKey,
+      submissionPublicId: submissionKey,
       refundPreview: submissionRefundPreview > 0 ? submissionRefundPreview : submission?.refundPreview ?? null,
       submissionItems: rowsWithPreview.map((item) =>
         buildSubmissionChildItem(item)
@@ -579,21 +621,22 @@ export class ReturnsService {
         submissionItems.find((i) => i.refundPaymentMethodLabel)?.refundPaymentMethodLabel ||
         row.refundPaymentMethodLabel,
       packageRequest,
-      eligibilityQuestionnaire: row.eligibilityQuestionnaire,
-      inspectionRecords: row.inspectionRecords,
-      refurbishmentJob: row.refurbishmentJob,
-      user: row.user,
-      order: row.order,
-      orderItem: submissionItems.length === 1 ? row.orderItem : null,
-      type: row.type,
+      eligibilityQuestionnaire:
+        submissionItems.length === 1 ? primary.eligibilityQuestionnaire : row.eligibilityQuestionnaire,
+      inspectionRecords: submissionItems.length === 1 ? primary.inspectionRecords : row.inspectionRecords,
+      refurbishmentJob: submissionItems.length === 1 ? primary.refurbishmentJob : row.refurbishmentJob,
+      user: primary.user || row.user,
+      order: primary.order || row.order,
+      orderItem: submissionItems.length === 1 ? primary.orderItem : null,
+      type: primary.type || row.type,
       status: deriveSubmissionStatus(submissionItems),
-      reason: row.reason,
-      notes: row.customerNotes ?? row.notes,
-      customerNotes: row.customerNotes ?? row.notes,
-      adminNotes: row.adminNotes ?? null,
-      inspectionChecklistJson: row.inspectionChecklistJson ?? null,
-      createdAt: row.createdAt,
-      updatedAt: row.updatedAt,
+      reason: primary.reason ?? row.reason,
+      notes: primary.customerNotes ?? primary.notes ?? row.customerNotes ?? row.notes,
+      customerNotes: primary.customerNotes ?? primary.notes ?? row.customerNotes ?? row.notes,
+      adminNotes: submissionItems.length === 1 ? primary.adminNotes ?? null : null,
+      inspectionChecklistJson: primary.inspectionChecklistJson ?? row.inspectionChecklistJson ?? null,
+      createdAt: primary.createdAt || row.createdAt,
+      updatedAt: primary.updatedAt || row.updatedAt,
     };
   }
 
@@ -779,6 +822,27 @@ export class ReturnsService {
       pendingIds.push(publicId);
     }
 
+    // Do not silently create a subset when the customer selected multiple lines.
+    if (insufficient.length > 0 && pendingIds.length > 0) {
+      throw new AppError(
+        400,
+        'One or more selected items cannot be returned (already returned or open return). Remove them and try again.',
+        'RETURN_PARTIAL_SELECTION',
+        {
+          orderId: order.publicId,
+          failedOrderItemIds: insufficient.map((e) => e.orderItemId),
+          existingReturns: insufficient.flatMap((entry) =>
+            entry.openReturns.map((r) => ({
+              returnId: r.returnNumber || r.submissionPublicId || r.publicId,
+              status: r.status,
+              type: r.type,
+              orderItemId: r.orderItem?.publicId,
+            }))
+          ),
+        }
+      );
+    }
+
     if (pendingIds.length === 0) {
       const flatExisting = insufficient.flatMap((entry) => entry.openReturns);
       const summary = flatExisting
@@ -877,8 +941,14 @@ export class ReturnsService {
           },
         });
 
-        // One human-readable returnNumber per submission (first line only).
+        // First line: pin submissionPublicId to this line's publicId so list/detail
+        // URLs match a real ReturnRequest publicId (Prisma default cuid differs).
         if (!submissionPublicId) {
+          submissionPublicId = rr.publicId;
+          await tx.returnRequest.update({
+            where: { id: rr.id },
+            data: { submissionPublicId },
+          });
           await assignReturnNumber(tx, rr.id, payload.type);
         }
 
@@ -907,7 +977,6 @@ export class ReturnsService {
         });
       });
 
-      if (!submissionPublicId) submissionPublicId = row.submissionPublicId || row.publicId;
       created.push(row);
     }
 
@@ -982,47 +1051,88 @@ export class ReturnsService {
     });
   }
 
-  async reviewEligibility(returnPublicId, { decision, notes }, actor) {
-    const rr = await prisma.returnRequest.findUnique({
+  async reviewEligibility(returnPublicId, { decision, notes, lineIds }, actor) {
+    let rr = await prisma.returnRequest.findUnique({
       where: { publicId: returnPublicId },
-      include: { eligibilityQuestionnaire: true, user: { select: { email: true, firstName: true, lastName: true } } },
+      include: {
+        eligibilityQuestionnaire: true,
+        user: { select: { email: true, firstName: true, lastName: true } },
+      },
     });
+    if (!rr) {
+      rr = await prisma.returnRequest.findFirst({
+        where: {
+          OR: [{ submissionPublicId: returnPublicId }, { returnNumber: returnPublicId }],
+        },
+        include: {
+          eligibilityQuestionnaire: true,
+          user: { select: { email: true, firstName: true, lastName: true } },
+        },
+        orderBy: { createdAt: 'asc' },
+      });
+    }
     if (!rr) throw new AppError(404, 'Return request not found');
     if (rr.type !== 'REFURBISHMENT') throw new AppError(400, 'Not a refurbishment return');
-    if (rr.status !== 'ELIGIBILITY_REVIEW') {
+
+    const submissionKey = returnSubmissionKey(rr);
+    const siblings = await prisma.returnRequest.findMany({
+      where: { submissionPublicId: submissionKey, type: 'REFURBISHMENT' },
+      include: {
+        eligibilityQuestionnaire: true,
+        user: { select: { email: true, firstName: true, lastName: true } },
+        orderItem: { include: { product: { select: { name: true } } } },
+      },
+      orderBy: { createdAt: 'asc' },
+    });
+
+    const requestedLineIds = Array.isArray(lineIds)
+      ? lineIds.map((id) => String(id).trim()).filter(Boolean)
+      : null;
+
+    let targets = siblings.filter((s) => s.status === 'ELIGIBILITY_REVIEW');
+    if (requestedLineIds?.length) {
+      targets = targets.filter((s) => requestedLineIds.includes(s.publicId));
+    }
+    // If caller passed a specific line that is still pending, prefer that when no lineIds list.
+    if (!requestedLineIds?.length && rr.status === 'ELIGIBILITY_REVIEW' && targets.length > 1) {
+      // Default admin CTA: apply to all pending eligibility lines in the submission.
+    }
+
+    if (!targets.length) {
       throw new AppError(400, 'Return is not awaiting eligibility review');
     }
 
     const nextStatus = decision === 'approve' ? 'APPROVED' : 'ELIGIBILITY_REJECTED';
     const reviewerId = await resolveActorUserId(actor);
+    const noteText = notes ? String(notes).trim() : `Eligibility ${decision}`;
 
-    const updated = await prisma.$transaction(async (tx) => {
-      if (rr.eligibilityQuestionnaire) {
-        await tx.returnEligibilityQuestionnaire.update({
-          where: { id: rr.eligibilityQuestionnaire.id },
+    await prisma.$transaction(async (tx) => {
+      for (const line of targets) {
+        if (line.eligibilityQuestionnaire) {
+          await tx.returnEligibilityQuestionnaire.update({
+            where: { id: line.eligibilityQuestionnaire.id },
+            data: {
+              reviewedByUserId: reviewerId,
+              reviewedAt: new Date(),
+              reviewNotes: notes ? String(notes).trim() : null,
+            },
+          });
+        }
+        await tx.returnRequest.update({
+          where: { id: line.id },
           data: {
-            reviewedByUserId: reviewerId,
-            reviewedAt: new Date(),
-            reviewNotes: notes ? String(notes).trim() : null,
+            status: nextStatus,
+            notes: notes !== undefined ? (notes ? String(notes).trim() : null) : undefined,
           },
         });
+        await appendReturnStatusEvent(tx, {
+          returnRequestId: line.id,
+          fromStatus: line.status,
+          toStatus: nextStatus,
+          actorUserId: reviewerId,
+          note: noteText,
+        });
       }
-      const row = await tx.returnRequest.update({
-        where: { id: rr.id },
-        data: {
-          status: nextStatus,
-          notes: notes !== undefined ? (notes ? String(notes).trim() : null) : undefined,
-        },
-        include: returnInclude,
-      });
-      await appendReturnStatusEvent(tx, {
-        returnRequestId: rr.id,
-        fromStatus: rr.status,
-        toStatus: nextStatus,
-        actorUserId: reviewerId,
-        note: notes ? String(notes).trim() : `Eligibility ${decision}`,
-      });
-      return row;
     });
 
     await writeAdminAudit({
@@ -1031,31 +1141,41 @@ export class ReturnsService {
       action: 'RETURN_ELIGIBILITY_REVIEW',
       entityType: 'ReturnRequest',
       entityId: returnPublicId,
-      meta: { decision, to: nextStatus },
-    });
-
-    await emailService.sendTemplate({
-      to: rr.user.email,
-      template: 'return-status',
-      context: {
-        name: [rr.user.firstName, rr.user.lastName].filter(Boolean).join(' '),
-        status: nextStatus,
-        actionUrl: `${config.frontend.customerUrl}/dashboard/returns/${rr.submissionPublicId || returnPublicId}`,
+      meta: {
+        decision,
+        to: nextStatus,
+        lineIds: targets.map((t) => t.publicId),
+        submissionPublicId: submissionKey,
       },
     });
 
-    return updated;
+    if (rr.user?.email) {
+      await emailService.sendTemplate({
+        to: rr.user.email,
+        template: 'return-status',
+        context: {
+          name: [rr.user.firstName, rr.user.lastName].filter(Boolean).join(' '),
+          status: nextStatus,
+          note:
+            targets.length > 1
+              ? `${targets.length} items: eligibility ${decision}`
+              : undefined,
+          actionUrl: `${config.frontend.customerUrl}/dashboard/returns/${submissionKey}`,
+        },
+      });
+    }
+
+    return this.getById(submissionKey);
   }
 
   async generateReturnLabel(returnPublicId, payload, actor) {
-    const rr = await prisma.returnRequest.findUnique({
-      where: { publicId: returnPublicId },
+    const rr = await resolveReturnRequestRow(returnPublicId, {
       include: {
         order: { select: { id: true, shippingAddressJson: true, returnEnvelopeUsed: true } },
         user: { select: { email: true, firstName: true, lastName: true } },
       },
     });
-    if (!rr) throw new AppError(404, 'Return request not found');
+    if (!rr) throw new AppError(404, 'Return request not found', 'RETURN_NOT_FOUND');
     if (rr.type === 'REFURBISHMENT') {
       throw new AppError(
         400,
@@ -1284,6 +1404,9 @@ export class ReturnsService {
 
   async awardRefurbStoreCredit(rr) {
     try {
+      if (Number(rr.creditAwarded || 0) > 0) {
+        return Number(rr.creditAwarded);
+      }
       const wallet = await prisma.storeCreditWallet.upsert({
         where: { userId: rr.userId },
         update: {},
@@ -1307,8 +1430,22 @@ export class ReturnsService {
         const settings = await getBusinessSettings();
         itemMemberPrice = Number(settings.accessMembershipPriceUsd ?? 50);
       }
+      const acceptedQty = Math.max(
+        0,
+        Number(
+          rr.acceptedQuantity != null ? rr.acceptedQuantity : Math.max(1, Number(rr.quantity ?? 1))
+        )
+      );
       // Refurbished items are returnable via the used path but earn no store credit.
-      const amount = isRefurbishedItem ? 0 : computeRefurbStoreCredit(itemMemberPrice);
+      const unitCredit = isRefurbishedItem ? 0 : computeRefurbStoreCredit(itemMemberPrice);
+      const amount = Math.round(unitCredit * acceptedQty * 100) / 100;
+      if (amount <= 0) {
+        await prisma.returnRequest.update({
+          where: { id: rr.id },
+          data: { creditAwarded: 0 },
+        });
+        return 0;
+      }
       await prisma.storeCreditWallet.update({
         where: { id: wallet.id },
         data: { balance: wallet.balance + amount },
@@ -1318,20 +1455,18 @@ export class ReturnsService {
           walletId: wallet.id,
           type: 'EARNED',
           amount,
-          note: `Reward from approved refurbishment return ${rr.publicId}`,
+          note: `Reward from approved refurbishment return ${rr.publicId} (${acceptedQty} unit${acceptedQty === 1 ? '' : 's'})`,
         },
       });
       await prisma.returnRequest.update({
         where: { id: rr.id },
         data: { creditAwarded: amount },
       });
-      if (amount > 0) {
-        await appendReturnActionNote(prisma, {
-          returnRequestId: rr.id,
-          status: rr.status,
-          note: `Store credit awarded · $${amount.toFixed(2)}`,
-        });
-      }
+      await appendReturnActionNote(prisma, {
+        returnRequestId: rr.id,
+        status: rr.status,
+        note: `Store credit awarded · $${amount.toFixed(2)} (${acceptedQty} unit${acceptedQty === 1 ? '' : 's'})`,
+      });
       await emailService.sendTemplate({
         to: rr.user.email,
         template: 'store-credit-update',
@@ -1351,26 +1486,13 @@ export class ReturnsService {
   async updateStatus(returnPublicId, body, actor) {
     const { status, notes, rejectionReason, inspectionChecklist, manualCarrier, manualTrackingNumber, manualShippedAt } =
       body;
-    let rr = await prisma.returnRequest.findUnique({
-      where: { publicId: returnPublicId },
+    const rr = await resolveReturnRequestRow(returnPublicId, {
       include: {
         user: { select: { email: true, firstName: true, lastName: true } },
         order: { select: { publicId: true } },
       },
     });
-    if (!rr) {
-      rr = await prisma.returnRequest.findFirst({
-        where: {
-          OR: [{ submissionPublicId: returnPublicId }, { returnNumber: returnPublicId }],
-        },
-        include: {
-          user: { select: { email: true, firstName: true, lastName: true } },
-          order: { select: { publicId: true } },
-        },
-        orderBy: { createdAt: 'asc' },
-      });
-    }
-    if (!rr) throw new AppError(404, 'Return request not found');
+    if (!rr) throw new AppError(404, 'Return request not found', 'RETURN_NOT_FOUND');
 
     // STANDARD: "Mark received" must go through partial receive (or receive remaining).
     if (rr.type === 'STANDARD' && status === 'RECEIVED' && (rr.status === 'REQUESTED' || rr.status === 'RECEIVED')) {
@@ -1612,11 +1734,17 @@ export class ReturnsService {
 
     const actorUserId = await resolveActorUserId(actor);
 
-    // Package-level transitions stay in sync for STANDARD; approve/reject are per-line.
+    // Package-level transitions stay in sync for STANDARD and REFURB siblings in the same status.
+    // Line decisions (approve/reject after inspection) stay per-line.
     const isLineDecision =
-      rr.type === 'STANDARD' && (status === 'APPROVED' || status === 'REJECTED');
+      (rr.type === 'STANDARD' && (status === 'APPROVED' || status === 'REJECTED')) ||
+      (rr.type === 'REFURBISHMENT' &&
+        (status === 'INSPECTION_APPROVED' || status === 'INSPECTION_REJECTED' || status === 'ELIGIBILITY_REJECTED'));
+    const refurbPackageStatuses = ['APPROVED', 'LABEL_GENERATED', 'IN_TRANSIT', 'RECEIVED', 'UNDER_INSPECTION'];
     const siblingIds =
-      rr.type === 'STANDARD' && !isLineDecision
+      !isLineDecision &&
+      ((rr.type === 'STANDARD') ||
+        (rr.type === 'REFURBISHMENT' && refurbPackageStatuses.includes(status)))
         ? (
             await prisma.returnRequest.findMany({
               where: { submissionPublicId: rr.submissionPublicId },
@@ -1730,17 +1858,28 @@ export class ReturnsService {
   }
 
   /**
-   * Per-line STANDARD inspection: checklist + accepted/rejected qty + evidence.
-   * Sets line status to APPROVED when any units accepted, else REJECTED.
+   * Per-line inspection: checklist + accepted/rejected qty (STANDARD),
+   * or accepted/rejected qty + store credit (REFURBISHMENT).
    */
   async inspectLine(returnPublicId, body, actor) {
     const lineId = body.lineId ? String(body.lineId) : returnPublicId;
+    const inspectInclude = {
+      user: { select: { email: true, firstName: true, lastName: true, id: true } },
+      order: { select: { publicId: true } },
+      orderItem: {
+        select: {
+          productId: true,
+          productVariantId: true,
+          price: true,
+          memberPriceSnapshot: true,
+          product: { select: { id: true, publicId: true, productType: true } },
+        },
+      },
+      refurbishmentJob: true,
+    };
     let rr = await prisma.returnRequest.findUnique({
       where: { publicId: lineId },
-      include: {
-        user: { select: { email: true, firstName: true, lastName: true } },
-        order: { select: { publicId: true } },
-      },
+      include: inspectInclude,
     });
     if (!rr) {
       // Allow submission id + lineId
@@ -1753,16 +1892,17 @@ export class ReturnsService {
       if (submission && body.lineId) {
         rr = await prisma.returnRequest.findUnique({
           where: { publicId: String(body.lineId) },
-          include: {
-            user: { select: { email: true, firstName: true, lastName: true } },
-            order: { select: { publicId: true } },
-          },
+          include: inspectInclude,
         });
       }
     }
     if (!rr) throw new AppError(404, 'Return line not found');
+
+    if (rr.type === 'REFURBISHMENT') {
+      return this.inspectRefurbLine(rr, returnPublicId, body, actor);
+    }
     if (rr.type !== 'STANDARD') {
-      throw new AppError(400, 'Line inspection applies to standard returns only');
+      throw new AppError(400, 'Line inspection applies to standard or refurbishment returns only');
     }
     const receivedQty = lineReceivedQty(rr);
     if (receivedQty <= 0) {
@@ -1896,6 +2036,33 @@ export class ReturnsService {
                 : `Inspected: accepted ${acceptedQuantity}, rejected ${rejectedQuantity}`,
           });
         }
+
+        // Audit discard / refurb dispositions for Inventory Overview (zero stock delta).
+        const disp = String(disposition || '').toUpperCase();
+        const dispQty = Math.max(0, Number(dispositionQuantity ?? acceptedQuantity) || 0);
+        const productId = rr.orderItem?.productId || rr.orderItem?.product?.id;
+        if (
+          productId &&
+          acceptedQuantity > 0 &&
+          dispQty > 0 &&
+          (disp === 'DISCARD' || disp === 'REFURB')
+        ) {
+          await writeInventoryLedger(tx, {
+            productId,
+            productVariantId: rr.orderItem?.productVariantId || null,
+            quantityDelta: 0,
+            eventType: 'ADJUST',
+            referenceType: 'return',
+            referenceId: rr.publicId,
+            actorUserId,
+            note:
+              disp === 'DISCARD'
+                ? returnLedgerNote('DISCARD', rr.returnNumber || rr.publicId) ||
+                  `Discarded ${dispQty} unit(s) from return (no restock)`
+                : returnLedgerNote('REFURB', rr.returnNumber || rr.publicId) ||
+                  `Moved ${dispQty} unit(s) to refurbishment from return`,
+          });
+        }
       } else if (promoteToInspection) {
         await appendReturnStatusEvent(tx, {
           returnRequestId: rr.id,
@@ -1930,6 +2097,190 @@ export class ReturnsService {
           : rejectedQuantity > 0
             ? `Partial approval: ${acceptedQuantity} unit(s) accepted, ${rejectedQuantity} rejected.`
             : 'Your return was approved. Your refund will be processed next. Original shipping charges are not refunded.';
+      await emailService.sendTemplate({
+        to: rr.user.email,
+        template: 'return-status',
+        context: {
+          name: [rr.user.firstName, rr.user.lastName].filter(Boolean).join(' '),
+          status: nextStatus,
+          note: emailNote,
+          actionUrl: `${config.frontend.customerUrl}/dashboard/returns/${rr.submissionPublicId || returnPublicId}`,
+        },
+      });
+    }
+
+    return this.getById(rr.submissionPublicId || returnPublicId);
+  }
+
+  /**
+   * Per-quantity REFURB physical inspection on a single submission line.
+   */
+  async inspectRefurbLine(rr, returnPublicId, body, actor) {
+    if (!['RECEIVED', 'UNDER_INSPECTION'].includes(rr.status)) {
+      throw new AppError(400, `Cannot inspect refurb line in status ${rr.status}`);
+    }
+    if (Number(rr.creditAwarded || 0) > 0) {
+      throw new AppError(400, 'Cannot change inspection after store credit has been awarded');
+    }
+
+    const inspectableQty = refurbInspectableQty(rr);
+    const acceptedQuantity =
+      body.acceptedQuantity !== undefined
+        ? Math.max(0, Number(body.acceptedQuantity) || 0)
+        : rr.acceptedQuantity ?? 0;
+    const rejectedQuantity =
+      body.rejectedQuantity !== undefined
+        ? Math.max(0, Number(body.rejectedQuantity) || 0)
+        : rr.rejectedQuantity ?? 0;
+
+    if (acceptedQuantity + rejectedQuantity !== inspectableQty) {
+      throw new AppError(
+        400,
+        `Accepted (${acceptedQuantity}) + rejected (${rejectedQuantity}) must equal inspectable quantity (${inspectableQty})`
+      );
+    }
+
+    const rejectionReason =
+      body.rejectionReason !== undefined
+        ? body.rejectionReason
+          ? String(body.rejectionReason).trim()
+          : null
+        : rr.rejectionReason;
+    if (rejectedQuantity > 0 && !rejectionReason) {
+      throw new AppError(400, 'Rejection reason is required when rejecting units');
+    }
+
+    const inspectorPhotoUrls =
+      body.inspectorPhotoUrls !== undefined
+        ? Array.isArray(body.inspectorPhotoUrls)
+          ? body.inspectorPhotoUrls.filter((u) => typeof u === 'string' && u.trim())
+          : null
+        : rr.inspectorPhotoUrlsJson;
+
+    const notes =
+      body.notes !== undefined
+        ? body.notes
+          ? String(body.notes).trim()
+          : null
+        : body.adminNotes !== undefined
+          ? body.adminNotes
+            ? String(body.adminNotes).trim()
+            : null
+          : undefined;
+
+    const nextStatus = acceptedQuantity > 0 ? 'INSPECTION_APPROVED' : 'INSPECTION_REJECTED';
+    const shouldTransition = Boolean(body.complete);
+    const actorUserId = await resolveActorUserId(actor);
+
+    const data = {
+      acceptedQuantity,
+      rejectedQuantity,
+      rejectionReason: rejectedQuantity > 0 ? rejectionReason : null,
+      inspectorPhotoUrlsJson: inspectorPhotoUrls,
+      ...(notes !== undefined ? { adminNotes: notes } : {}),
+      ...(shouldTransition
+        ? {
+            status: nextStatus,
+            ...(nextStatus === 'INSPECTION_APPROVED' ? { inspectionApprovedAt: new Date() } : {}),
+          }
+        : rr.status === 'RECEIVED'
+          ? { status: 'UNDER_INSPECTION' }
+          : {}),
+    };
+
+    await prisma.$transaction(async (tx) => {
+      await tx.returnRequest.update({
+        where: { id: rr.id },
+        data,
+      });
+
+      if (shouldTransition) {
+        if (rr.status === 'RECEIVED') {
+          await appendReturnStatusEvent(tx, {
+            returnRequestId: rr.id,
+            fromStatus: 'RECEIVED',
+            toStatus: 'UNDER_INSPECTION',
+            actorUserId,
+            note: 'Physical inspection started',
+          });
+          await appendReturnStatusEvent(tx, {
+            returnRequestId: rr.id,
+            fromStatus: 'UNDER_INSPECTION',
+            toStatus: nextStatus,
+            actorUserId,
+            note:
+              nextStatus === 'INSPECTION_REJECTED'
+                ? rejectionReason
+                : `Physical inspection: accepted ${acceptedQuantity}, rejected ${rejectedQuantity}`,
+          });
+        } else {
+          await appendReturnStatusEvent(tx, {
+            returnRequestId: rr.id,
+            fromStatus: rr.status,
+            toStatus: nextStatus,
+            actorUserId,
+            note:
+              nextStatus === 'INSPECTION_REJECTED'
+                ? rejectionReason
+                : `Physical inspection: accepted ${acceptedQuantity}, rejected ${rejectedQuantity}`,
+          });
+        }
+      } else if (rr.status === 'RECEIVED') {
+        await appendReturnStatusEvent(tx, {
+          returnRequestId: rr.id,
+          fromStatus: 'RECEIVED',
+          toStatus: 'UNDER_INSPECTION',
+          actorUserId,
+          note: 'Physical inspection started',
+        });
+      } else {
+        await appendReturnActionNote(tx, {
+          returnRequestId: rr.id,
+          status: 'UNDER_INSPECTION',
+          actorUserId,
+          note: `Refurb inspection draft · accepted ${acceptedQuantity} / rejected ${rejectedQuantity}`,
+        });
+      }
+    });
+
+    await writeAdminAudit({
+      actorId: actor?.id,
+      actorEmail: actor?.email,
+      action: shouldTransition ? 'REFURB_LINE_DECIDE' : 'REFURB_LINE_INSPECT',
+      entityType: 'ReturnRequest',
+      entityId: rr.publicId,
+      meta: {
+        acceptedQuantity,
+        rejectedQuantity,
+        nextStatus: shouldTransition ? nextStatus : null,
+      },
+    });
+
+    if (shouldTransition && nextStatus === 'INSPECTION_APPROVED') {
+      await refurbishmentService.createJobForReturn(rr.id);
+      const full = await prisma.returnRequest.findUnique({
+        where: { id: rr.id },
+        include: {
+          user: { select: { email: true, firstName: true, lastName: true } },
+          inspectionRecords: { orderBy: { createdAt: 'desc' }, take: 1 },
+        },
+      });
+      await this.awardRefurbStoreCredit({
+        ...rr,
+        ...full,
+        acceptedQuantity,
+        rejectedQuantity,
+        status: nextStatus,
+      });
+    }
+
+    if (shouldTransition && rr.user?.email) {
+      const emailNote =
+        nextStatus === 'INSPECTION_REJECTED'
+          ? rejectionReason || 'See return details for more information.'
+          : rejectedQuantity > 0
+            ? `Partial approval: ${acceptedQuantity} unit(s) accepted for store credit, ${rejectedQuantity} rejected.`
+            : 'Your used-product return passed inspection. Store credit has been added to your wallet.';
       await emailService.sendTemplate({
         to: rr.user.email,
         template: 'return-status',
@@ -2248,10 +2599,8 @@ export class ReturnsService {
   }
 
   async keepWaiting(returnPublicId, actor) {
-    const rr = await prisma.returnRequest.findUnique({
-      where: { publicId: returnPublicId },
-    });
-    if (!rr) throw new AppError(404, 'Return request not found');
+    const rr = await resolveReturnRequestRow(returnPublicId);
+    if (!rr) throw new AppError(404, 'Return request not found', 'RETURN_NOT_FOUND');
     if (rr.type !== 'REFURBISHMENT') throw new AppError(400, 'Only refurbishment returns support keep waiting');
     if (!['APPROVED', 'IN_TRANSIT'].includes(rr.status)) {
       throw new AppError(400, 'Return is not in a shippable state');

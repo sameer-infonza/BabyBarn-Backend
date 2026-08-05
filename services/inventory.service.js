@@ -538,6 +538,226 @@ export class InventoryService {
       })),
     };
   }
+
+  /**
+   * Read-only Inventory Overview KPIs + activity for a single product (return detail / product admin).
+   */
+  async getProductOverview(productPublicId) {
+    const product = await prisma.product.findUnique({
+      where: { publicId: productPublicId },
+      include: { variants: { orderBy: { sortOrder: 'asc' } } },
+    });
+    if (!product) throw new AppError(404, 'Product not found');
+
+    const currentAvailable = computeAvailableStock(product);
+
+    const ledgerAgg = await prisma.inventoryLedgerEvent.groupBy({
+      by: ['eventType'],
+      where: { productId: product.id },
+      _sum: { quantityDelta: true },
+    });
+    const sumByType = Object.fromEntries(
+      ledgerAgg.map((row) => [row.eventType, Math.abs(Number(row._sum.quantityDelta || 0))])
+    );
+    const signedByType = Object.fromEntries(
+      ledgerAgg.map((row) => [row.eventType, Number(row._sum.quantityDelta || 0)])
+    );
+
+    const totalSold = sumByType.COMMIT || 0;
+    const totalRestocked = (sumByType.RESTOCK || 0) + (sumByType.REFUND_RESTORE || 0);
+    const positiveAdjust = Math.max(0, signedByType.ADJUST || 0);
+    const totalReceived = positiveAdjust + totalRestocked;
+
+    const returnRows = await prisma.returnRequest.findMany({
+      where: {
+        orderItem: { productId: product.id },
+        type: 'STANDARD',
+      },
+      select: {
+        publicId: true,
+        returnNumber: true,
+        receivedQuantity: true,
+        quantity: true,
+        disposition: true,
+        dispositionQuantity: true,
+        acceptedQuantity: true,
+        status: true,
+        updatedAt: true,
+        createdAt: true,
+        order: {
+          select: {
+            publicId: true,
+            orderNumber: true,
+            user: { select: { firstName: true, lastName: true, email: true } },
+          },
+        },
+      },
+    });
+
+    let totalReturned = 0;
+    let totalMovedToRefurb = 0;
+    let totalDiscarded = 0;
+    for (const rr of returnRows) {
+      totalReturned += Math.max(0, Number(rr.receivedQuantity ?? 0));
+      const dispQty = Math.max(
+        0,
+        Number(rr.dispositionQuantity ?? rr.acceptedQuantity ?? 0)
+      );
+      if (rr.disposition === 'REFURB') totalMovedToRefurb += dispQty;
+      if (rr.disposition === 'DISCARD') totalDiscarded += dispQty;
+    }
+
+    const { listLedgerHistory } = await import('./inventory-ledger.service.js');
+    const ledgerResult = await listLedgerHistory({
+      productPublicId,
+      page: 1,
+      limit: 80,
+    });
+
+    // Enrich order customers for activity rows
+    const orderIds = [
+      ...new Set(
+        ledgerResult.entries
+          .filter((e) => e.referenceType === 'order' && e.referenceId)
+          .map((e) => e.referenceId)
+      ),
+    ];
+    const ordersWithUsers =
+      orderIds.length > 0
+        ? await prisma.order.findMany({
+            where: { publicId: { in: orderIds } },
+            select: {
+              publicId: true,
+              orderNumber: true,
+              user: { select: { firstName: true, lastName: true, email: true } },
+            },
+          })
+        : [];
+    const customerByOrder = new Map(
+      ordersWithUsers.map((o) => [
+        o.publicId,
+        [o.user?.firstName, o.user?.lastName].filter(Boolean).join(' ').trim() ||
+          o.user?.email ||
+          null,
+      ])
+    );
+
+    const activity = [];
+
+    for (const e of ledgerResult.entries) {
+      if (e.eventType === 'RESERVE' || e.eventType === 'RELEASE') continue;
+      let action = e.eventType;
+      if (e.eventType === 'COMMIT') action = 'SOLD';
+      else if (e.eventType === 'RESTOCK' || e.eventType === 'REFUND_RESTORE') action = 'RESTOCKED';
+      else if (e.eventType === 'ADJUST') {
+        const note = String(e.note || '');
+        if (/discard/i.test(note)) action = 'DISCARDED';
+        else if (/refurb/i.test(note)) action = 'MOVED_TO_REFURB';
+        else action = 'MANUAL_ADJUSTMENT';
+      }
+      const teamMember = e.actor
+        ? [e.actor.firstName, e.actor.lastName].filter(Boolean).join(' ').trim() || e.actor.email
+        : null;
+      const isTeam =
+        e.actor?.role === 'ADMIN' || e.actor?.role === 'ADMIN_TEAM';
+      activity.push({
+        id: e.id,
+        createdAt: e.createdAt,
+        action,
+        eventType: e.eventType,
+        quantity: Math.abs(Number(e.quantityDelta || 0)),
+        quantityDelta: e.quantityDelta,
+        orderId: e.referenceType === 'order' ? e.referenceId : null,
+        orderNumber: e.referenceOrderNumber || null,
+        returnNumber: e.referenceReturnNumber || null,
+        customerName:
+          e.referenceType === 'order' && e.referenceId
+            ? customerByOrder.get(e.referenceId) || null
+            : null,
+        teamMember: isTeam ? teamMember : null,
+        actorName: teamMember,
+        note: e.note || null,
+      });
+    }
+
+    // Disposition rows that may predate ledger writes
+    for (const rr of returnRows) {
+      if (rr.disposition !== 'DISCARD' && rr.disposition !== 'REFURB') continue;
+      const qty = Math.max(0, Number(rr.dispositionQuantity ?? rr.acceptedQuantity ?? 0));
+      if (qty <= 0) continue;
+      const already = activity.some(
+        (a) =>
+          a.returnNumber === rr.returnNumber &&
+          ((rr.disposition === 'DISCARD' && a.action === 'DISCARDED') ||
+            (rr.disposition === 'REFURB' && a.action === 'MOVED_TO_REFURB'))
+      );
+      if (already) continue;
+      const customer =
+        [rr.order?.user?.firstName, rr.order?.user?.lastName].filter(Boolean).join(' ').trim() ||
+        rr.order?.user?.email ||
+        null;
+      activity.push({
+        id: `disp-${rr.publicId}`,
+        createdAt: rr.updatedAt || rr.createdAt,
+        action: rr.disposition === 'DISCARD' ? 'DISCARDED' : 'MOVED_TO_REFURB',
+        eventType: 'ADJUST',
+        quantity: qty,
+        quantityDelta: 0,
+        orderId: rr.order?.publicId || null,
+        orderNumber: rr.order?.orderNumber || null,
+        returnNumber: rr.returnNumber || rr.publicId,
+        customerName: customer,
+        teamMember: null,
+        actorName: null,
+        note: `Return disposition ${rr.disposition}`,
+      });
+    }
+
+    // Received units as Returned activity (when not already represented)
+    for (const rr of returnRows) {
+      const qty = Math.max(0, Number(rr.receivedQuantity ?? 0));
+      if (qty <= 0) continue;
+      activity.push({
+        id: `ret-${rr.publicId}`,
+        createdAt: rr.updatedAt || rr.createdAt,
+        action: 'RETURNED',
+        eventType: 'RETURN',
+        quantity: qty,
+        quantityDelta: 0,
+        orderId: rr.order?.publicId || null,
+        orderNumber: rr.order?.orderNumber || null,
+        returnNumber: rr.returnNumber || rr.publicId,
+        customerName:
+          [rr.order?.user?.firstName, rr.order?.user?.lastName].filter(Boolean).join(' ').trim() ||
+          rr.order?.user?.email ||
+          null,
+        teamMember: null,
+        actorName: null,
+        note: 'Units received on return',
+      });
+    }
+
+    activity.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+
+    return {
+      product: {
+        id: product.publicId,
+        name: product.name,
+        sku: product.sku,
+        productType: product.productType,
+      },
+      kpis: {
+        totalInventoryReceived: totalReceived,
+        totalSold,
+        totalReturned,
+        totalRestocked,
+        totalMovedToRefurbishment: totalMovedToRefurb,
+        totalDiscarded,
+        currentAvailableInventory: currentAvailable,
+      },
+      activity: activity.slice(0, 100),
+    };
+  }
 }
 
 /**
