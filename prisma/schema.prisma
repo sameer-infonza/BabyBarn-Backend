@@ -707,6 +707,8 @@ model ReturnRequest {
   /// RESTOCK | DISCARD | REFURB after accept.
   disposition String?
   dispositionQuantity Int?
+  /// DAMAGED | DISCARD for rejected units.
+  rejectedDisposition String?
   creditAwarded Float @default(0)
   refundAmount Float?
   stripeRefundId String?

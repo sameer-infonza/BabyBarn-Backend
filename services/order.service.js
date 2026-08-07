@@ -293,8 +293,20 @@ export class OrderService {
       select: { id: true, accessMemberUntil: true, babyName: true, isGuest: true },
     });
     if (!user) throw new AppError(401, 'Unauthorized');
-    const items = Array.isArray(payload?.items) ? payload.items : [];
-    if (items.length === 0) throw new AppError(400, 'No items for checkout quote');
+    const rawItems = Array.isArray(payload?.items) ? payload.items : [];
+    if (rawItems.length === 0) throw new AppError(400, 'No items for checkout quote');
+
+    const { validateCartLines, toCheckoutItems } = await import('./cart-validation.service.js');
+    const validation = await validateCartLines(rawItems, { mode: 'sanitize' });
+    if (!validation.ok || !validation.items.length) {
+      throw new AppError(
+        400,
+        validation.summary || 'No items in your cart are available for checkout.',
+        'CART_INVALID',
+        { removed: validation.removed, adjusted: validation.adjusted }
+      );
+    }
+    const items = toCheckoutItems(validation.items);
 
     const now = new Date();
     const hasAccess = Boolean(user.accessMemberUntil && user.accessMemberUntil > now);
@@ -465,6 +477,17 @@ export class OrderService {
         storeCreditApplied,
         taxAmount,
         totalPayable,
+      },
+      cartValidation: {
+        summary: validation.summary,
+        removed: validation.removed,
+        adjusted: validation.adjusted,
+        items: validation.items.map((v) => ({
+          productId: v.productId,
+          variantId: v.variantId,
+          quantity: v.quantity,
+          maxQuantity: v.maxQuantity,
+        })),
       },
     };
   }

@@ -17,6 +17,8 @@
     "smoke:phase2": "node scripts/phase2-smoke.mjs",
     "access:reminders": "node scripts/send-access-reminders.mjs",
     "access:reminders:dry": "node scripts/send-access-reminders.mjs --dry-run",
+    "purge:old-orders-returns": "node scripts/purge-old-orders-returns.mjs --before=2026-07-09",
+    "purge:old-orders-returns:apply": "node scripts/purge-old-orders-returns.mjs --before=2026-07-09 --apply",
     "migrate:simple-variants": "node scripts/migrate-simple-to-variant-matrix.mjs",
     "migrate:simple-variants:dry": "node scripts/migrate-simple-to-variant-matrix.mjs --dry-run"
   },

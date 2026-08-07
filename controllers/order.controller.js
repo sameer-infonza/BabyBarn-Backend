@@ -3,6 +3,7 @@ import { validate } from '../utils/validation.js';
 import {
   createOrderSchema,
   checkoutQuoteSchema,
+  cartValidateSchema,
   trackingUpdateSchema,
   orderStatusUpdateSchema,
   adminShippingUpdateSchema,
@@ -52,6 +53,13 @@ export class OrderController {
   async getCheckoutQuote(req, res) {
     const body = await validate(checkoutQuoteSchema, req.body);
     const data = await orderService.calculateCheckoutQuote(req.user.id, body);
+    res.status(200).json({ success: true, data: toPublicJson(data) });
+  }
+
+  async validateCart(req, res) {
+    const body = await validate(cartValidateSchema, req.body ?? {});
+    const { validateCartLines } = await import('../services/cart-validation.service.js');
+    const data = await validateCartLines(body.items || [], { mode: body.mode || 'sanitize' });
     res.status(200).json({ success: true, data: toPublicJson(data) });
   }
 

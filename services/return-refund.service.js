@@ -11,12 +11,50 @@ async function resolveActorUserId(actor) {
   return user?.id ?? null;
 }
 
-/** Product-value refund for a standard return line (excludes shipping). */
-export function computeStandardReturnRefundAmount(orderItem, quantity = 1) {
+function moneyRound(n) {
+  return Math.round(Number(n || 0) * 100) / 100;
+}
+
+/** Product-value (pre-tax) for a standard return line. */
+export function computeStandardReturnSubtotal(orderItem, quantity = 1) {
   const qty = Math.max(0, Number(quantity || 0));
   if (qty <= 0) return 0;
   const unit = Number(orderItem?.price ?? 0);
-  return Math.round(unit * qty * 100) / 100;
+  return moneyRound(unit * qty);
+}
+
+/**
+ * Order merchandise subtotal from line items (pre-tax, before store credit).
+ * @param {{ price?: number, quantity?: number }[] | null | undefined} orderItems
+ */
+export function orderMerchandiseSubtotal(orderItems) {
+  if (!Array.isArray(orderItems) || !orderItems.length) return 0;
+  return moneyRound(
+    orderItems.reduce(
+      (sum, line) => sum + Number(line.price ?? 0) * Math.max(0, Number(line.quantity ?? 0)),
+      0
+    )
+  );
+}
+
+/**
+ * Proportional tax share for returned merchandise.
+ * Shipping is never refunded on standard returns.
+ */
+export function computeReturnTaxShare(returnMerchandise, order) {
+  const orderTax = Math.max(0, Number(order?.taxAmount ?? 0));
+  if (orderTax <= 0 || returnMerchandise <= 0) return 0;
+  const orderMerch = orderMerchandiseSubtotal(order?.orderItems);
+  if (orderMerch <= 0) return 0;
+  return moneyRound(orderTax * (returnMerchandise / orderMerch));
+}
+
+/** Product + proportional tax. Excludes shipping (non-refundable). */
+export function computeStandardReturnRefundAmount(orderItem, quantity = 1, order = null) {
+  const subtotal = computeStandardReturnSubtotal(orderItem, quantity);
+  if (subtotal <= 0) return 0;
+  const tax = order ? computeReturnTaxShare(subtotal, order) : 0;
+  return moneyRound(subtotal + tax);
 }
 
 async function resolvePaymentIntentId(order) {
@@ -44,8 +82,8 @@ async function resolvePaymentIntentId(order) {
 }
 
 /**
- * Issue a partial Stripe refund for an approved standard return (product value only).
- * Idempotent when stripeRefundId is already set on the return.
+ * Issue a partial Stripe refund for an approved standard return (product + proportional tax).
+ * Shipping is never refunded. Idempotent when stripeRefundId is already set on the return.
  */
 export async function processStandardReturnRefund(returnRequest, actor) {
   if (returnRequest.type !== 'STANDARD') {
@@ -70,6 +108,8 @@ export async function processStandardReturnRefund(returnRequest, actor) {
           paymentStatus: true,
           stripePaymentIntentId: true,
           stripeCheckoutSessionId: true,
+          taxAmount: true,
+          orderItems: { select: { price: true, quantity: true } },
         },
       },
       user: { select: { email: true, firstName: true, lastName: true } },
@@ -82,10 +122,8 @@ export async function processStandardReturnRefund(returnRequest, actor) {
     throw new AppError(400, 'Order is not in a refundable payment state');
   }
 
-  const refundAmountUsd = computeStandardReturnRefundAmount(
-    full.orderItem,
-    full.acceptedQuantity != null ? full.acceptedQuantity : full.quantity
-  );
+  const qty = full.acceptedQuantity != null ? full.acceptedQuantity : full.quantity;
+  const refundAmountUsd = computeStandardReturnRefundAmount(full.orderItem, qty, full.order);
   if (refundAmountUsd <= 0) {
     throw new AppError(400, 'Refund amount must be greater than zero');
   }

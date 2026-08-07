@@ -253,7 +253,8 @@ function productTypeWhere(productType) {
   if (productType === 'NEW' || productType === 'REFURBISHED') {
     return { productType };
   }
-  return { productType: 'NEW' };
+  // ALL / all / omitted — include both NEW and REFURBISHED
+  return {};
 }
 
 export class InventoryService {
@@ -294,7 +295,11 @@ export class InventoryService {
     const where = {
       isDraft: false,
       ...productTypeWhere(
-        productTypeFilter && productTypeFilter !== 'all' ? productTypeFilter : undefined
+        productTypeFilter &&
+          productTypeFilter !== 'all' &&
+          String(productTypeFilter).toUpperCase() !== 'ALL'
+          ? productTypeFilter
+          : undefined
       ),
     };
 

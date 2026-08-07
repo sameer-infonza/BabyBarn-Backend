@@ -180,6 +180,18 @@ export class CheckoutIntentService {
       throw new AppError(401, 'Unauthorized');
     }
 
+    const { validateCartLines, toCheckoutItems } = await import('./cart-validation.service.js');
+    const validation = await validateCartLines(items, { mode: 'sanitize' });
+    if (!validation.ok || !validation.items.length) {
+      throw new AppError(
+        400,
+        validation.summary || 'No items in your cart are available for checkout.',
+        'CART_INVALID',
+        { removed: validation.removed, adjusted: validation.adjusted }
+      );
+    }
+    items = toCheckoutItems(validation.items);
+
     const signature = checkoutSignature(items, opts);
 
     if (opts.checkoutIntentPublicId) {
@@ -209,6 +221,18 @@ export class CheckoutIntentService {
   }
 
   async createCheckoutIntent(userPublicId, items, opts = {}) {
+    const { validateCartLines, toCheckoutItems } = await import('./cart-validation.service.js');
+    const validation = await validateCartLines(items, { mode: 'sanitize' });
+    if (!validation.ok || !validation.items.length) {
+      throw new AppError(
+        400,
+        validation.summary || 'No items in your cart are available for checkout.',
+        'CART_INVALID',
+        { removed: validation.removed, adjusted: validation.adjusted }
+      );
+    }
+    items = toCheckoutItems(validation.items);
+
     const user = await db().user.findUnique({
       where: { publicId: userPublicId },
       select: { id: true, accessMemberUntil: true, babyName: true, isGuest: true, email: true, phone: true },

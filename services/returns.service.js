@@ -90,7 +90,15 @@ const returnInclude = {
       deliveredAt: true,
       returnEnvelopeUsed: true,
       shippingCost: true,
+      taxAmount: true,
+      storeCreditApplied: true,
       totalAmount: true,
+      orderItems: {
+        select: {
+          price: true,
+          quantity: true,
+        },
+      },
     },
   },
   orderItem: {
@@ -190,7 +198,7 @@ function computeRowRefundPreview(row) {
   if (row?.type !== 'STANDARD' || !row?.orderItem) return null;
   const qty = refundableQuantityForRow(row);
   if (qty <= 0) return 0;
-  return computeStandardReturnRefundAmount(row.orderItem, qty);
+  return computeStandardReturnRefundAmount(row.orderItem, qty, row.order);
 }
 
 function lineRequestedQty(row) {
@@ -368,6 +376,7 @@ function buildSubmissionChildItem(row) {
     inspectionChecklistJson: row.inspectionChecklistJson ?? null,
     disposition: row.disposition ?? null,
     dispositionQuantity: row.dispositionQuantity ?? null,
+    rejectedDisposition: row.rejectedDisposition ?? null,
     creditAwarded: row.creditAwarded,
     refundAmount: row.refundAmount,
     stripeRefundId: row.stripeRefundId,
@@ -1156,6 +1165,7 @@ export class ReturnsService {
         context: {
           name: [rr.user.firstName, rr.user.lastName].filter(Boolean).join(' '),
           status: nextStatus,
+          returnType: 'REFURBISHMENT',
           note:
             targets.length > 1
               ? `${targets.length} items: eligibility ${decision}`
@@ -1913,7 +1923,7 @@ export class ReturnsService {
     ) {
       throw new AppError(400, `Cannot inspect line in status ${rr.status}`);
     }
-    if (rr.stripeRefundId) {
+    if (rr.stripeRefundId || rr.refundedAt) {
       throw new AppError(400, 'Cannot change inspection after refund has been processed');
     }
 
@@ -1970,16 +1980,37 @@ export class ReturnsService {
     if (disposition && !['RESTOCK', 'DISCARD', 'REFURB'].includes(disposition)) {
       throw new AppError(400, 'disposition must be RESTOCK, DISCARD, or REFURB');
     }
+    if (
+      disposition === 'REFURB' &&
+      rr.orderItem?.product?.productType === 'REFURBISHED'
+    ) {
+      throw new AppError(
+        400,
+        'Refurbished products cannot be moved to refurbishment again'
+      );
+    }
     const dispositionQuantity =
       body.dispositionQuantity !== undefined
         ? Math.max(0, Number(body.dispositionQuantity) || 0)
         : rr.dispositionQuantity;
 
+    const rejectedDisposition =
+      body.rejectedDisposition !== undefined
+        ? body.rejectedDisposition
+          ? String(body.rejectedDisposition).toUpperCase()
+          : null
+        : rr.rejectedDisposition;
+    if (rejectedDisposition && !['DAMAGED', 'DISCARD'].includes(rejectedDisposition)) {
+      throw new AppError(400, 'rejectedDisposition must be DAMAGED or DISCARD');
+    }
+
     const nextStatus = acceptedQuantity > 0 ? 'APPROVED' : 'REJECTED';
     const promoteToInspection = ['REQUESTED', 'RECEIVED'].includes(rr.status);
+    const isReDecision =
+      Boolean(body.complete) && ['APPROVED', 'REJECTED'].includes(rr.status);
     const shouldTransition =
       Boolean(body.complete) &&
-      (rr.status === 'UNDER_INSPECTION' || promoteToInspection);
+      (rr.status === 'UNDER_INSPECTION' || promoteToInspection || isReDecision);
 
     const actorUserId = await resolveActorUserId(actor);
     const data = {
@@ -1993,6 +2024,9 @@ export class ReturnsService {
         : {}),
       ...(disposition !== undefined ? { disposition } : {}),
       ...(dispositionQuantity !== undefined ? { dispositionQuantity } : {}),
+      ...(rejectedDisposition !== undefined
+        ? { rejectedDisposition: rejectedQuantity > 0 ? rejectedDisposition : null }
+        : {}),
       ...(shouldTransition
         ? { status: nextStatus }
         : promoteToInspection
@@ -2024,6 +2058,13 @@ export class ReturnsService {
                 ? rejectionReason
                 : `Inspected: accepted ${acceptedQuantity}, rejected ${rejectedQuantity}`,
           });
+        } else if (isReDecision && rr.status === nextStatus) {
+          await appendReturnActionNote(tx, {
+            returnRequestId: rr.id,
+            status: rr.status,
+            actorUserId,
+            note: `Inspection updated · accepted ${acceptedQuantity} / rejected ${rejectedQuantity}`,
+          });
         } else {
           await appendReturnStatusEvent(tx, {
             returnRequestId: rr.id,
@@ -2033,7 +2074,9 @@ export class ReturnsService {
             note:
               nextStatus === 'REJECTED'
                 ? rejectionReason
-                : `Inspected: accepted ${acceptedQuantity}, rejected ${rejectedQuantity}`,
+                : isReDecision
+                  ? `Inspection updated: accepted ${acceptedQuantity}, rejected ${rejectedQuantity}`
+                  : `Inspected: accepted ${acceptedQuantity}, rejected ${rejectedQuantity}`,
           });
         }
 
@@ -2063,6 +2106,22 @@ export class ReturnsService {
                   `Moved ${dispQty} unit(s) to refurbishment from return`,
           });
         }
+
+        const rejDisp = String(rejectedDisposition || 'DAMAGED').toUpperCase();
+        if (productId && rejectedQuantity > 0 && rejDisp === 'DISCARD') {
+          await writeInventoryLedger(tx, {
+            productId,
+            productVariantId: rr.orderItem?.productVariantId || null,
+            quantityDelta: 0,
+            eventType: 'ADJUST',
+            referenceType: 'return',
+            referenceId: rr.publicId,
+            actorUserId,
+            note:
+              returnLedgerNote('DISCARD', rr.returnNumber || rr.publicId) ||
+              `Discarded ${rejectedQuantity} rejected unit(s) from return`,
+          });
+        }
       } else if (promoteToInspection) {
         await appendReturnStatusEvent(tx, {
           returnRequestId: rr.id,
@@ -2090,7 +2149,7 @@ export class ReturnsService {
       meta: { acceptedQuantity, rejectedQuantity, nextStatus: shouldTransition ? nextStatus : null },
     });
 
-    if (shouldTransition && rr.user?.email) {
+    if (shouldTransition && rr.user?.email && (!isReDecision || rr.status !== nextStatus)) {
       const emailNote =
         nextStatus === 'REJECTED'
           ? rejectionReason || 'See return details for more information.'

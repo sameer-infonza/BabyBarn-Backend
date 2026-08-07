@@ -11,6 +11,7 @@ router.post('/guest/cancel', (req, res, next) => orderController.cancelGuestOrde
 router.get('/', authenticate, ...requireCustomerFullAccount, (req, res, next) => orderController.getUserOrders(req, res).catch(next));
 router.get('/stats', authenticate, ...requireCustomerFullAccount, (req, res, next) => orderController.getUserOrderStats(req, res).catch(next));
 router.post('/', authenticate, (req, res, next) => orderController.createOrder(req, res).catch(next));
+router.post('/cart/validate', (req, res, next) => orderController.validateCart(req, res).catch(next));
 router.post('/quote', authenticate, (req, res, next) => orderController.getCheckoutQuote(req, res).catch(next));
 
 router.get(

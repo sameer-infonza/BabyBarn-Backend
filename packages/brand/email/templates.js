@@ -207,7 +207,9 @@ export function renderBrandedEmailTemplate(template, context = {}, brand) {
       REQUESTED: 'Requested',
       RECEIVED: 'Received at warehouse',
       UNDER_INSPECTION: 'Under inspection',
-      APPROVED: 'Approved',
+      APPROVED: context.returnType === 'REFURBISHMENT' || /used product/i.test(String(context.returnType || ''))
+        ? 'Pre-Qualified'
+        : 'Approved',
       REJECTED: 'Rejected',
       ELIGIBILITY_REVIEW: 'Eligibility review',
       ELIGIBILITY_REJECTED: 'Not eligible for used return',

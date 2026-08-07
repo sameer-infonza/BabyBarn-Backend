@@ -339,6 +339,7 @@ export const checkoutQuoteSchema = z.object({
       productId: z.string().min(1),
       quantity: z.number().int().min(1),
       variantId: z.string().min(1).optional().nullable(),
+      name: z.string().max(200).optional().nullable(),
     })
   ).min(1),
   shippingAddress: checkoutAddressLooseSchema.optional(),
@@ -347,6 +348,21 @@ export const checkoutQuoteSchema = z.object({
   storeCreditToApply: z.number().min(0).optional(),
   includeAccessMembership: z.boolean().optional(),
   babyName: z.string().trim().min(1).max(120).optional(),
+});
+
+/** Live cart / buy-again validation (public — no auth required). */
+export const cartValidateSchema = z.object({
+  items: z
+    .array(
+      z.object({
+        productId: z.string().min(1),
+        quantity: z.number().int().min(1),
+        variantId: z.string().min(1).optional().nullable(),
+        name: z.string().max(200).optional().nullable(),
+      })
+    )
+    .max(100),
+  mode: z.enum(['sanitize', 'strict']).optional().default('sanitize'),
 });
 
 export const trackingUpdateSchema = z.object({
@@ -676,6 +692,7 @@ export const returnInspectLineSchema = z.object({
   notes: z.string().max(2000).optional().nullable(),
   disposition: z.enum(['RESTOCK', 'DISCARD', 'REFURB']).optional().nullable(),
   dispositionQuantity: z.number().int().min(0).optional().nullable(),
+  rejectedDisposition: z.enum(['DAMAGED', 'DISCARD']).optional().nullable(),
   complete: z.boolean().optional(),
 });
 
