@@ -57,6 +57,31 @@ export async function writeAdminAudit({ actorId, actorEmail, action, entityType,
 }
 
 export async function listOrderActivity(orderPublicId, limit = 100) {
+  const order = await prisma.order.findUnique({
+    where: { publicId: String(orderPublicId) },
+    select: {
+      id: true,
+      publicId: true,
+      returnRequests: {
+        select: {
+          publicId: true,
+          submissionPublicId: true,
+          returnNumber: true,
+          type: true,
+          status: true,
+          createdAt: true,
+          orderItem: {
+            select: {
+              publicId: true,
+              product: { select: { name: true } },
+            },
+          },
+        },
+        orderBy: { createdAt: 'asc' },
+      },
+    },
+  });
+
   const rows = await prisma.adminAuditLog.findMany({
     where: {
       OR: [
@@ -70,7 +95,38 @@ export async function listOrderActivity(orderPublicId, limit = 100) {
     take: Math.min(limit, 200),
     orderBy: { createdAt: 'desc' },
   });
-  return { logs: rows };
+
+  const returnsBySubmission = new Map();
+  for (const rr of order?.returnRequests || []) {
+    const submissionId = rr.submissionPublicId || rr.publicId;
+    if (!submissionId) continue;
+    let entry = returnsBySubmission.get(submissionId);
+    if (!entry) {
+      entry = {
+        id: submissionId,
+        returnNumber: rr.returnNumber || null,
+        type: rr.type || 'STANDARD',
+        status: rr.status || null,
+        createdAt: rr.createdAt || null,
+        lineIds: [],
+        productNames: [],
+      };
+      returnsBySubmission.set(submissionId, entry);
+    }
+    if (rr.returnNumber && !entry.returnNumber) entry.returnNumber = rr.returnNumber;
+    if (rr.status) entry.status = rr.status;
+    const lineId = rr.orderItem?.publicId;
+    if (lineId && !entry.lineIds.includes(lineId)) entry.lineIds.push(lineId);
+    const productName = rr.orderItem?.product?.name;
+    if (productName && !entry.productNames.includes(productName)) {
+      entry.productNames.push(productName);
+    }
+  }
+
+  return {
+    logs: rows,
+    returns: [...returnsBySubmission.values()],
+  };
 }
 
 async function attachActorNames(rows) {

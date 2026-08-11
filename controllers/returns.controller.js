@@ -14,6 +14,7 @@ import {
   returnCancelSchema,
   RETURN_STATUS_VALUES,
   returnReceivePackageSchema,
+  returnApproveAndSettleSchema,
 } from '../schemas/index.js';
 import { returnsService } from '../services/returns.service.js';
 import { returnPackageRequestService } from '../services/return-package-request.service.js';
@@ -26,11 +27,44 @@ export class ReturnsController {
   async listAll(req, res) {
     const type = req.query.type ? String(req.query.type) : undefined;
     const status = req.query.status ? String(req.query.status) : undefined;
+    const statusesRaw = req.query.statuses != null ? String(req.query.statuses) : '';
+    const statuses = statusesRaw
+      ? statusesRaw
+          .split(',')
+          .map((s) => s.trim())
+          .filter(Boolean)
+      : undefined;
     const grouped = String(req.query.grouped || '') === '1' || String(req.query.grouped || '') === 'true';
     const adminVisible =
       String(req.query.adminVisible || '') === '1' || String(req.query.adminVisible || '') === 'true';
-    const data = await returnsService.listAll({ type, status, grouped, adminVisible });
+    const page = req.query.page != null ? Number(req.query.page) : undefined;
+    const limit = req.query.limit != null ? Number(req.query.limit) : undefined;
+    const search = req.query.search || req.query.q ? String(req.query.search || req.query.q) : undefined;
+    const data = await returnsService.listAll({
+      type,
+      status,
+      statuses,
+      grouped,
+      adminVisible,
+      page,
+      limit,
+      search,
+    });
+    // Backward compatible: unpaginated callers still receive a bare array in `data`.
+    if (data && typeof data === 'object' && Array.isArray(data.items) && data.pagination) {
+      res.status(200).json({
+        success: true,
+        data: toPublicJson(data.items),
+        pagination: data.pagination,
+      });
+      return;
+    }
     res.status(200).json({ success: true, data: toPublicJson(data) });
+  }
+
+  async getAdminListStats(req, res) {
+    const data = await returnsService.getAdminListStats();
+    res.status(200).json({ success: true, data });
   }
 
   async listMine(req, res) {
@@ -45,6 +79,14 @@ export class ReturnsController {
 
   async getAdminById(req, res) {
     const data = await returnsService.getById(req.params.id);
+    res.status(200).json({ success: true, data: toPublicJson(data) });
+  }
+
+  async getTriageCursor(req, res) {
+    const stage = req.query.stage ? String(req.query.stage) : 'physical';
+    const cursor = req.query.cursor ? String(req.query.cursor) : undefined;
+    const direction = req.query.direction ? String(req.query.direction) : 'current';
+    const data = await returnsService.getTriageCursor({ stage, cursor, direction });
     res.status(200).json({ success: true, data: toPublicJson(data) });
   }
 
@@ -118,6 +160,13 @@ export class ReturnsController {
     res.status(200).json({ success: true, data: toPublicJson(data) });
   }
 
+  async approveAndSettle(req, res) {
+    const body = await validate(returnApproveAndSettleSchema, req.body ?? {});
+    const actor = { id: req.user?.id, email: req.user?.email };
+    const data = await returnsService.approveAndSettle(req.params.id, body, actor);
+    res.status(200).json({ success: true, data: toPublicJson(data) });
+  }
+
   async trackGuest(req, res) {
     const body = await validate(guestReturnTrackSchema, req.body ?? {});
     const data = await returnsService.trackGuestReturn(body);
@@ -132,7 +181,18 @@ export class ReturnsController {
 
   async listPackageRequestsAdmin(req, res) {
     const status = req.query.status ? String(req.query.status) : undefined;
-    const data = await returnPackageRequestService.listForAdmin({ status });
+    const page = req.query.page != null ? Number(req.query.page) : undefined;
+    const limit = req.query.limit != null ? Number(req.query.limit) : undefined;
+    const search = req.query.search || req.query.q ? String(req.query.search || req.query.q) : undefined;
+    const data = await returnPackageRequestService.listForAdmin({ status, page, limit, search });
+    if (data && typeof data === 'object' && Array.isArray(data.items) && data.pagination) {
+      res.status(200).json({
+        success: true,
+        data: toPublicJson(data.items),
+        pagination: data.pagination,
+      });
+      return;
+    }
     res.status(200).json({ success: true, data: toPublicJson(data) });
   }
 

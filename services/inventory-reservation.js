@@ -119,9 +119,13 @@ export async function reserveOrderLineStock(tx, product, variantDbId, quantity, 
     const updated = await tx.product.updateMany({
       where: {
         id: product.id,
+        stockVersion: fresh.stockVersion ?? 0,
         stock: { gte: (fresh.reservedStock ?? 0) + quantity },
       },
-      data: { reservedStock: { increment: quantity } },
+      data: {
+        reservedStock: { increment: quantity },
+        stockVersion: { increment: 1 },
+      },
     });
     if (updated.count === 0) {
       throw new AppError(409, 'Stock changed during checkout. Please try again.', 'STOCK_CONFLICT');
@@ -197,6 +201,7 @@ export async function commitOrderLineStock(tx, product, variantDbId, quantity, l
       data: {
         stock: { decrement: quantity },
         reservedStock: { decrement: quantity },
+        stockVersion: { increment: 1 },
       },
     });
     await ledgerCommit(tx, product.id, null, quantity, ledgerCtx);
@@ -309,7 +314,10 @@ export async function restockOrderLineStock(
   if ((fresh.variants ?? []).length === 0) {
     await tx.product.update({
       where: { id: product.id },
-      data: { stock: { increment: quantity } },
+      data: {
+        stock: { increment: quantity },
+        stockVersion: { increment: 1 },
+      },
     });
     await ledgerRestock(tx, product.id, null, quantity, ledgerCtx, eventType);
     return;

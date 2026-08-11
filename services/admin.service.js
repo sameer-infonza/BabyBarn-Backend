@@ -7,6 +7,7 @@ import { writeAdminAudit } from './audit.service.js';
 import { config } from '../config/env.js';
 import { prisma } from '../lib/prisma.js';
 import { PORTAL_SCOPE, findUserByEmailAndPortal, rehomeMisScopedStaffToStaffPortal } from '../lib/portal-scope.js';
+import { buildLegacyAdminPendingCountWhere } from '../lib/order-query-filters.js';
 
 function isStorefrontCustomerRole(roleName) {
   return roleName === 'CUSTOMER' || roleName === 'USER';
@@ -84,15 +85,28 @@ export async function getFinanceStats({ dateFrom, dateTo } = {}) {
 }
 
 /** Single aggregate for the admin dashboard KPI tiles + alert banners. */
-export async function getDashboardOverview() {
+export async function getDashboardOverview(actor = null) {
   const now = new Date();
   const monthStart = new Date(now.getFullYear(), now.getMonth(), 1);
   const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate());
-  const pendingOrderStatuses = ['PENDING', 'PROCESSING', 'CONFIRMED'];
   const inspectionStatuses = ['REQUESTED', 'RECEIVED', 'UNDER_INSPECTION'];
 
   const { productService } = await import('./product.service.js');
   const { inventoryService } = await import('./inventory.service.js');
+  const { canAccessRouteModule } = await import('../constants/admin-modules.js');
+
+  const role = actor?.role;
+  const modules = actor?.adminModules;
+  const isAdmin = role === 'ADMIN';
+  const can = (routeModule) =>
+    isAdmin || canAccessRouteModule(Array.isArray(modules) ? modules : [], routeModule);
+
+  const wantProducts = can('products') || can('refurbished');
+  const wantOrders = can('orders');
+  const wantInventory = can('inventory');
+  const wantCustomers = can('customers');
+  const wantAccess = can('access');
+  const wantInspection = can('inspection') || can('returns');
 
   const [
     newProductStats,
@@ -106,35 +120,48 @@ export async function getDashboardOverview() {
     pendingInspections,
     queuedInspectionsToday,
   ] = await Promise.all([
-    productService.getAdminProductStats('NEW'),
-    productService.getAdminProductStats('REFURBISHED'),
-    inventoryService.getStats(),
-    prisma.order.count(),
-    prisma.order.count({ where: { status: { in: pendingOrderStatuses } } }),
-    prisma.order.count({ where: { createdAt: { gte: monthStart } } }),
-    prisma.user.count({ where: { role: { name: { in: ['CUSTOMER', 'USER'] } } } }),
-    prisma.user.count({ where: { accessMemberUntil: { gt: now } } }),
-    prisma.returnRequest.count({
-      where: { type: 'REFURBISHMENT', status: { in: inspectionStatuses } },
-    }),
-    prisma.returnRequest.count({
-      where: { status: 'UNDER_INSPECTION', createdAt: { gte: todayStart } },
-    }),
+    wantProducts ? productService.getAdminProductStats('NEW') : Promise.resolve({ total: null }),
+    wantProducts || can('refurbished')
+      ? productService.getAdminProductStats('REFURBISHED')
+      : Promise.resolve({ total: null }),
+    wantInventory ? inventoryService.getStats() : Promise.resolve({ criticalUnderThreshold: null }),
+    wantOrders ? prisma.order.count() : Promise.resolve(null),
+    wantOrders
+      ? prisma.order.count({ where: buildLegacyAdminPendingCountWhere() })
+      : Promise.resolve(null),
+    wantOrders
+      ? prisma.order.count({ where: { createdAt: { gte: monthStart } } })
+      : Promise.resolve(null),
+    wantCustomers
+      ? prisma.user.count({ where: { role: { name: { in: ['CUSTOMER', 'USER'] } } } })
+      : Promise.resolve(null),
+    wantAccess
+      ? prisma.user.count({ where: { accessMemberUntil: { gt: now } } })
+      : Promise.resolve(null),
+    wantInspection
+      ? prisma.returnRequest.count({
+          where: { type: 'REFURBISHMENT', status: { in: inspectionStatuses } },
+        })
+      : Promise.resolve(null),
+    wantInspection
+      ? prisma.returnRequest.count({
+          where: { status: 'UNDER_INSPECTION', createdAt: { gte: todayStart } },
+        })
+      : Promise.resolve(null),
   ]);
 
   return {
-    totalProductsNew: newProductStats.total,
-    totalRefurbished: refurbishedStats.total,
-    totalOrders,
-    pendingOrders,
-    // pendingFulfillment shares the same status set as pendingOrders; alias for alert copy.
-    pendingFulfillment: pendingOrders,
-    ordersThisMonth,
-    registeredCustomers,
-    activeMembers,
-    pendingInspections,
-    queuedInspectionsToday,
-    lowStockCount: inventoryStats.criticalUnderThreshold,
+    totalProductsNew: wantProducts ? newProductStats.total : null,
+    totalRefurbished: wantProducts || can('refurbished') ? refurbishedStats.total : null,
+    totalOrders: wantOrders ? totalOrders : null,
+    pendingOrders: wantOrders ? pendingOrders : null,
+    pendingFulfillment: wantOrders ? pendingOrders : null,
+    ordersThisMonth: wantOrders ? ordersThisMonth : null,
+    registeredCustomers: wantCustomers ? registeredCustomers : null,
+    activeMembers: wantAccess ? activeMembers : null,
+    pendingInspections: wantInspection ? pendingInspections : null,
+    queuedInspectionsToday: wantInspection ? queuedInspectionsToday : null,
+    lowStockCount: wantInventory ? inventoryStats.criticalUnderThreshold : null,
   };
 }
 

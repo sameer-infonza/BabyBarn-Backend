@@ -84,11 +84,60 @@ export class ReturnPackageRequestService {
   async listForAdmin(filters = {}) {
     const where = {};
     if (filters.status) where.status = filters.status;
-    return prisma.returnPackageRequest.findMany({
-      where,
-      include: packageInclude,
-      orderBy: { createdAt: 'desc' },
-    });
+
+    const search = filters.search ? String(filters.search).trim() : '';
+    if (search) {
+      where.AND = [
+        ...(where.AND || []),
+        {
+          OR: [
+            { publicId: { contains: search, mode: 'insensitive' } },
+            { reason: { contains: search, mode: 'insensitive' } },
+            { uspsTrackingNumber: { contains: search, mode: 'insensitive' } },
+            { user: { email: { contains: search, mode: 'insensitive' } } },
+            { order: { orderNumber: { contains: search, mode: 'insensitive' } } },
+            { order: { publicId: { contains: search, mode: 'insensitive' } } },
+            { returnRequest: { returnNumber: { contains: search, mode: 'insensitive' } } },
+            { returnRequest: { submissionPublicId: { contains: search, mode: 'insensitive' } } },
+          ],
+        },
+      ];
+    }
+
+    const page = Math.max(1, Number(filters.page) || 1);
+    const limitRaw = Number(filters.limit) || 0;
+    const paginate = limitRaw > 0;
+    const limit = paginate ? Math.min(100, Math.max(1, limitRaw)) : undefined;
+    const skip = paginate ? (page - 1) * limit : undefined;
+
+    if (!paginate) {
+      return prisma.returnPackageRequest.findMany({
+        where,
+        include: packageInclude,
+        orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+      });
+    }
+
+    const [items, total] = await Promise.all([
+      prisma.returnPackageRequest.findMany({
+        where,
+        include: packageInclude,
+        orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+        skip,
+        take: limit,
+      }),
+      prisma.returnPackageRequest.count({ where }),
+    ]);
+
+    return {
+      items,
+      pagination: {
+        total,
+        page,
+        limit,
+        pages: Math.max(1, Math.ceil(total / limit) || 1),
+      },
+    };
   }
 
   async listForUser(userPublicId) {

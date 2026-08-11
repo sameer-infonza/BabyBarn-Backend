@@ -7,6 +7,15 @@ import { checkoutIntentService } from './checkout-intent.service.js';
 import { emailService } from './email.service.js';
 import { buildOrderTrackingUrl, buildGuestReturnUrl } from '../lib/order-tracking-token.js';
 import { notifyNewPaidOrder } from './admin-notification.service.js';
+import {
+  beginStripeWebhookEvent,
+  completeStripeWebhookEvent,
+  failStripeWebhookEvent,
+} from '../lib/stripe-webhook-idempotency.js';
+import {
+  derivePaymentStatusFromRefundTotals,
+  moneyRound,
+} from '../lib/order-refund-balance.js';
 
 async function getMembershipUnitAmountCents() {
   try {
@@ -383,40 +392,101 @@ async function markOrderFailedIfUnpaid(orderPublicId, source) {
   return { handled: true, flow: 'order', source, orderPublicId };
 }
 
+/**
+ * WS-A2: Sync order paymentStatus from Stripe charge refund totals.
+ * Never full-restocks inventory from charge.refunded (partial refunds must not inflate stock).
+ * PRODUCT DECISION REQUIRED for whether Stripe/Dashboard refunds should restock at all.
+ */
 async function markOrderRefundedBySessionId(sessionId, source) {
   if (!sessionId || typeof sessionId !== 'string') {
     return { handled: true, source, error: 'missing sessionId' };
   }
   const order = await prisma.order.findFirst({
-    where: { stripeCheckoutSessionId: sessionId, paymentStatus: { in: ['PAID', 'REFUNDED'] } },
-    include: { orderItems: true },
+    where: {
+      OR: [{ stripeCheckoutSessionId: sessionId }, { stripePaymentIntentId: sessionId }],
+      paymentStatus: { in: ['PAID', 'PARTIALLY_REFUNDED', 'REFUNDED'] },
+    },
+    select: {
+      id: true,
+      publicId: true,
+      totalAmount: true,
+      paymentStatus: true,
+      stripePaymentIntentId: true,
+      stripeCheckoutSessionId: true,
+    },
   });
   if (!order) {
     return { handled: true, flow: 'order', source, sessionId, error: 'order not found' };
   }
-  if (order.paymentStatus === 'PAID') {
-    const { restockPaidOrderInTx } = await import('./inventory-restock.service.js');
-    await prisma.$transaction(async (tx) => {
-      await restockPaidOrderInTx(tx, order, {
-        referenceType: 'order',
-        referenceId: order.publicId,
-        eventType: 'REFUND_RESTORE',
-        note: `Stripe ${source}`,
-        actorUserId: order.userId,
-      });
-      await tx.order.update({
-        where: { id: order.id },
-        data: { paymentStatus: 'REFUNDED', status: 'REFUNDED' },
-      });
-    });
-  } else {
-    await prisma.order.updateMany({
-      where: { id: order.id },
-      data: { paymentStatus: 'REFUNDED', status: 'REFUNDED' },
-    });
+
+  const stripe = getStripe();
+  let amountPaidCents = null;
+  let amountRefundedCents = null;
+  const paymentIntentId = order.stripePaymentIntentId;
+  if (stripe && paymentIntentId) {
+    try {
+      const { fetchStripeRefundBalance } = await import('../lib/order-refund-balance.js');
+      const balance = await fetchStripeRefundBalance(stripe, paymentIntentId);
+      if (balance) {
+        amountPaidCents = balance.amountPaidCents;
+        amountRefundedCents = balance.amountRefundedCents;
+      }
+    } catch (err) {
+      console.error('[payments] charge.refunded balance fetch failed', order.publicId, err?.message);
+    }
   }
-  return { handled: true, flow: 'order', source, sessionId };
+
+  if (amountPaidCents == null || amountRefundedCents == null) {
+    // Cannot prove totals — do not restock; leave local ledger alone.
+    return {
+      handled: true,
+      flow: 'order',
+      source,
+      sessionId,
+      orderPublicId: order.publicId,
+      inventory: 'unchanged',
+      note: 'stripe_balance_unavailable',
+    };
+  }
+
+  const paymentStatus = derivePaymentStatusFromRefundTotals(amountPaidCents, amountRefundedCents);
+  if (paymentStatus === order.paymentStatus && paymentStatus !== 'REFUNDED') {
+    return {
+      handled: true,
+      flow: 'order',
+      source,
+      sessionId,
+      orderPublicId: order.publicId,
+      paymentStatus,
+      inventory: 'unchanged',
+      note: 'already_synced',
+    };
+  }
+
+  const remainingCents = Math.max(0, amountPaidCents - amountRefundedCents);
+  const nextTotalUsd = moneyRound(remainingCents / 100);
+
+  await prisma.order.update({
+    where: { id: order.id },
+    data: {
+      paymentStatus,
+      totalAmount: nextTotalUsd,
+      ...(paymentStatus === 'REFUNDED' ? { status: 'REFUNDED' } : {}),
+    },
+  });
+
+  return {
+    handled: true,
+    flow: 'order',
+    source,
+    sessionId,
+    orderPublicId: order.publicId,
+    paymentStatus,
+    inventory: 'unchanged',
+    note: 'payment_synced_no_restock',
+  };
 }
+
 
 async function getCheckoutSessionIdFromPaymentIntent(stripe, paymentIntentId) {
   if (!paymentIntentId || typeof paymentIntentId !== 'string') return null;
@@ -1502,21 +1572,31 @@ export async function processStripeWebhook(rawBody, signatureHeader) {
     config.stripe.webhookSecret
   );
 
-  try {
-    await prisma.stripeWebhookEvent.create({
-      data: { eventId: event.id, type: event.type },
-    });
-  } catch (error) {
-    if (error && typeof error === 'object' && error.code === 'P2002') {
-      return { handled: true, duplicate: true, type: event.type };
-    }
-    if (error && typeof error === 'object' && (error.code === 'P2021' || error.code === 'P2022')) {
-      console.warn('[stripe webhook] idempotency table missing — run prisma migrate deploy');
-    } else {
-      throw error;
-    }
+  const claim = await beginStripeWebhookEvent(prisma, {
+    eventId: event.id,
+    type: event.type,
+  });
+  if (claim.action === 'skip') {
+    return {
+      handled: true,
+      duplicate: claim.reason === 'duplicate' || claim.reason === 'in_progress' || claim.reason === 'lost_claim',
+      type: event.type,
+      reason: claim.reason,
+    };
   }
 
+  try {
+    const result = await dispatchStripeWebhookEvent(event, stripe);
+    await completeStripeWebhookEvent(prisma, event.id);
+    return result;
+  } catch (err) {
+    await failStripeWebhookEvent(prisma, event.id);
+    throw err;
+  }
+}
+
+/** @param {import('stripe').Stripe.Event} event */
+async function dispatchStripeWebhookEvent(event, stripe) {
   if (event.type === 'checkout.session.completed' || event.type === 'checkout.session.async_payment_succeeded') {
     const session = event.data.object;
     const flow = getFlow(session.metadata);
@@ -1564,16 +1644,15 @@ export async function processStripeWebhook(rawBody, signatureHeader) {
 
   if (event.type === 'charge.refunded') {
     const charge = event.data.object;
-    // Reverse any split transfers proportionally to the refunded amount so the
-    // membership/store accounts give back their share. Safe for partial/duplicate events.
     await reverseOrderTransfersForCharge(stripe, charge);
     const paymentIntentId = typeof charge.payment_intent === 'string' ? charge.payment_intent : null;
     const sessionId = await getCheckoutSessionIdFromPaymentIntent(stripe, paymentIntentId);
-    return markOrderRefundedBySessionId(sessionId, event.type);
+    return markOrderRefundedBySessionId(sessionId || paymentIntentId, event.type);
   }
 
   return { handled: false, type: event.type };
 }
+
 
 export const supportedStripeWebhookEvents = [
   'checkout.session.completed',

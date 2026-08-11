@@ -30,6 +30,13 @@ router.get(
   (req, res, next) => adminController.listFinanceTransactions(req, res).catch(next)
 );
 router.get(
+  '/store-credit/activity',
+  authenticate,
+  authorize('ADMIN', 'ADMIN_TEAM'),
+  requireConsoleModule('store-credit'),
+  (req, res, next) => adminController.listStoreCreditActivity(req, res).catch(next)
+);
+router.get(
   '/audit-logs/export',
   authenticate,
   authorize('ADMIN', 'ADMIN_TEAM'),

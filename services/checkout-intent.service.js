@@ -35,6 +35,7 @@ import {
   variantAvailableStock,
 } from './inventory-reservation.js';
 import { walletService } from './wallet.service.js';
+import { postPaymentFulfillmentFields } from '../lib/order-fulfillment-start.js';
 import { shippingService } from './shipping.service.js';
 import {
   buildOrderLinePricing,
@@ -180,7 +181,9 @@ export class CheckoutIntentService {
       throw new AppError(401, 'Unauthorized');
     }
 
-    const { validateCartLines, toCheckoutItems } = await import('./cart-validation.service.js');
+    const { validateCartLines, toCheckoutItems, assertNoMaterialCartChanges } = await import(
+      './cart-validation.service.js'
+    );
     const validation = await validateCartLines(items, { mode: 'sanitize' });
     if (!validation.ok || !validation.items.length) {
       throw new AppError(
@@ -190,6 +193,7 @@ export class CheckoutIntentService {
         { removed: validation.removed, adjusted: validation.adjusted }
       );
     }
+    assertNoMaterialCartChanges(validation);
     items = toCheckoutItems(validation.items);
 
     const signature = checkoutSignature(items, opts);
@@ -221,7 +225,9 @@ export class CheckoutIntentService {
   }
 
   async createCheckoutIntent(userPublicId, items, opts = {}) {
-    const { validateCartLines, toCheckoutItems } = await import('./cart-validation.service.js');
+    const { validateCartLines, toCheckoutItems, assertNoMaterialCartChanges } = await import(
+      './cart-validation.service.js'
+    );
     const validation = await validateCartLines(items, { mode: 'sanitize' });
     if (!validation.ok || !validation.items.length) {
       throw new AppError(
@@ -231,6 +237,7 @@ export class CheckoutIntentService {
         { removed: validation.removed, adjusted: validation.adjusted }
       );
     }
+    assertNoMaterialCartChanges(validation);
     items = toCheckoutItems(validation.items);
 
     const user = await db().user.findUnique({
@@ -547,7 +554,7 @@ export class CheckoutIntentService {
           storeCreditApplied: intent.storeCreditApplied,
           paymentStatus: 'PAID',
           status: 'PROCESSING',
-          fulfillmentStatus: 'NEW_ORDER',
+          ...postPaymentFulfillmentFields(),
           contactEmail,
           contactPhone,
           placedAsGuest: Boolean(intent.placedAsGuest),

@@ -1,6 +1,14 @@
 import { prisma } from '../lib/prisma.js';
 import { AppError } from '../utils/error-handler.js';
 import { AGE_AXIS_NAME, isCanonicalAge } from '../lib/age-groups.js';
+import {
+  buildAdminStatusGroupWhere,
+  buildCustomerActiveWhere,
+  buildCustomerDeliveredWhere,
+  buildCustomerHasAnyReturnWhere,
+  buildCustomerInTransitWhere,
+  buildLegacyAdminPendingCountWhere,
+} from '../lib/order-query-filters.js';
 
 /** Canonical Age from a variant's combination, or null when absent/invalid. */
 function variantAgeGroup(variant) {
@@ -26,6 +34,16 @@ import {
   canCustomerCancelOrder,
   customerCancelUnavailableReason,
 } from '../lib/customer-order-cancellation.js';
+import { postPaymentFulfillmentFields } from '../lib/order-fulfillment-start.js';
+import {
+  classifyManualOrderStatusRequest,
+  rejectManualOrderStatusUpdate,
+} from '../lib/order-status-manual-update.js';
+import {
+  manualShipFromTrackingFields,
+  shouldManualShipFromTracking,
+} from '../lib/order-manual-ship-transition.js';
+import { buildOutboundLabelPersistData } from '../lib/order-outbound-label-persist.js';
 import { formatOrderLedgerLabel, orderLedgerNote } from '../lib/inventory-ledger-notes.js';
 import * as orderDocuments from './pdf/order-documents.service.js';
 import { emailService } from './email.service.js';
@@ -286,6 +304,45 @@ function matchRateByServiceTier(rates, reference) {
   return list[0] || null;
 }
 
+/**
+ * Group return request rows by submission for order detail / activity links.
+ * One submission → one Return ID (even if multiple lines); multiple submissions → multiple IDs.
+ */
+function summarizeOrderReturns(returnRequests = []) {
+  const bySubmission = new Map();
+  for (const rr of returnRequests) {
+    const submissionId = rr.submissionPublicId || rr.publicId;
+    if (!submissionId) continue;
+    let entry = bySubmission.get(submissionId);
+    if (!entry) {
+      entry = {
+        id: submissionId,
+        returnNumber: rr.returnNumber || null,
+        type: rr.type || 'STANDARD',
+        status: rr.status || null,
+        createdAt: rr.createdAt || null,
+        lineIds: [],
+        productNames: [],
+      };
+      bySubmission.set(submissionId, entry);
+    }
+    if (rr.returnNumber && !entry.returnNumber) {
+      entry.returnNumber = rr.returnNumber;
+    }
+    // Prefer a non-terminal / more advanced status for display when lines diverge.
+    if (rr.status) entry.status = rr.status;
+    const lineId = rr.orderItem?.publicId || null;
+    if (lineId && !entry.lineIds.includes(lineId)) {
+      entry.lineIds.push(lineId);
+    }
+    const productName = rr.orderItem?.product?.name || null;
+    if (productName && !entry.productNames.includes(productName)) {
+      entry.productNames.push(productName);
+    }
+  }
+  return [...bySubmission.values()];
+}
+
 export class OrderService {
   async calculateCheckoutQuote(userPublicId, payload) {
     const user = await prisma.user.findUnique({
@@ -505,24 +562,13 @@ export class OrderService {
     }
 
     const tab = filters.tab ? String(filters.tab) : 'all';
-    const terminalStatuses = ['DELIVERED', 'CANCELLED', 'REFUNDED', 'RETURNED'];
 
     if (tab === 'delivered') {
-      and.push({
-        OR: [
-          { status: 'DELIVERED' },
-          { fulfillmentStatus: 'DELIVERED' },
-          { deliveredAt: { not: null } },
-        ],
-      });
+      and.push(buildCustomerDeliveredWhere());
     } else if (tab === 'active') {
-      and.push({
-        deliveredAt: null,
-        status: { notIn: terminalStatuses },
-        NOT: { fulfillmentStatus: 'DELIVERED' },
-      });
+      and.push(buildCustomerActiveWhere());
     } else if (tab === 'returns') {
-      and.push({ returnRequests: { some: {} } });
+      and.push(buildCustomerHasAnyReturnWhere());
     }
 
     const search = filters.search ? String(filters.search).trim() : '';
@@ -602,51 +648,56 @@ export class OrderService {
     });
     if (!user) throw new AppError(401, 'Unauthorized');
 
-    const where = this.buildUserOrderListWhere(user.id, { periodMonths, tab: 'all' });
-    const orders = await prisma.order.findMany({
-      where,
-      select: {
-        publicId: true,
-        status: true,
-        deliveredAt: true,
-        trackingNumber: true,
-        createdAt: true,
-        returnRequests: { select: { id: true } },
-      },
-      orderBy: { createdAt: 'desc' },
+    // Same builders as list tabs — count ≡ list predicate (ORD-001-P6d).
+    const allWhere = this.buildUserOrderListWhere(user.id, { periodMonths, tab: 'all' });
+    const activeWhere = this.buildUserOrderListWhere(user.id, { periodMonths, tab: 'active' });
+    const deliveredWhere = this.buildUserOrderListWhere(user.id, {
+      periodMonths,
+      tab: 'delivered',
     });
-
-    const returnOrderIds = new Set(
-      orders.filter((o) => o.returnRequests.length > 0).map((o) => o.publicId)
-    );
-    const isDelivered = (o) =>
-      o.status.toUpperCase().includes('DELIVER') || Boolean(o.deliveredAt);
-    const isCancelled = (o) => {
-      const s = o.status.toUpperCase();
-      return s.includes('CANCEL') || s.includes('REFUND');
+    const returnsWhere = this.buildUserOrderListWhere(user.id, { periodMonths, tab: 'returns' });
+    const inTransitWhere = {
+      AND: [allWhere, buildCustomerInTransitWhere()],
     };
-    const isInTransit = (o) => {
-      if (isDelivered(o) || isCancelled(o)) return false;
-      const s = o.status.toUpperCase();
-      return Boolean(o.trackingNumber) || s.includes('SHIP') || s.includes('TRANSIT');
-    };
-    const isActive = (o) => !isDelivered(o) && !isCancelled(o) && !isInTransit(o);
 
     const year = new Date().getFullYear();
-    const deliveredThisYear = orders.filter((o) => {
-      if (!isDelivered(o)) return false;
-      const d = o.deliveredAt ? new Date(o.deliveredAt) : new Date(o.createdAt);
-      return d.getFullYear() === year;
-    }).length;
+    const yearStart = new Date(year, 0, 1);
+    const yearEnd = new Date(year, 11, 31, 23, 59, 59, 999);
+
+    const [all, active, delivered, returns, inTransit, deliveredThisYear] = await Promise.all([
+      prisma.order.count({ where: allWhere }),
+      prisma.order.count({ where: activeWhere }),
+      prisma.order.count({ where: deliveredWhere }),
+      prisma.order.count({ where: returnsWhere }),
+      prisma.order.count({ where: inTransitWhere }),
+      prisma.order.count({
+        where: {
+          AND: [
+            deliveredWhere,
+            {
+              OR: [
+                { deliveredAt: { gte: yearStart, lte: yearEnd } },
+                {
+                  AND: [
+                    { deliveredAt: null },
+                    { createdAt: { gte: yearStart, lte: yearEnd } },
+                  ],
+                },
+              ],
+            },
+          ],
+        },
+      }),
+    ]);
 
     return {
       counts: {
-        all: orders.length,
-        active: orders.filter((o) => isActive(o) || isInTransit(o)).length,
-        delivered: orders.filter(isDelivered).length,
-        returns: returnOrderIds.size,
+        all,
+        active,
+        delivered,
+        returns,
       },
-      inTransit: orders.filter(isInTransit).length,
+      inTransit,
       deliveredThisYear,
     };
   }
@@ -717,7 +768,7 @@ export class OrderService {
         orderItems: {
           include: {
             product: {
-              select: { publicId: true, name: true, slug: true, imageUrl: true },
+              select: { publicId: true, name: true, slug: true, imageUrl: true, productType: true },
             },
           },
         },
@@ -734,7 +785,7 @@ export class OrderService {
           orderItems: {
             include: {
               product: {
-                select: { publicId: true, name: true, slug: true, imageUrl: true },
+                select: { publicId: true, name: true, slug: true, imageUrl: true, productType: true },
               },
             },
           },
@@ -784,6 +835,7 @@ export class OrderService {
               name: item.product.name,
               slug: item.product.slug,
               imageUrl: item.product.imageUrl,
+              productType: item.product.productType || 'NEW',
             }
           : null,
       })),
@@ -1227,8 +1279,7 @@ export class OrderService {
           paymentStatus: 'PAID',
           status: 'PROCESSING',
           // Auto-accept on payment — no admin Accept step; customer cancel is time-windowed.
-          fulfillmentStatus: 'ACCEPTED',
-          fulfillmentAcceptedAt: new Date(),
+          ...postPaymentFulfillmentFields(),
         },
         include: { orderItems: true },
       });
@@ -1241,6 +1292,10 @@ export class OrderService {
     });
   }
 
+  /**
+   * Compatibility endpoint for admin cancel only (ORD-001 Phase 2).
+   * Free-form Order.status mutation is rejected — use fulfillment / refund / returns actions.
+   */
   async updateOrderStatus(orderPublicId, status, actor) {
     const order = await prisma.order.findUnique({
       where: { publicId: orderPublicId },
@@ -1251,7 +1306,15 @@ export class OrderService {
       throw new AppError(404, 'Order not found');
     }
 
-    if (status === 'CANCELLED' && order.status !== 'CANCELLED') {
+    const kind = classifyManualOrderStatusRequest(status);
+
+    if (kind === 'cancel') {
+      if (order.status === 'CANCELLED') {
+        return prisma.order.findUnique({
+          where: { id: order.id },
+          include: { orderItems: { include: { product: true } }, user: userForOrderList },
+        });
+      }
       const actorUserId = await resolveActorUserId(actor);
       const { order: updated } = await this.finalizeOrderCancellation(order, {
         reason: 'Cancelled by admin',
@@ -1264,7 +1327,7 @@ export class OrderService {
         action: 'ORDER_STATUS',
         entityType: 'Order',
         entityId: orderPublicId,
-        meta: { from: order.status, to: 'CANCELLED', via: 'status_update' },
+        meta: { from: order.status, to: 'CANCELLED', via: 'admin_cancel' },
       });
       return prisma.order.findUnique({
         where: { id: updated.id },
@@ -1272,20 +1335,7 @@ export class OrderService {
       });
     }
 
-    const updated = await prisma.order.update({
-      where: { id: order.id },
-      data: { status },
-      include: { orderItems: { include: { product: true } }, user: userForOrderList },
-    });
-    await writeAdminAudit({
-      actorId: actor?.id,
-      actorEmail: actor?.email,
-      action: 'ORDER_STATUS',
-      entityType: 'Order',
-      entityId: orderPublicId,
-      meta: { from: order.status, to: status },
-    });
-    return updated;
+    rejectManualOrderStatusUpdate(status);
   }
 
   async getAdminOrderStats() {
@@ -1293,9 +1343,7 @@ export class OrderService {
     const monthStart = new Date(now.getFullYear(), now.getMonth(), 1);
     const [monthTotal, pendingFulfillment, pendingCancellation] = await Promise.all([
       prisma.order.count({ where: { createdAt: { gte: monthStart } } }),
-      prisma.order.count({
-        where: { status: { in: ['PENDING', 'PROCESSING', 'CONFIRMED'] } },
-      }),
+      prisma.order.count({ where: buildLegacyAdminPendingCountWhere() }),
       prisma.order.count({ where: { cancellationReviewStatus: 'PENDING' } }),
     ]);
     return { monthTotal, pendingFulfillment, pendingCancellation };
@@ -1316,25 +1364,12 @@ export class OrderService {
       fulfillmentStatus,
     } = filters;
 
-    const STATUS_GROUPS = {
-      pending: ['PENDING', 'PROCESSING', 'CONFIRMED'],
-      shipped: ['SHIPPED'],
-      delivered: ['DELIVERED'],
-      cancelled: ['CANCELLED'],
-      returned: ['RETURNED'],
-    };
-
     const and = [];
     const sg = statusGroup && String(statusGroup).trim();
     const st = status && String(status).trim();
-    if (sg && STATUS_GROUPS[sg]) {
-      if (st && STATUS_GROUPS[sg].includes(st)) {
-        and.push({ status: st });
-      } else if (st && !STATUS_GROUPS[sg].includes(st)) {
-        and.push({ id: -1 });
-      } else {
-        and.push({ status: { in: STATUS_GROUPS[sg] } });
-      }
+    const statusGroupWhere = buildAdminStatusGroupWhere(sg, st);
+    if (statusGroupWhere) {
+      and.push(statusGroupWhere);
     } else if (st) {
       and.push({ status: st });
     }
@@ -1449,80 +1484,258 @@ export class OrderService {
           include: orderItemAdminInclude,
         },
         trackingEvents: { orderBy: { createdAt: 'desc' }, take: 80 },
+        returnRequests: {
+          select: {
+            publicId: true,
+            submissionPublicId: true,
+            returnNumber: true,
+            type: true,
+            status: true,
+            createdAt: true,
+            orderItemId: true,
+            orderItem: {
+              select: {
+                publicId: true,
+                product: { select: { name: true } },
+              },
+            },
+          },
+          orderBy: { createdAt: 'asc' },
+        },
       },
     });
     if (!order) {
       throw new AppError(404, 'Order not found');
     }
-    return order;
+
+    const returns = summarizeOrderReturns(order.returnRequests || []);
+    const returnsByLineId = new Map();
+    for (const ret of returns) {
+      for (const lineId of ret.lineIds) {
+        if (!returnsByLineId.has(lineId)) returnsByLineId.set(lineId, []);
+        returnsByLineId.get(lineId).push(ret);
+      }
+    }
+
+    const orderItems = (order.orderItems || []).map((item) => ({
+      ...item,
+      returns: returnsByLineId.get(item.publicId) || [],
+    }));
+
+    return {
+      ...order,
+      orderItems,
+      returns,
+    };
   }
 
   async refundOrder(orderPublicId, actor, opts = {}) {
-    const order = await prisma.order.findUnique({ where: { publicId: orderPublicId } });
+    const {
+      assertRefundWithinRemaining,
+      classifyStripeRefundError,
+      derivePaymentStatusFromRefundTotals,
+      fetchStripeRefundBalance,
+      isRefundablePaymentStatus,
+      localRemainingRefundableUsd,
+      moneyRound,
+      resolveAdminOrderRefundRequest,
+      resolveRemainingRefundableCents,
+      usdToCents,
+    } = await import('../lib/order-refund-balance.js');
+
+    const order = await prisma.order.findUnique({
+      where: { publicId: orderPublicId },
+      include: { orderItems: true, user: userForOrderList },
+    });
     if (!order) throw new AppError(404, 'Order not found');
-    if (order.paymentStatus !== 'PAID') {
-      throw new AppError(400, 'Only paid orders can be refunded');
+
+    if (order.paymentStatus === 'REFUNDED' || order.status === 'REFUNDED') {
+      throw new AppError(400, 'Order already refunded', 'ORDER_ALREADY_REFUNDED');
     }
-    if (order.status === 'REFUNDED' || order.paymentStatus === 'REFUNDED') {
-      throw new AppError(400, 'Order already refunded');
+    if (!isRefundablePaymentStatus(order.paymentStatus)) {
+      throw new AppError(400, 'Order is not in a refundable payment state', 'ORDER_NOT_REFUNDABLE');
     }
 
-    const { getStripe } = await import('./payment.service.js');
-    const stripe = getStripe();
+    const { stripe, paymentIntentId } = await this.resolveStripePaymentIntentId(order);
     if (!stripe) {
       throw new AppError(503, 'Stripe is not configured', 'STRIPE_NOT_CONFIGURED');
-    }
-
-    let paymentIntentId = order.stripePaymentIntentId;
-    if (!paymentIntentId && order.stripeCheckoutSessionId) {
-      const ref = order.stripeCheckoutSessionId;
-      if (ref.startsWith('pi_')) {
-        paymentIntentId = ref;
-      } else if (ref.startsWith('cs_')) {
-        const session = await stripe.checkout.sessions.retrieve(ref);
-        paymentIntentId =
-          typeof session.payment_intent === 'string' ? session.payment_intent : session.payment_intent?.id;
-      }
     }
     if (!paymentIntentId) {
       throw new AppError(400, 'No Stripe payment reference found for this order', 'NO_PAYMENT_REFERENCE');
     }
 
-    const refundAmountUsd = opts.amount != null ? Number(opts.amount) : Number(order.totalAmount);
-    const amountCents = Math.round(refundAmountUsd * 100);
-    if (amountCents < 1) {
-      throw new AppError(400, 'Refund amount must be greater than zero');
+    let stripeBalance;
+    try {
+      stripeBalance = await fetchStripeRefundBalance(stripe, paymentIntentId);
+    } catch (err) {
+      console.error('[order-refund] failed to load Stripe balance', orderPublicId, err);
+      throw new AppError(
+        502,
+        'Unable to verify remaining refundable balance with Stripe. Try again shortly.',
+        'STRIPE_BALANCE_UNAVAILABLE'
+      );
     }
 
-    const refund = await stripe.refunds.create(
-      {
-        payment_intent: paymentIntentId,
-        amount: amountCents,
-        metadata: { orderPublicId, actorEmail: actor?.email || '' },
-      },
-      { idempotencyKey: `refund-${orderPublicId}-${amountCents}` }
-    );
-
-    const updated = await prisma.$transaction(async (tx) => {
-      const withItems = await tx.order.findUnique({
-        where: { id: order.id },
-        include: { orderItems: true },
-      });
-      const { restockPaidOrderInTx } = await import('./inventory-restock.service.js');
-      const orderLabel = formatOrderLedgerLabel(order.orderNumber, orderPublicId);
-      await restockPaidOrderInTx(tx, withItems, {
-        referenceType: 'order',
-        referenceId: orderPublicId,
-        eventType: 'REFUND_RESTORE',
-        note: orderLedgerNote('REFUND_RESTORE', orderLabel),
-        actorUserId: actor?.id ?? null,
-      });
-      return tx.order.update({
-        where: { id: order.id },
-        data: { status: 'REFUNDED', paymentStatus: 'REFUNDED' },
-        include: { orderItems: { include: { product: true } }, user: userForOrderList },
-      });
+    const remainingCents = resolveRemainingRefundableCents({
+      stripeRemainingCents: stripeBalance?.remainingCents,
+      localRemainingUsd: localRemainingRefundableUsd(order),
     });
+
+    const request = resolveAdminOrderRefundRequest({
+      remainingCents,
+      requestedAmountUsd: opts.amount,
+    });
+    if (!request.ok) {
+      throw new AppError(400, request.message, request.code);
+    }
+
+    const refundAmountUsd = request.refundAmountUsd;
+    const amountCents = request.requestedCents;
+    const idempotencyKey = `order-admin-refund-${orderPublicId}-${amountCents}`.slice(0, 255);
+
+    let refund;
+    try {
+      refund = await stripe.refunds.create(
+        {
+          payment_intent: paymentIntentId,
+          amount: amountCents,
+          metadata: {
+            orderPublicId,
+            actorEmail: actor?.email || '',
+            refundType: 'admin_order',
+            isFullRemaining: request.isFullRemaining ? '1' : '0',
+          },
+        },
+        { idempotencyKey }
+      );
+    } catch (err) {
+      const classified = classifyStripeRefundError(err);
+      if (classified) {
+        throw new AppError(400, classified.message, classified.code);
+      }
+      console.error('[order-refund] Stripe refund create failed', orderPublicId, err);
+      throw new AppError(
+        502,
+        'Stripe refund failed. No local refund was recorded — safe to retry.',
+        'STRIPE_REFUND_FAILED'
+      );
+    }
+
+    let balanceAfter = stripeBalance
+      ? {
+          amountPaidCents: stripeBalance.amountPaidCents,
+          amountRefundedCents: stripeBalance.amountRefundedCents + amountCents,
+          remainingCents: Math.max(0, stripeBalance.remainingCents - amountCents),
+        }
+      : null;
+    try {
+      const fresh = await fetchStripeRefundBalance(stripe, paymentIntentId);
+      if (fresh) balanceAfter = fresh;
+    } catch {
+      // Non-fatal — use optimistic totals.
+    }
+    if (!balanceAfter) {
+      balanceAfter = {
+        amountPaidCents: amountCents,
+        amountRefundedCents: amountCents,
+        remainingCents: 0,
+      };
+    }
+
+    const paymentStatus = derivePaymentStatusFromRefundTotals(
+      balanceAfter.amountPaidCents,
+      balanceAfter.amountRefundedCents
+    );
+    const actorUserId = await resolveActorUserId(actor);
+
+    let updated;
+    try {
+      updated = await prisma.$transaction(async (tx) => {
+        const lockedRows = await tx.$queryRaw`
+          SELECT id, "totalAmount", "paymentStatus", status
+          FROM "Order"
+          WHERE id = ${order.id}
+          FOR UPDATE
+        `;
+        const locked = lockedRows?.[0];
+        if (!locked) throw new AppError(404, 'Order not found');
+
+        if (locked.paymentStatus === 'REFUNDED' || locked.status === 'REFUNDED') {
+          throw new AppError(400, 'Order already refunded', 'ORDER_ALREADY_REFUNDED');
+        }
+        if (!isRefundablePaymentStatus(locked.paymentStatus)) {
+          throw new AppError(
+            400,
+            'Order is not in a refundable payment state',
+            'ORDER_NOT_REFUNDABLE'
+          );
+        }
+
+        const localRemainingCents = usdToCents(localRemainingRefundableUsd(locked));
+        const withinLocal = assertRefundWithinRemaining(amountCents, localRemainingCents);
+        if (!withinLocal.ok) {
+          throw new AppError(400, withinLocal.message, withinLocal.code);
+        }
+
+        const withItems = await tx.order.findUnique({
+          where: { id: order.id },
+          include: { orderItems: true },
+        });
+        const {
+          appendAppliedStripeRefundId,
+          hasAppliedStripeRefundId,
+        } = await import('../lib/order-refund-side-effects.js');
+
+        if (hasAppliedStripeRefundId(withItems.appliedStripeRefundIds, refund.id)) {
+          return withItems;
+        }
+
+        // WS-A3 interim policy: restock merchandise only on full remaining close-out.
+        // Partial admin refunds are money-only — PRODUCT DECISION REQUIRED for line restock.
+        if (request.isFullRemaining) {
+          const { restockPaidOrderInTx } = await import('./inventory-restock.service.js');
+          const orderLabel = formatOrderLedgerLabel(order.orderNumber, orderPublicId);
+          await restockPaidOrderInTx(tx, withItems, {
+            referenceType: 'order',
+            referenceId: orderPublicId,
+            eventType: 'REFUND_RESTORE',
+            note: orderLedgerNote('REFUND_RESTORE', orderLabel),
+            actorUserId,
+          });
+        }
+
+        const nextTotal = moneyRound(Math.max(0, Number(locked.totalAmount) - refundAmountUsd));
+        const nextStatus =
+          paymentStatus === 'REFUNDED' || request.isFullRemaining ? 'REFUNDED' : locked.status;
+        const nextApplied = appendAppliedStripeRefundId(withItems.appliedStripeRefundIds, refund.id);
+
+        return tx.order.update({
+          where: { id: order.id },
+          data: {
+            status: nextStatus,
+            paymentStatus,
+            totalAmount: nextTotal,
+            appliedStripeRefundIds: nextApplied,
+          },
+          include: { orderItems: { include: { product: true } }, user: userForOrderList },
+        });
+      });
+    } catch (err) {
+      if (err instanceof AppError) throw err;
+      console.error(
+        '[order-refund] Stripe refund succeeded but local persist failed',
+        orderPublicId,
+        refund.id,
+        err
+      );
+      throw new AppError(
+        500,
+        `Stripe refund ${refund.id} succeeded but local recording failed. Retry this refund to reconcile.`,
+        'ORDER_REFUND_PERSIST_FAILED',
+        { stripeRefundId: refund.id, refundAmountUsd }
+      );
+    }
+
     await writeAdminAudit({
       actorId: actor?.id,
       actorEmail: actor?.email,
@@ -1530,10 +1743,15 @@ export class OrderService {
       entityType: 'Order',
       entityId: orderPublicId,
       meta: {
-        totalAmount: order.totalAmount,
+        totalAmountBefore: order.totalAmount,
         shippingCost: order.shippingCost,
         stripeRefundId: refund.id,
         refundAmountUsd,
+        paymentStatus,
+        totalAmountAfter: updated.totalAmount,
+        amountPaidCents: balanceAfter.amountPaidCents,
+        amountRefundedCentsAfter: balanceAfter.amountRefundedCents,
+        isFullRemaining: request.isFullRemaining,
       },
     });
 
@@ -1576,13 +1794,12 @@ export class OrderService {
         ? String(payload.manualShippingNotes).trim()
         : null;
     }
-    const shouldShip =
-      data.trackingNumber &&
-      ['PENDING', 'PROCESSING', 'CONFIRMED'].includes(order.status);
+    const shouldShip = shouldManualShipFromTracking({
+      status: order.status,
+      trackingNumber: data.trackingNumber,
+    });
     if (shouldShip) {
-      data.status = 'SHIPPED';
-      data.fulfillmentStatus = 'SHIPPED';
-      data.outboundShippedAt = new Date();
+      Object.assign(data, manualShipFromTrackingFields());
     }
     const updated = await prisma.order.update({
       where: { id: order.id },
@@ -1718,6 +1935,33 @@ export class OrderService {
     }
   }
 
+  /**
+   * Persist outbound UPS label fields on an order (ORD-001-P4 shared path).
+   * Does not send email or write ORDER_LABEL_PURCHASED — callers own those.
+   */
+  async persistOutboundShippingLabel(orderPublicId, label, opts = {}) {
+    const order = await prisma.order.findUnique({ where: { publicId: orderPublicId } });
+    if (!order) throw new AppError(404, 'Order not found');
+
+    const { data } = buildOutboundLabelPersistData({
+      order,
+      label,
+      packageDetailsJson: opts.packageDetailsJson,
+      shipmentId: opts.shipmentId,
+      selectedRateUpdate: opts.selectedRateUpdate,
+      at: opts.at,
+    });
+
+    const updateArgs = {
+      where: { id: order.id },
+      data,
+    };
+    if (opts.include !== false) {
+      updateArgs.include = { orderItems: { include: { product: true } }, user: userForOrderList };
+    }
+    return prisma.order.update(updateArgs);
+  }
+
   async generateAdminShippingLabel(orderPublicId, payload, actor) {
     const order = await prisma.order.findUnique({
       where: { publicId: orderPublicId },
@@ -1755,26 +1999,12 @@ export class OrderService {
       },
     };
 
-    const updated = await prisma.order.update({
-      where: { id: order.id },
-      data: {
-        ...(label.trackingNumber ? { trackingNumber: label.trackingNumber } : {}),
-        ...(label.shippingCarrier ? { shippingCarrier: label.shippingCarrier } : {}),
-        ...(label.shippingLabelUrl ? { shippingLabelUrl: label.shippingLabelUrl } : {}),
-        ...(label.transactionId ? { shippingTransactionId: label.transactionId } : {}),
-        ...(payload?.shipmentId ? { shippingShipmentId: String(payload.shipmentId) } : {}),
-        ...(payload?.selectedRate ? selectedRateUpdateData(payload.selectedRate, payload?.shipmentId || order.shippingShipmentId) : {}),
-        fulfillmentStatus: 'PICKUP_READY',
-        labelGeneratedAt: new Date(),
-        packageDetailsJson,
-        trackingStatus: 'LABEL_CREATED',
-        trackingStatusDetails: 'UPS shipping label generated',
-        trackingStatusDate: new Date(),
-        ...(order.fulfillmentStatus === 'NEW_ORDER' || !order.fulfillmentAcceptedAt
-          ? { fulfillmentAcceptedAt: new Date() }
-          : {}),
-      },
-      include: { orderItems: { include: { product: true } }, user: userForOrderList },
+    const updated = await this.persistOutboundShippingLabel(orderPublicId, label, {
+      packageDetailsJson,
+      shipmentId: payload?.shipmentId || order.shippingShipmentId || null,
+      selectedRateUpdate: payload?.selectedRate
+        ? selectedRateUpdateData(payload.selectedRate, payload?.shipmentId || order.shippingShipmentId)
+        : null,
     });
 
     if (label.trackingNumber) {
@@ -1883,26 +2113,43 @@ export class OrderService {
     return { order: updated, label };
   }
 
+  /**
+   * Attach outbound tracking (legacy admin API).
+   * ORD-001-P3: when this path performs a ship transition, fulfillmentStatus,
+   * Order.status, and outboundShippedAt update atomically (same semantics as
+   * updateAdminShipping). UPS label generation remains PICKUP_READY + tracking.
+   */
   async addTracking(orderPublicId, tracking, actor) {
     const order = await prisma.order.findUnique({ where: { publicId: orderPublicId } });
     if (!order) throw new AppError(404, 'Order not found');
-    const statusWillShip =
-      order.status === 'PROCESSING' || order.status === 'CONFIRMED' || order.status === 'PENDING';
+
+    const trackingNumber = String(tracking.trackingNumber || '').trim();
+    if (!trackingNumber) {
+      throw new AppError(400, 'Tracking number is required');
+    }
+
+    const shouldShip = shouldManualShipFromTracking({
+      status: order.status,
+      trackingNumber,
+    });
+
+    const data = {
+      trackingNumber,
+      shippingCarrier: tracking.shippingCarrier || order.shippingCarrier || null,
+      trackingStatus: tracking.status || null,
+      trackingStatusDetails: tracking.statusDetails || null,
+      trackingStatusDate: parseDateOrNull(tracking.statusDate),
+      trackingEta: parseDateOrNull(tracking.eta),
+      trackingHistoryJson: Array.isArray(tracking.history) ? tracking.history : [],
+      ...(tracking.shippingLabelUrl !== undefined
+        ? { shippingLabelUrl: tracking.shippingLabelUrl || null }
+        : {}),
+      ...(shouldShip ? manualShipFromTrackingFields() : {}),
+    };
+
     const updated = await prisma.order.update({
       where: { id: order.id },
-      data: {
-        trackingNumber: tracking.trackingNumber,
-        shippingCarrier: tracking.shippingCarrier || order.shippingCarrier || null,
-        trackingStatus: tracking.status || null,
-        trackingStatusDetails: tracking.statusDetails || null,
-        trackingStatusDate: parseDateOrNull(tracking.statusDate),
-        trackingEta: parseDateOrNull(tracking.eta),
-        trackingHistoryJson: Array.isArray(tracking.history) ? tracking.history : [],
-        ...(tracking.shippingLabelUrl !== undefined
-          ? { shippingLabelUrl: tracking.shippingLabelUrl || null }
-          : {}),
-        ...(statusWillShip ? { status: 'SHIPPED' } : {}),
-      },
+      data,
     });
     await writeAdminAudit({
       actorId: actor?.id,
@@ -1913,7 +2160,8 @@ export class OrderService {
       meta: {
         trackingNumber: updated.trackingNumber,
         shippingCarrier: updated.shippingCarrier,
-        statusChanged: statusWillShip,
+        statusChanged: shouldShip,
+        fulfillmentSynced: shouldShip,
       },
     });
     return updated;
@@ -1939,6 +2187,72 @@ export class OrderService {
   }
 
   /**
+   * Preview how a full (or partial) cancellation will split money across Stripe / store credit.
+   * Does not mutate the order.
+   */
+  async getCancellationPreview(orderPublicId, { itemPublicIds = null } = {}) {
+    const order = await prisma.order.findUnique({
+      where: { publicId: orderPublicId },
+      include: {
+        orderItems: { include: { product: { select: { name: true } } } },
+      },
+    });
+    if (!order) throw new AppError(404, 'Order not found');
+
+    const { computeOrderCancellationBreakdown, moneyRound } = await import(
+      '../lib/order-cancellation-preview.js'
+    );
+    const breakdown = computeOrderCancellationBreakdown(order, { itemPublicIds });
+    if (!breakdown.ok) {
+      throw new AppError(400, breakdown.message, breakdown.code);
+    }
+
+    let stripeRemainingUsd = null;
+    let stripeRefundClamped = breakdown.stripeRefundAmount;
+    let stripeWarning = null;
+
+    if (breakdown.isPaid && breakdown.stripeRefundAmount > 0) {
+      try {
+        const { stripe, paymentIntentId } = await this.resolveStripePaymentIntentId(order);
+        if (stripe && paymentIntentId) {
+          const {
+            fetchStripeRefundBalance,
+            localRemainingRefundableUsd,
+            resolveRemainingRefundableCents,
+            usdToCents,
+          } = await import('../lib/order-refund-balance.js');
+          const stripeBalance = await fetchStripeRefundBalance(stripe, paymentIntentId);
+          const remainingCents = resolveRemainingRefundableCents({
+            stripeRemainingCents: stripeBalance?.remainingCents,
+            localRemainingUsd: localRemainingRefundableUsd(order),
+          });
+          stripeRemainingUsd = moneyRound(remainingCents / 100);
+          const amountCents = Math.min(usdToCents(breakdown.stripeRefundAmount), remainingCents);
+          stripeRefundClamped = moneyRound(amountCents / 100);
+          if (stripeRefundClamped < breakdown.stripeRefundAmount) {
+            stripeWarning =
+              'Stripe remaining balance is lower than the calculated refund — amount will be capped.';
+          }
+        }
+      } catch {
+        stripeWarning =
+          'Could not verify Stripe remaining balance; amounts below are calculated from the order.';
+      }
+    }
+
+    return {
+      ...breakdown,
+      stripeRefundAmount: stripeRefundClamped,
+      stripeRefundEstimated: breakdown.stripeRefundAmount,
+      stripeRemainingUsd,
+      stripeWarning,
+      customerReceivesTotal: moneyRound(stripeRefundClamped + breakdown.storeCreditRestore),
+      orderId: order.publicId,
+      orderNumber: order.orderNumber,
+    };
+  }
+
+  /**
    * Cancel an entire order or selected line items before warehouse processing.
    * @param {object} order
    * @param {{ reason?: string|null, actorUserId?: number|null, reviewStatus?: string, itemPublicIds?: string[]|null }} opts
@@ -1947,60 +2261,31 @@ export class OrderService {
     order,
     { reason = null, actorUserId = null, reviewStatus = 'NONE', itemPublicIds = null } = {}
   ) {
+    const { computeOrderCancellationBreakdown } = await import('../lib/order-cancellation-preview.js');
+    const breakdown = computeOrderCancellationBreakdown(order, { itemPublicIds });
+    if (!breakdown.ok) {
+      throw new AppError(400, breakdown.message, breakdown.code);
+    }
+
     const orderPublicId = order.publicId;
     const reasonTrimmed = reason?.trim() || null;
-    const activeLines = (order.orderItems || []).filter((line) => !line.cancelledAt);
-    if (activeLines.length === 0) {
-      throw new AppError(400, 'All items on this order are already cancelled');
-    }
+    const {
+      cancellingAll,
+      isPaid,
+      lines,
+      productAmount: cancelMerchandise,
+      storeCreditApplied: storeCreditOnOrder,
+      storeCreditRestore: creditShare,
+      taxAmount: taxOnOrder,
+      taxRefund: taxShare,
+    } = breakdown;
 
-    let linesToCancel = activeLines;
-    if (Array.isArray(itemPublicIds) && itemPublicIds.length > 0) {
-      const wanted = new Set(itemPublicIds.map(String));
-      linesToCancel = activeLines.filter((line) => wanted.has(String(line.publicId)));
-      if (linesToCancel.length === 0) {
-        throw new AppError(400, 'No matching active items to cancel');
-      }
-      const unknown = [...wanted].filter((id) => !activeLines.some((l) => String(l.publicId) === id));
-      if (unknown.length > 0) {
-        throw new AppError(400, 'One or more selected items are not on this order or already cancelled');
-      }
-    }
+    const linesToCancel = (order.orderItems || []).filter((line) =>
+      lines.some((l) => String(l.id) === String(line.publicId))
+    );
 
-    const cancellingAll = linesToCancel.length === activeLines.length;
-    const isPaid =
-      order.paymentStatus === 'PAID' || order.paymentStatus === 'PARTIALLY_REFUNDED';
     let stripeRefundId = null;
-    let refundAmountUsd = 0;
-
-    const merchandiseSubtotal = activeLines.reduce(
-      (sum, line) => sum + Number(line.price) * Number(line.quantity),
-      0
-    );
-    const cancelMerchandise = linesToCancel.reduce(
-      (sum, line) => sum + Number(line.price) * Number(line.quantity),
-      0
-    );
-    const storeCreditOnOrder = Math.max(0, Number(order.storeCreditApplied) || 0);
-    const taxOnOrder = Math.max(0, Number(order.taxAmount) || 0);
-    const creditShare =
-      cancellingAll || merchandiseSubtotal <= 0
-        ? storeCreditOnOrder
-        : Math.round((storeCreditOnOrder * (cancelMerchandise / merchandiseSubtotal)) * 100) / 100;
-    const taxShare =
-      cancellingAll || merchandiseSubtotal <= 0
-        ? taxOnOrder
-        : Math.round((taxOnOrder * (cancelMerchandise / merchandiseSubtotal)) * 100) / 100;
-    // Full cancel refunds the remaining card total (includes shipping). Partial refunds
-    // cancelled merchandise + proportional tax, minus store-credit share for those lines.
-    if (cancellingAll && isPaid) {
-      refundAmountUsd = Math.max(0, Number(order.totalAmount));
-    } else if (isPaid) {
-      refundAmountUsd = Math.max(
-        0,
-        Math.round((cancelMerchandise + taxShare - creditShare) * 100) / 100
-      );
-    }
+    let refundAmountUsd = breakdown.stripeRefundAmount;
 
     if (isPaid && refundAmountUsd > 0) {
       const { stripe, paymentIntentId } = await this.resolveStripePaymentIntentId(order);
@@ -2011,30 +2296,80 @@ export class OrderService {
         throw new AppError(400, 'No Stripe payment reference found for this order', 'NO_PAYMENT_REFERENCE');
       }
 
-      const amountCents = Math.round(refundAmountUsd * 100);
+      const {
+        assertRefundWithinRemaining,
+        classifyStripeRefundError,
+        fetchStripeRefundBalance,
+        localRemainingRefundableUsd,
+        resolveRemainingRefundableCents,
+        usdToCents,
+      } = await import('../lib/order-refund-balance.js');
+
+      let stripeBalance;
+      try {
+        stripeBalance = await fetchStripeRefundBalance(stripe, paymentIntentId);
+      } catch (err) {
+        console.error('[order-cancel] failed to load Stripe balance', orderPublicId, err);
+        throw new AppError(
+          502,
+          'Unable to verify remaining refundable balance with Stripe. Try again shortly.',
+          'STRIPE_BALANCE_UNAVAILABLE'
+        );
+      }
+
+      const remainingCents = resolveRemainingRefundableCents({
+        stripeRemainingCents: stripeBalance?.remainingCents,
+        localRemainingUsd: localRemainingRefundableUsd(order),
+      });
+      let amountCents = usdToCents(refundAmountUsd);
+      const within = assertRefundWithinRemaining(amountCents, remainingCents);
+      if (!within.ok) {
+        if (remainingCents <= 0) {
+          throw new AppError(400, within.message, within.code);
+        }
+        amountCents = Math.min(amountCents, remainingCents);
+        refundAmountUsd = Math.round(amountCents) / 100;
+      } else {
+        amountCents = Math.min(amountCents, remainingCents);
+        refundAmountUsd = Math.round((amountCents / 100) * 100) / 100;
+      }
+
       if (amountCents > 0) {
         const lineKey = linesToCancel
           .map((l) => l.publicId)
           .sort()
           .join(',');
-        const refund = await stripe.refunds.create(
-          {
-            payment_intent: paymentIntentId,
-            amount: amountCents,
-            metadata: {
-              orderPublicId,
-              source: cancellingAll ? 'customer_cancel' : 'customer_cancel_partial',
-              itemPublicIds: lineKey.slice(0, 450),
+        try {
+          const refund = await stripe.refunds.create(
+            {
+              payment_intent: paymentIntentId,
+              amount: amountCents,
+              metadata: {
+                orderPublicId,
+                source: cancellingAll ? 'customer_cancel' : 'customer_cancel_partial',
+                itemPublicIds: lineKey.slice(0, 450),
+              },
             },
-          },
-          {
-            idempotencyKey: `cancel-${orderPublicId}-${cancellingAll ? 'full' : lineKey}-${amountCents}`.slice(
-              0,
-              255
-            ),
+            {
+              idempotencyKey: `cancel-${orderPublicId}-${cancellingAll ? 'full' : lineKey}-${amountCents}`.slice(
+                0,
+                255
+              ),
+            }
+          );
+          stripeRefundId = refund.id;
+        } catch (err) {
+          const classified = classifyStripeRefundError(err);
+          if (classified) {
+            throw new AppError(400, classified.message, classified.code);
           }
-        );
-        stripeRefundId = refund.id;
+          console.error('[order-cancel] Stripe refund create failed', orderPublicId, err);
+          throw new AppError(
+            502,
+            'Stripe refund failed. No local cancellation was recorded — safe to retry.',
+            'STRIPE_REFUND_FAILED'
+          );
+        }
       }
     } else if (!isPaid) {
       await this.releasePendingOrderResources(orderPublicId, {
@@ -2053,23 +2388,49 @@ export class OrderService {
       });
       if (!withItems) throw new AppError(404, 'Order not found');
 
+      let nextAppliedRefundIds = withItems.appliedStripeRefundIds;
+
       if (isPaid) {
-        const { restockPaidOrderInTx } = await import('./inventory-restock.service.js');
-        const orderLabel = formatOrderLedgerLabel(withItems.orderNumber, orderPublicId);
-        await restockPaidOrderInTx(tx, withItems, {
-          referenceType: 'order',
-          referenceId: orderPublicId,
-          eventType: 'REFUND_RESTORE',
-          note: orderLedgerNote('REFUND_RESTORE', orderLabel),
-          actorUserId,
-          itemPublicIds: cancelIds,
-        });
-        if (creditShare > 0) {
-          await walletService.refundRedeemedCreditInTx(
-            tx,
-            withItems.userId,
-            creditShare,
-            orderPublicId
+        const {
+          appendAppliedStripeRefundId,
+          cancelCreditRestoreSourceKey,
+          hasAppliedStripeRefundId,
+        } = await import('../lib/order-refund-side-effects.js');
+
+        const alreadyApplied =
+          stripeRefundId && hasAppliedStripeRefundId(withItems.appliedStripeRefundIds, stripeRefundId);
+
+        if (!alreadyApplied) {
+          const { restockPaidOrderInTx } = await import('./inventory-restock.service.js');
+          const orderLabel = formatOrderLedgerLabel(withItems.orderNumber, orderPublicId);
+          await restockPaidOrderInTx(tx, withItems, {
+            referenceType: 'order',
+            referenceId: orderPublicId,
+            eventType: 'REFUND_RESTORE',
+            note: orderLedgerNote('REFUND_RESTORE', orderLabel),
+            actorUserId,
+            itemPublicIds: cancelIds,
+          });
+          if (creditShare > 0) {
+            await walletService.refundRedeemedCreditInTx(
+              tx,
+              withItems.userId,
+              creditShare,
+              orderPublicId,
+              {
+                sourceKey: cancelCreditRestoreSourceKey(
+                  orderPublicId,
+                  stripeRefundId || `lines:${[...cancelIds].sort().join(',')}`
+                ),
+              }
+            );
+          }
+        }
+
+        if (stripeRefundId && !alreadyApplied) {
+          nextAppliedRefundIds = appendAppliedStripeRefundId(
+            withItems.appliedStripeRefundIds,
+            stripeRefundId
           );
         }
       } else if (creditShare > 0) {
@@ -2131,6 +2492,9 @@ export class OrderService {
           cancellationRequestedAt: now,
           cancellationRequestReason: reasonTrimmed,
           cancellationReviewNote: null,
+          ...(nextAppliedRefundIds != null
+            ? { appliedStripeRefundIds: nextAppliedRefundIds }
+            : {}),
         },
         include: {
           orderItems: { include: orderItemCustomerInclude },
@@ -2326,12 +2690,40 @@ export class OrderService {
       if (order.paymentStatus !== 'PAID' && order.paymentStatus !== 'PARTIALLY_REFUNDED') {
         throw new AppError(400, 'Only paid orders can be marked picked');
       }
+      if (['CANCELLED', 'SHIPPED', 'DELIVERED', 'RETURNED', 'REFUNDED'].includes(order.status)) {
+        throw new AppError(400, `Cannot mark picked — order is ${order.status}`);
+      }
+      if (order.cancellationReviewStatus === 'PENDING') {
+        throw new AppError(400, 'Cannot mark picked while cancellation review is pending');
+      }
+      const fs = String(order.fulfillmentStatus || '');
+      if (
+        ['PICKUP_READY', 'LABEL_GENERATED', 'SHIPPED', 'IN_TRANSIT', 'OUT_FOR_DELIVERY', 'DELIVERED'].includes(
+          fs
+        )
+      ) {
+        // Idempotent: already past pick — return current order without rewrite.
+        return prisma.order.findUnique({
+          where: { id: order.id },
+          include: { orderItems: { include: { product: true } }, user: userForOrderList },
+        });
+      }
       data.fulfillmentStatus = 'PICKUP_READY';
       data.pickupReadyAt = new Date();
       if (!order.fulfillmentAcceptedAt) {
         data.fulfillmentAcceptedAt = new Date();
       }
     } else if (action === 'mark_shipped') {
+      const hasTracking = Boolean(String(order.trackingNumber || '').trim());
+      const hasLabel = Boolean(String(order.shippingLabelUrl || '').trim());
+      const overrideReason = String(body?.shipOverrideReason || '').trim();
+      if (!hasTracking && !hasLabel && overrideReason.length < 3) {
+        throw new AppError(
+          400,
+          'Add a tracking number or shipping label before marking shipped, or provide an override reason (min 3 characters).',
+          'SHIP_TRACKING_REQUIRED'
+        );
+      }
       data.fulfillmentStatus = 'SHIPPED';
       data.outboundShippedAt = new Date();
       if (['PENDING', 'PROCESSING', 'CONFIRMED'].includes(order.status)) data.status = 'SHIPPED';
@@ -2360,7 +2752,13 @@ export class OrderService {
       action: `FULFILLMENT_${action}`,
       entityType: 'Order',
       entityId: orderPublicId,
-      meta: { from: order.fulfillmentStatus, to: updated.fulfillmentStatus },
+      meta: {
+        from: order.fulfillmentStatus,
+        to: updated.fulfillmentStatus,
+        ...(action === 'mark_shipped' && String(body?.shipOverrideReason || '').trim()
+          ? { shipOverrideReason: String(body.shipOverrideReason).trim() }
+          : {}),
+      },
     });
     return updated;
   }
@@ -2459,11 +2857,53 @@ export class OrderService {
       },
     });
     if (!orders.length) throw new AppError(400, 'No matching orders');
+
+    const terminal = new Set(['CANCELLED', 'SHIPPED', 'DELIVERED', 'RETURNED', 'REFUNDED']);
+    const pastPick = new Set([
+      'PICKUP_READY',
+      'LABEL_GENERATED',
+      'SHIPPED',
+      'IN_TRANSIT',
+      'OUT_FOR_DELIVERY',
+      'DELIVERED',
+    ]);
+    const eligible = [];
+    const skipped = [];
+    for (const o of orders) {
+      if (terminal.has(o.status)) {
+        skipped.push({ id: o.publicId, reason: `status ${o.status}` });
+        continue;
+      }
+      if (o.cancellationReviewStatus === 'PENDING') {
+        skipped.push({ id: o.publicId, reason: 'cancellation review pending' });
+        continue;
+      }
+      if (o.paymentStatus !== 'PAID' && o.paymentStatus !== 'PARTIALLY_REFUNDED') {
+        skipped.push({ id: o.publicId, reason: 'not paid' });
+        continue;
+      }
+      if (pastPick.has(String(o.fulfillmentStatus || ''))) {
+        skipped.push({ id: o.publicId, reason: 'already picked or further along' });
+        continue;
+      }
+      eligible.push(o);
+    }
+    if (!eligible.length) {
+      throw new AppError(
+        400,
+        'No eligible orders for a pick wave. Orders must be paid, not cancelled/shipped, and not already picked.'
+      );
+    }
+
+    // Preserve caller order for eligible ids only.
+    const byId = new Map(eligible.map((o) => [o.publicId, o]));
+    const ordered = orderPublicIds.map((id) => byId.get(id)).filter(Boolean);
+
     const list = await prisma.pickupList.create({
       data: {
         title: title || `Pickup ${new Date().toISOString().slice(0, 10)}`,
         lines: {
-          create: orders.map((o, i) => ({ orderId: o.id, sortOrder: i })),
+          create: ordered.map((o, i) => ({ orderId: o.id, sortOrder: i })),
         },
       },
       include: { lines: { include: { order: true } } },
@@ -2474,9 +2914,9 @@ export class OrderService {
       action: 'PICKUP_LIST_CREATED',
       entityType: 'PickupList',
       entityId: list.publicId,
-      meta: { count: orders.length },
+      meta: { count: ordered.length, skipped },
     });
-    return list;
+    return { ...list, skipped };
   }
 
   async getPickupListForPdf(publicId) {

@@ -17,6 +17,7 @@ import {
   sendAccessRenewalReminders,
   sendAccessExpiredNotices,
 } from '../services/membership.service.js';
+import { createJobOwnerId, runWithJobLease } from '../lib/job-lease.js';
 
 const args = process.argv.slice(2);
 
@@ -210,14 +211,32 @@ async function main() {
     return;
   }
 
+  const ownerId = createJobOwnerId('cli-access-reminders');
+
   if (runRenewal) {
-    const renewal = await sendAccessRenewalReminders();
-    console.log(`[renewal] checked=${renewal.checked} sent=${renewal.sent}`);
+    const outcome = await runWithJobLease(
+      prisma,
+      { jobKey: 'access-renewal-reminders', ownerId, leaseMs: 30 * 60 * 1000 },
+      () => sendAccessRenewalReminders()
+    );
+    if (!outcome.ran) {
+      console.log(`[renewal] skipped (${outcome.reason}) — another instance holds the lease`);
+    } else {
+      console.log(`[renewal] checked=${outcome.result.checked} sent=${outcome.result.sent}`);
+    }
   }
 
   if (runExpired) {
-    const expired = await sendAccessExpiredNotices();
-    console.log(`[expired] checked=${expired.checked} sent=${expired.sent}`);
+    const outcome = await runWithJobLease(
+      prisma,
+      { jobKey: 'access-expired-notices', ownerId, leaseMs: 30 * 60 * 1000 },
+      () => sendAccessExpiredNotices()
+    );
+    if (!outcome.ran) {
+      console.log(`[expired] skipped (${outcome.reason}) — another instance holds the lease`);
+    } else {
+      console.log(`[expired] checked=${outcome.result.checked} sent=${outcome.result.sent}`);
+    }
   }
 
   console.log('\nDone.');

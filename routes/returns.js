@@ -37,6 +37,13 @@ router.get(
   (req, res, next) => returnsController.listAll(req, res).catch(next)
 );
 router.get(
+  '/admin/stats',
+  authenticate,
+  authorize('ADMIN', 'ADMIN_TEAM'),
+  returnsOrInspection,
+  (req, res, next) => returnsController.getAdminListStats(req, res).catch(next)
+);
+router.get(
   '/admin/package-requests',
   authenticate,
   authorize('ADMIN', 'ADMIN_TEAM'),
@@ -49,6 +56,13 @@ router.patch(
   authorize('ADMIN', 'ADMIN_TEAM'),
   returnsOrInspection,
   (req, res, next) => returnsController.updatePackageRequest(req, res).catch(next)
+);
+router.get(
+  '/admin/triage',
+  authenticate,
+  authorize('ADMIN', 'ADMIN_TEAM'),
+  returnsOrInspection,
+  (req, res, next) => returnsController.getTriageCursor(req, res).catch(next)
 );
 router.post(
   '/admin/bulk-received',
@@ -181,6 +195,13 @@ router.post(
   authorize('ADMIN', 'ADMIN_TEAM'),
   returnsOrInspection,
   (req, res, next) => returnsController.restockReturn(req, res).catch(next)
+);
+router.post(
+  '/:id/approve-and-settle',
+  authenticate,
+  authorize('ADMIN', 'ADMIN_TEAM'),
+  returnsOrInspection,
+  (req, res, next) => returnsController.approveAndSettle(req, res).catch(next)
 );
 
 export default router;

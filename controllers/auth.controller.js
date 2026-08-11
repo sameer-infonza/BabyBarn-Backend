@@ -14,6 +14,7 @@ import {
   addressCreateSchema,
   addressUpdateSchema,
 } from '../schemas/index.js';
+import { verifyToken } from '../utils/jwt.js';
 
 export class AuthController {
   async register(req, res) {
@@ -156,8 +157,29 @@ export class AuthController {
   async logout(req, res) {
     const refreshToken =
       typeof req.body?.refreshToken === 'string' ? req.body.refreshToken : null;
-    const result = await authService.logout(req.user.id, refreshToken);
-    res.status(200).json({ success: true, message: result.message, data: result });
+
+    // Prefer refresh-token revoke so logout works when the access JWT already expired.
+    if (refreshToken) {
+      const result = await authService.logoutByRefreshToken(refreshToken);
+      res.status(200).json({ success: true, message: result.message, data: result });
+      return;
+    }
+
+    const bearer = req.headers.authorization?.split(' ')[1];
+    if (bearer) {
+      try {
+        const decoded = verifyToken(bearer);
+        if (decoded?.id) {
+          const result = await authService.logout(decoded.id, null);
+          res.status(200).json({ success: true, message: result.message, data: result });
+          return;
+        }
+      } catch {
+        // Expired/invalid access token — still report signed out locally.
+      }
+    }
+
+    res.status(200).json({ success: true, message: 'Signed out', data: { message: 'Signed out' } });
   }
 
   async logoutOtherSessions(req, res) {

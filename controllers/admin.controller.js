@@ -14,6 +14,7 @@ import {
   createAdminTeamMember,
   updateTeamMember,
 } from '../services/admin.service.js';
+import { listStoreCreditActivity as fetchStoreCreditActivity } from '../services/store-credit-admin.service.js';
 import { validate } from '../utils/validation.js';
 import { z } from 'zod';
 import { toPublicJson } from '../utils/serialize.js';
@@ -55,7 +56,7 @@ export class AdminController {
   }
 
   async getDashboardOverview(req, res) {
-    const data = await getDashboardOverview();
+    const data = await getDashboardOverview(req.user);
     res.status(200).json({ success: true, data: toPublicJson(data) });
   }
 
@@ -74,6 +75,12 @@ export class AdminController {
       membershipRef,
       transactionType,
     });
+    res.status(200).json({ success: true, data: toPublicJson(data) });
+  }
+
+  async listStoreCreditActivity(req, res) {
+    void req;
+    const data = await fetchStoreCreditActivity();
     res.status(200).json({ success: true, data: toPublicJson(data) });
   }
 

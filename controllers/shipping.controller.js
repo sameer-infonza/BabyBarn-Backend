@@ -1,5 +1,5 @@
-import { prisma } from '../lib/prisma.js';
 import { shippingService } from '../services/shipping.service.js';
+import { orderService } from '../services/order.service.js';
 import { validate } from '../utils/validation.js';
 import {
   shippingRatesSchema,
@@ -86,20 +86,16 @@ export class ShippingController {
     res.status(201).json({ success: true, data: toPublicJson(data) });
   }
 
+  /**
+   * Low-level label purchase. Optional orderId persists via shared outbound-label
+   * helper (PICKUP_READY), never Order.status=SHIPPED (ORD-001-P4 Option A).
+   * Label rebuy on retry remains an existing limitation — see ORD-001-P4-IDEMP.
+   */
   async generateLabel(req, res) {
     const body = await validate(shippingLabelSchema, req.body ?? {});
     const label = await shippingService.generateLabel(body);
     if (body.orderId && label.trackingNumber) {
-      await prisma.order.updateMany({
-        where: { publicId: body.orderId },
-        data: {
-          trackingNumber: label.trackingNumber,
-          shippingCarrier: label.shippingCarrier || undefined,
-          shippingLabelUrl: label.shippingLabelUrl || undefined,
-          shippingTransactionId: label.transactionId || undefined,
-          status: 'SHIPPED',
-        },
-      });
+      await orderService.persistOutboundShippingLabel(body.orderId, label, { include: false });
     }
     res.status(201).json({ success: true, data: toPublicJson(label) });
   }

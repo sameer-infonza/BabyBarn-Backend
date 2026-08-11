@@ -172,6 +172,18 @@ export class OrderController {
     });
   }
 
+  async getCancellationPreview(req, res) {
+    const { id } = req.params;
+    const itemPublicIds = req.query.itemIds
+      ? String(req.query.itemIds)
+          .split(',')
+          .map((s) => s.trim())
+          .filter(Boolean)
+      : null;
+    const data = await orderService.getCancellationPreview(id, { itemPublicIds });
+    res.status(200).json({ success: true, data: toPublicJson(data) });
+  }
+
   async updateOrderStatus(req, res) {
     const { id } = req.params;
     const { status } = await validate(orderStatusUpdateSchema, req.body);
@@ -180,7 +192,10 @@ export class OrderController {
 
     res.status(200).json({
       success: true,
-      message: 'Order status updated successfully',
+      message:
+        status === 'CANCELLED'
+          ? 'Order cancelled successfully'
+          : 'Order status updated successfully',
       data: toPublicJson(order),
     });
   }

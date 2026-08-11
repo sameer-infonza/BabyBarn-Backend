@@ -465,11 +465,14 @@ export const adminBulkUpsLabelsSchema = z.object({
 
 export const orderFulfillmentActionSchema = z.object({
   action: z.enum(['accept', 'pickup_ready', 'mark_shipped', 'mark_delivered', 'reject_unpaid']),
+  /** Required when mark_shipped without tracking/label (UX-002 override). */
+  shipOverrideReason: z.string().trim().min(3).max(500).optional(),
 });
 
 export const orderBulkFulfillmentSchema = z.object({
   orderPublicIds: z.array(z.string().min(1)).min(1).max(100),
   action: z.enum(['accept', 'pickup_ready', 'mark_shipped']),
+  shipOverrideReason: z.string().trim().min(3).max(500).optional(),
 });
 
 export const pickupListCreateSchema = z.object({
@@ -709,6 +712,11 @@ export const returnReceivePackageSchema = z.object({
     .min(1),
 });
 
+/** Approve & Settle — approve (if needed) → refund → restock selected RESTOCK lines. */
+export const returnApproveAndSettleSchema = z.object({
+  lineIds: z.array(z.string().min(1)).min(1),
+});
+
 export const guestReturnTrackSchema = z.object({
   returnId: z.string().min(1),
   email: z.string().email(),
@@ -828,7 +836,12 @@ export const inventoryAdjustSchema = z.object({
   /** When set, adjusts stock for this variant SKU only (required for products with variants). */
   variantId: z.string().min(1).optional(),
   delta: z.number().int().refine((n) => n !== 0, { message: 'delta cannot be 0' }),
-  reason: z.union([z.string().max(500), z.null()]).optional(),
+  /** Required reason code / note for auditability (INV-001). */
+  reason: z
+    .string()
+    .trim()
+    .min(3, { message: 'Reason is required (at least 3 characters)' })
+    .max(500),
 });
 
 export const inventoryProductTypeSchema = z.object({

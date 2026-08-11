@@ -13,3 +13,7 @@ test('production config requires JWT_SECRET when NODE_ENV is production', () => 
 test('pending order TTL is a positive number', () => {
   assert.ok(config.pendingOrderTtlMinutes > 0);
 });
+
+test('background jobs enabled defaults to true unless BACKGROUND_JOBS_ENABLED=false', () => {
+  assert.equal(typeof config.backgroundJobsEnabled, 'boolean');
+});

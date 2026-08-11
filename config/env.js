@@ -1,4 +1,5 @@
 import dotenv from 'dotenv';
+import { parseDurationToMs } from '../lib/duration.js';
 
 dotenv.config();
 
@@ -20,15 +21,21 @@ if (nodeEnv === 'production' && !process.env.JWT_SECRET) {
   throw new Error('JWT_SECRET is required in production');
 }
 
+const jwtExpiryTime = process.env.JWT_EXPIRY || '15m';
+const jwtRefreshExpiryTime = process.env.JWT_REFRESH_EXPIRY || '30d';
+
 export const config = {
   database: {
     url: process.env.DATABASE_URL || 'postgresql://localhost/ecommerce',
   },
   jwt: {
     secret: process.env.JWT_SECRET || 'your-secret-key-change-in-production',
-    expiryTime: process.env.JWT_EXPIRY || '7d',
+    /** Access JWT lifetime (jsonwebtoken expiresIn string). Default 15m (SEC-001 P1). */
+    expiryTime: jwtExpiryTime,
     refreshSecret: process.env.JWT_REFRESH_SECRET || process.env.JWT_SECRET || 'your-refresh-secret-change-in-production',
-    refreshExpiryTime: process.env.JWT_REFRESH_EXPIRY || '30d',
+    refreshExpiryTime: jwtRefreshExpiryTime,
+    /** Opaque refresh token TTL in ms (derived from JWT_REFRESH_EXPIRY). */
+    refreshExpiryMs: parseDurationToMs(jwtRefreshExpiryTime, 30 * 24 * 60 * 60 * 1000),
   },
   port,
   nodeEnv,
@@ -91,6 +98,12 @@ export const config = {
     supportEmail: (process.env.BRAND_SUPPORT_EMAIL || 'hello@babybarn.co').trim(),
     logoPath: (process.env.BRAND_LOGO_PATH || '/brand/logo-mark.svg').trim(),
   },
+  /**
+   * When false, this process does not run in-process schedulers (SCALE-002).
+   * Use on pure API replicas if a dedicated worker owns BACKGROUND_JOBS_ENABLED=true.
+   * Default true so single-instance deploys keep prior behavior.
+   */
+  backgroundJobsEnabled: process.env.BACKGROUND_JOBS_ENABLED !== 'false',
   /** Unpaid checkout orders older than this are expired and resources released (minutes). */
   pendingOrderTtlMinutes: parseInt(process.env.PENDING_ORDER_TTL_MINUTES || '60', 10),
   /** When true, approving a STANDARD return restocks one unit to the original SKU. */

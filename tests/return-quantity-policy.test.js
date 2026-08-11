@@ -58,3 +58,14 @@ test('fully claimed line has zero returnable units', () => {
   });
   assert.equal(remaining, 0);
 });
+
+test('cancelled line has zero returnable units', () => {
+  assert.equal(
+    returnableQuantityForLine({
+      quantity: 3,
+      cancelledAt: new Date(),
+      returnRequests: [],
+    }),
+    0
+  );
+});

@@ -360,6 +360,8 @@ model Product {
   price       Float
   stock         Int @default(0)
   reservedStock Int @default(0)
+  /// Optimistic concurrency for simple (non-variant) SKUs — mirrors ProductVariant.stockVersion (WS-A4).
+  stockVersion  Int @default(0)
   categoryId  Int
   imageUrl    String?
   sku         String   @unique
@@ -520,7 +522,7 @@ model Order {
   orderNumber String      @unique
   userId      Int
   status      OrderStatus @default(PENDING)
-  /// Fulfillment pipeline; null until order is paid (then usually NEW_ORDER).
+  /// Fulfillment pipeline; null until paid (then ACCEPTED + fulfillmentAcceptedAt).
   fulfillmentStatus    OrderFulfillmentStatus?
   packageDetailsJson   Json?
   manualShippingNotes  String?  @db.Text
@@ -560,6 +562,8 @@ model Order {
   paymentStatus            OrderPaymentStatus @default(PAID)
   stripeCheckoutSessionId  String?            @unique
   stripePaymentIntentId    String?            @unique
+  /// WS-A3: Stripe refund IDs whose local side effects (restock/credit/ledger) were applied.
+  appliedStripeRefundIds   Json?
   storeCreditApplied       Float              @default(0)
   accessMembershipIncluded Boolean            @default(false)
   membershipPaymentId      Int?
@@ -1117,6 +1121,8 @@ model StoreCreditTransaction {
   amount Float
   note String?
   orderPublicId String?
+  /// Idempotency key for earn/adjust events (e.g. earn:return:{returnPublicId}). Null for holds/redeems.
+  sourceKey String? @unique
   createdAt DateTime @default(now())
 
   wallet StoreCreditWallet @relation(fields: [walletId], references: [id], onDelete: Cascade)
@@ -1127,12 +1133,30 @@ model StoreCreditTransaction {
 }
 
 model StripeWebhookEvent {
-  id Int @id @default(autoincrement())
-  eventId String @unique
-  type String
-  processedAt DateTime @default(now())
+  id          Int       @id @default(autoincrement())
+  eventId     String    @unique
+  type        String
+  /// PENDING | PROCESSING | PROCESSED | FAILED — only PROCESSED means permanently done (WS-A1).
+  status      String    @default("PENDING")
+  processedAt DateTime?
 
   @@index([processedAt])
+  @@index([status])
+}
+
+/// SCALE-002: multi-instance job ownership. Expired leases can be claimed by any instance.
+model JobLease {
+  jobKey         String    @id
+  ownerId        String
+  leaseExpiresAt DateTime
+  lastStartedAt  DateTime?
+  lastFinishedAt DateTime?
+  /// SUCCESS | FAILED | SKIPPED
+  lastStatus     String?
+  lastError      String?
+  updatedAt      DateTime  @updatedAt
+
+  @@index([leaseExpiresAt])
 }
 
 model RefreshToken {

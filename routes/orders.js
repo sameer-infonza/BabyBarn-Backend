@@ -127,6 +127,13 @@ router.post(
   (req, res, next) => orderController.generateAdminReturnLabel(req, res).catch(next)
 );
 router.get(
+  '/admin/:id/cancellation-preview',
+  authenticate,
+  authorize('ADMIN', 'ADMIN_TEAM'),
+  requireConsoleModule('orders'),
+  (req, res, next) => orderController.getCancellationPreview(req, res).catch(next)
+);
+router.get(
   '/admin/:id/activity',
   authenticate,
   authorize('ADMIN', 'ADMIN_TEAM'),

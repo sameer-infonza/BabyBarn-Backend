@@ -17,8 +17,6 @@ import contactRoutes from './routes/contact.js';
 import returnsRoutes from './routes/returns.js';
 import walletRoutes from './routes/wallet.js';
 import adminRoutes from './routes/admin.js';
-import { orderService } from './services/order.service.js';
-import { returnsService } from './services/returns.service.js';
 import shippingRoutes from './routes/shipping.js';
 import publicRoutes from './routes/public.js';
 import membershipRoutes from './routes/membership.js';
@@ -26,7 +24,7 @@ import checkoutRoutes from './routes/checkout.js';
 import wishlistRoutes from './routes/wishlist.js';
 import stockAlertsRoutes from './routes/stock-alerts.js';
 import { stripeWebhook } from './controllers/payment.controller.js';
-import { sendAccessRenewalReminders, sendAccessExpiredNotices } from './services/membership.service.js';
+import { startScheduledJobs } from './services/scheduled-jobs.service.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -245,66 +243,8 @@ app.listen(PORT, () => {
   console.log('══════════════════════════════════════════════');
   console.log('');
 
-  setInterval(() => {
-    orderService.syncUpsTrackingBatch().catch((err) => {
-      console.error('[jobs] UPS tracking sync failed', err);
-    });
-    returnsService.syncReturnTrackingBatch().catch((err) => {
-      console.error('[jobs] return tracking sync failed', err);
-    });
-  }, 15 * 60 * 1000);
-
-  const renewalReminderMs = 24 * 60 * 60 * 1000;
-  setInterval(() => {
-    sendAccessRenewalReminders().catch((err) => {
-      console.error('[jobs] ACCESS renewal reminder failed', err);
-    });
-    sendAccessExpiredNotices().catch((err) => {
-      console.error('[jobs] ACCESS expired notice failed', err);
-    });
-  }, renewalReminderMs);
-  setTimeout(() => {
-    sendAccessRenewalReminders().catch((err) => {
-      console.error('[jobs] ACCESS renewal reminder (initial) failed', err);
-    });
-    sendAccessExpiredNotices().catch((err) => {
-      console.error('[jobs] ACCESS expired notice (initial) failed', err);
-    });
-  }, 60 * 1000);
-
-  const pendingOrderCleanupMs = 15 * 60 * 1000;
-  setInterval(() => {
-    orderService.expireStalePendingOrders().catch((err) => {
-      console.error('[jobs] pending order cleanup failed', err);
-    });
-    import('./services/checkout-intent.service.js').then(({ checkoutIntentService }) =>
-      checkoutIntentService.expireStaleCheckoutIntents().catch((err) => {
-        console.error('[jobs] checkout intent cleanup failed', err);
-      })
-    );
-  }, pendingOrderCleanupMs);
-
-  const engagementMs = 6 * 60 * 60 * 1000;
-  setInterval(() => {
-    import('./services/engagement-jobs.service.js').then(({ sendBackInStockAlerts, sendWishlistPriceDropAlerts }) => {
-      sendBackInStockAlerts().catch((err) => {
-        console.error('[jobs] back-in-stock alerts failed', err);
-      });
-      sendWishlistPriceDropAlerts().catch((err) => {
-        console.error('[jobs] price-drop alerts failed', err);
-      });
-    });
-  }, engagementMs);
-
-  const guestRetentionMs = 24 * 60 * 60 * 1000;
-  const runGuestRetention = () =>
-    import('./services/guest-retention.service.js').then(({ purgeExpiredGuestData }) =>
-      purgeExpiredGuestData().catch((err) => {
-        console.error('[jobs] guest data retention purge failed', err);
-      })
-    );
-  setInterval(runGuestRetention, guestRetentionMs);
-  setTimeout(runGuestRetention, 90 * 1000);
+  // SCALE-002: timers still tick on every instance; JobLease ensures only one executes.
+  startScheduledJobs();
 });
 
 process.on('unhandledRejection', (reason) => {

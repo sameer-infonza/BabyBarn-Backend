@@ -19,18 +19,21 @@ const RESET_TOKEN_BYTES = 32;
 const RESET_TOKEN_TTL_MS = 60 * 60 * 1000;
 const VERIFY_TOKEN_TTL_MS = 24 * 60 * 60 * 1000;
 const REFRESH_TOKEN_BYTES = 48;
-const REFRESH_TOKEN_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 
 function hashRefreshToken(token) {
   return crypto.createHash('sha256').update(token).digest('hex');
 }
 
-async function issueRefreshToken(userId) {
+function refreshTokenTtlMs() {
+  return Number(config.jwt.refreshExpiryMs) || 30 * 24 * 60 * 60 * 1000;
+}
+
+async function issueRefreshToken(userId, tx = prisma) {
   const token = crypto.randomBytes(REFRESH_TOKEN_BYTES).toString('hex');
   const tokenHash = hashRefreshToken(token);
-  const expiresAt = new Date(Date.now() + REFRESH_TOKEN_TTL_MS);
+  const expiresAt = new Date(Date.now() + refreshTokenTtlMs());
   try {
-    await prisma.refreshToken.create({
+    await tx.refreshToken.create({
       data: { userId, tokenHash, expiresAt },
     });
     return token;
@@ -366,21 +369,39 @@ export class AuthService {
       throw new AppError(401, 'Refresh token required', 'REFRESH_TOKEN_REQUIRED');
     }
     const tokenHash = hashRefreshToken(refreshTokenRaw.trim());
-    const row = await prisma.refreshToken.findUnique({
-      where: { tokenHash },
-      include: { user: { include: { role: true } } },
-    });
-    if (!row || row.revokedAt || row.expiresAt <= new Date()) {
-      throw new AppError(401, 'Invalid or expired refresh token', 'INVALID_REFRESH_TOKEN');
-    }
-    if (row.user.isActive === false) {
-      throw new AppError(403, 'This account has been deactivated.');
-    }
 
-    return {
-      user: toPublicUser(row.user),
-      token: generateToken(buildAccessPayload(row.user)),
-    };
+    try {
+      return await prisma.$transaction(async (tx) => {
+        const row = await tx.refreshToken.findUnique({
+          where: { tokenHash },
+          include: { user: { include: { role: true } } },
+        });
+        if (!row || row.revokedAt || row.expiresAt <= new Date()) {
+          throw new AppError(401, 'Invalid or expired refresh token', 'INVALID_REFRESH_TOKEN');
+        }
+        if (row.user.isActive === false) {
+          throw new AppError(403, 'This account has been deactivated.');
+        }
+
+        // SEC-001 P1: rotate — consume old refresh, issue a new pair (no reuse).
+        await tx.refreshToken.delete({ where: { id: row.id } });
+        const nextRefresh = await issueRefreshToken(row.userId, tx);
+        const accessToken = generateToken(buildAccessPayload(row.user));
+
+        return {
+          user: toPublicUser(row.user),
+          token: accessToken,
+          ...(nextRefresh ? { refreshToken: nextRefresh } : {}),
+        };
+      });
+    } catch (error) {
+      if (error instanceof AppError) throw error;
+      // Concurrent refresh: first rotator wins; second delete/find fails → invalid.
+      if (error && typeof error === 'object' && error.code === 'P2025') {
+        throw new AppError(401, 'Invalid or expired refresh token', 'INVALID_REFRESH_TOKEN');
+      }
+      throw error;
+    }
   }
 
   async getUserById(publicId) {
@@ -591,6 +612,23 @@ export class AuthService {
       }
     } else {
       await revokeAllRefreshTokens(user.id);
+    }
+    return { message: 'Signed out' };
+  }
+
+  /**
+   * Revoke a refresh session by token alone (access JWT may already be expired).
+   * Possession of the refresh token is sufficient proof for SEC-001 P1 logout.
+   */
+  async logoutByRefreshToken(refreshTokenRaw) {
+    if (!refreshTokenRaw || typeof refreshTokenRaw !== 'string') {
+      return { message: 'Signed out' };
+    }
+    const tokenHash = hashRefreshToken(refreshTokenRaw.trim());
+    try {
+      await prisma.refreshToken.deleteMany({ where: { tokenHash } });
+    } catch (err) {
+      console.error('[auth] logoutByRefreshToken failed', err);
     }
     return { message: 'Signed out' };
   }

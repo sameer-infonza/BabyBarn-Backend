@@ -14,6 +14,7 @@ import {
   returnableQuantityForLine,
   TERMINAL_RETURN_REJECT_STATUSES,
 } from '../lib/return-quantity-policy.js';
+import { assertOrderLineEligibleForReturnType } from '../lib/return-product-eligibility.js';
 import {
   buildDemoReturnLabel,
   demoTrackingNextStatus,
@@ -33,6 +34,10 @@ import {
 } from './return-refund.service.js';
 import { assignReturnNumber } from '../utils/return-number.js';
 import { returnLedgerNote } from '../lib/inventory-ledger-notes.js';
+import {
+  buildAdminReturnListWhere,
+  normalizeAdminListPagination,
+} from '../lib/return-admin-list-query.js';
 
 function isMissingWalletTableError(error) {
   return Boolean(
@@ -86,6 +91,7 @@ const returnInclude = {
       publicId: true,
       orderNumber: true,
       status: true,
+      paymentStatus: true,
       createdAt: true,
       deliveredAt: true,
       returnEnvelopeUsed: true,
@@ -126,6 +132,50 @@ const returnInclude = {
     include: {
       listedProduct: { select: { publicId: true, name: true, slug: true, conditionGrade: true } },
       inspectionRecords: { orderBy: { createdAt: 'desc' }, take: 5 },
+    },
+  },
+};
+
+/** SCALE-001: list rows only — no inspection history, eligibility, jobs, or order line aggregates. */
+const returnListInclude = {
+  user: {
+    select: {
+      publicId: true,
+      email: true,
+      firstName: true,
+      lastName: true,
+      isGuest: true,
+      accessMemberUntil: true,
+    },
+  },
+  order: {
+    select: {
+      id: true,
+      publicId: true,
+      orderNumber: true,
+      status: true,
+      paymentStatus: true,
+      createdAt: true,
+      deliveredAt: true,
+      returnEnvelopeUsed: true,
+    },
+  },
+  orderItem: {
+    include: {
+      product: {
+        select: {
+          publicId: true,
+          name: true,
+          productType: true,
+          sku: true,
+          slug: true,
+          sizeAgeGroup: true,
+          imageUrl: true,
+        },
+      },
+      productVariant: {
+        select: { publicId: true, sku: true, combination: true },
+      },
     },
   },
 };
@@ -295,6 +345,151 @@ function checklistComplete(checklist) {
     'noMissingAccessories',
   ];
   return keys.every((k) => checklist[k] === true);
+}
+
+function lineAcceptedQty(rr) {
+  if (rr.acceptedQuantity != null) return Math.max(0, Number(rr.acceptedQuantity));
+  if (rr.status === 'APPROVED') return Math.max(1, Number(rr.quantity || 1));
+  return 0;
+}
+
+/**
+ * Whether a STANDARD line can run Approve & Settle (approve → refund → restock).
+ * Disposition must be explicitly RESTOCK. Does not check Stripe/order payment.
+ */
+function evaluateStandardSettleEligibility(rr) {
+  if (!rr || rr.type !== 'STANDARD') {
+    return { eligible: false, bucket: 'requires_action', reason: 'Not a standard return line' };
+  }
+  const accepted = lineAcceptedQty(rr);
+  const received = Math.max(0, Number(rr.receivedQuantity ?? 0));
+  const disposition = String(rr.disposition || '').toUpperCase();
+  const refunded = Boolean(rr.stripeRefundId || rr.refundedAt);
+  const restocked = Boolean(rr.restockedAt);
+
+  if (rr.status === 'REJECTED' || (accepted <= 0 && ['APPROVED', 'REJECTED'].includes(rr.status))) {
+    return { eligible: false, bucket: 'completed', reason: 'No accepted units to settle' };
+  }
+  if (refunded && restocked && accepted > 0) {
+    return { eligible: false, bucket: 'completed', reason: 'Already refunded and restocked' };
+  }
+  if (received <= 0) {
+    return { eligible: false, bucket: 'requires_action', reason: 'Not received yet' };
+  }
+  if (disposition !== 'RESTOCK') {
+    return {
+      eligible: false,
+      bucket: 'requires_action',
+      reason: disposition
+        ? `Disposition is ${disposition} (Settle requires RESTOCK)`
+        : 'Set disposition to RESTOCK before settling',
+    };
+  }
+  if (accepted <= 0) {
+    return { eligible: false, bucket: 'requires_action', reason: 'No accepted units' };
+  }
+
+  if (rr.status === 'APPROVED') {
+    return { eligible: true, bucket: 'eligible', reason: null };
+  }
+
+  if (!['REQUESTED', 'RECEIVED', 'UNDER_INSPECTION'].includes(rr.status)) {
+    return { eligible: false, bucket: 'requires_action', reason: `Cannot settle in status ${rr.status}` };
+  }
+
+  const rejected = Math.max(0, Number(rr.rejectedQuantity ?? 0));
+  if (accepted + rejected !== received) {
+    return {
+      eligible: false,
+      bucket: 'requires_action',
+      reason: 'Accepted + rejected must equal received quantity',
+    };
+  }
+  if (!checklistComplete(rr.inspectionChecklistJson)) {
+    return { eligible: false, bucket: 'requires_action', reason: 'Inspection checklist incomplete' };
+  }
+  if (rejected > 0 && !String(rr.rejectionReason || '').trim()) {
+    return { eligible: false, bucket: 'requires_action', reason: 'Rejection reason required' };
+  }
+  if (rejected > 0) {
+    const photos = rr.inspectorPhotoUrlsJson;
+    if (!Array.isArray(photos) || !photos.length) {
+      return { eligible: false, bucket: 'requires_action', reason: 'Evidence photos required for rejected units' };
+    }
+  }
+
+  return { eligible: true, bucket: 'eligible', reason: null };
+}
+
+/**
+ * Restock specific STANDARD lines without requiring all siblings decided.
+ * Caller must pass only APPROVED lines with accepted qty and RESTOCK disposition.
+ * @returns {{ lineId: string, quantity: number }[]}
+ */
+async function restockStandardLinesExplicit(lines, actor) {
+  const actorUserId = await resolveActorUserId(actor);
+  const restocked = [];
+
+  await prisma.$transaction(async (tx) => {
+    for (const sibling of lines) {
+      if (sibling.restockedAt) continue;
+      if (sibling.type && sibling.type !== 'STANDARD') continue;
+      if (sibling.status !== 'APPROVED') {
+        throw new AppError(400, `Line ${sibling.publicId} must be APPROVED before restock`);
+      }
+      const disposition = String(sibling.disposition || '').toUpperCase();
+      if (disposition && disposition !== 'RESTOCK') {
+        throw new AppError(400, `Line ${sibling.publicId} disposition is ${disposition}, not RESTOCK`);
+      }
+      const maxQty = lineAcceptedQty(sibling);
+      if (maxQty <= 0) continue;
+      if (!sibling.orderItem) {
+        throw new AppError(400, `Line ${sibling.publicId} is missing order item data for restock`);
+      }
+      const product = await tx.product.findUnique({
+        where: { id: sibling.orderItem.productId },
+        include: { variants: { orderBy: { sortOrder: 'asc' } } },
+      });
+      if (!product) {
+        throw new AppError(400, `Product not found for line ${sibling.publicId}`);
+      }
+      await restockOrderLineStock(
+        tx,
+        product,
+        sibling.orderItem.productVariantId,
+        maxQty,
+        {
+          referenceType: 'return',
+          referenceId: sibling.publicId,
+          actorUserId,
+          note: returnLedgerNote(
+            'RESTOCK',
+            sibling.returnNumber || sibling.publicId,
+            sibling.type || 'STANDARD'
+          ),
+        },
+        'RESTOCK'
+      );
+      await tx.returnRequest.update({
+        where: { id: sibling.id },
+        data: {
+          restockedAt: new Date(),
+          restockedQuantity: maxQty,
+          disposition: sibling.disposition || 'RESTOCK',
+          dispositionQuantity: maxQty,
+        },
+      });
+      await appendReturnActionNote(tx, {
+        returnRequestId: sibling.id,
+        status: sibling.status,
+        actorUserId,
+        note: `Restocked ${maxQty} unit${maxQty === 1 ? '' : 's'} to inventory`,
+      });
+      restocked.push({ lineId: sibling.publicId, quantity: maxQty });
+    }
+  });
+
+  return restocked;
 }
 
 function computeRefurbCreditPreview(row) {
@@ -503,23 +698,182 @@ export class ReturnsService {
     return (map[current] || []).includes(next);
   }
 
+  /**
+   * Admin return list. SCALE-001: filters/search/pagination run in the DB;
+   * when `limit` is set, never materializes the full dataset before paging.
+   * Omitting `limit` keeps the legacy unpaginated array response for callers
+   * that have not yet migrated (prefer always passing page+limit from admin UI).
+   */
   async listAll(filters = {}) {
-    const where = {};
-    if (filters.type) where.type = filters.type;
-    if (filters.status && filters.status !== 'all') where.status = filters.status;
-    let rows = await prisma.returnRequest.findMany({
-      where,
-      include: returnInclude,
-      orderBy: { createdAt: 'desc' },
-    });
-    if (filters.adminVisible && filters.type === 'REFURBISHMENT') {
-      const orderIds = [...new Set(rows.map((r) => r.orderId).filter(Boolean))];
-      const openPkgOrders = await loadOpenPackageOrderIds(orderIds);
-      rows = rows.filter((row) => isRefurbVisibleToAdmin(row, openPkgOrders));
+    const where = buildAdminReturnListWhere(filters);
+    const { page, limit, skip, paginate } = normalizeAdminListPagination(filters);
+    const orderBy = [{ createdAt: 'desc' }, { id: 'desc' }];
+
+    if (filters.grouped) {
+      if (!paginate) {
+        const rows = await prisma.returnRequest.findMany({
+          where,
+          include: returnListInclude,
+          orderBy,
+        });
+        return groupReturnRows(rows);
+      }
+
+      const [pageGroups, allGroups] = await Promise.all([
+        prisma.returnRequest.groupBy({
+          by: ['submissionPublicId'],
+          where,
+          _max: { createdAt: true },
+          orderBy: [{ _max: { createdAt: 'desc' } }, { submissionPublicId: 'desc' }],
+          skip,
+          take: limit,
+        }),
+        prisma.returnRequest.groupBy({
+          by: ['submissionPublicId'],
+          where,
+        }),
+      ]);
+
+      const total = allGroups.length;
+      const pages = Math.max(1, Math.ceil(total / limit) || 1);
+      const submissionIds = pageGroups.map((g) => g.submissionPublicId).filter(Boolean);
+
+      if (submissionIds.length === 0) {
+        return { items: [], pagination: { total, page, limit, pages } };
+      }
+
+      const rows = await prisma.returnRequest.findMany({
+        where: {
+          AND: [where, { submissionPublicId: { in: submissionIds } }],
+        },
+        include: returnListInclude,
+        orderBy,
+      });
+
+      const grouped = groupReturnRows(rows);
+      const rank = new Map(submissionIds.map((id, idx) => [id, idx]));
+      grouped.sort((a, b) => {
+        const ra = rank.get(a.submissionId) ?? rank.get(a.id) ?? Number.MAX_SAFE_INTEGER;
+        const rb = rank.get(b.submissionId) ?? rank.get(b.id) ?? Number.MAX_SAFE_INTEGER;
+        return ra - rb;
+      });
+
+      return {
+        items: grouped,
+        pagination: { total, page, limit, pages },
+      };
     }
-    // Flat rows for inspection/dashboard; grouped submissions for admin returns list.
-    if (filters.grouped) return groupReturnRows(rows);
-    return rows;
+
+    if (!paginate) {
+      return prisma.returnRequest.findMany({
+        where,
+        include: returnListInclude,
+        orderBy,
+      });
+    }
+
+    const [rows, total] = await Promise.all([
+      prisma.returnRequest.findMany({
+        where,
+        include: returnListInclude,
+        orderBy,
+        skip,
+        take: limit,
+      }),
+      prisma.returnRequest.count({ where }),
+    ]);
+
+    const pages = Math.max(1, Math.ceil(total / limit) || 1);
+    return {
+      items: rows,
+      pagination: { total, page, limit, pages },
+    };
+  }
+
+  /** Lightweight counts for Returns / Inspection mini-stats and header alerts. */
+  async getAdminListStats() {
+    const todayStart = new Date();
+    todayStart.setHours(0, 0, 0, 0);
+
+    const pendingStandardWhere = buildAdminReturnListWhere({
+      type: 'STANDARD',
+      statuses: ['REQUESTED', 'RECEIVED', 'UNDER_INSPECTION'],
+    });
+    const refurbWhere = buildAdminReturnListWhere({ type: 'REFURBISHMENT' });
+    const adminVisibleWhere = buildAdminReturnListWhere({
+      type: 'REFURBISHMENT',
+      adminVisible: true,
+    });
+    const inspectionTodayWhere = {
+      AND: [
+        buildAdminReturnListWhere({ status: 'UNDER_INSPECTION' }),
+        { createdAt: { gte: todayStart } },
+      ],
+    };
+
+    const [
+      pendingStandardGroups,
+      refurbGroups,
+      adminVisibleGroups,
+      eligibilityGroups,
+      awaitingGroups,
+      transitGroups,
+      physicalGroups,
+      packageRequested,
+      inspectionToday,
+    ] = await Promise.all([
+      prisma.returnRequest.groupBy({ by: ['submissionPublicId'], where: pendingStandardWhere }),
+      prisma.returnRequest.groupBy({ by: ['submissionPublicId'], where: refurbWhere }),
+      prisma.returnRequest.groupBy({ by: ['submissionPublicId'], where: adminVisibleWhere }),
+      prisma.returnRequest.groupBy({
+        by: ['submissionPublicId'],
+        where: buildAdminReturnListWhere({
+          type: 'REFURBISHMENT',
+          adminVisible: true,
+          status: 'ELIGIBILITY_REVIEW',
+        }),
+      }),
+      prisma.returnRequest.groupBy({
+        by: ['submissionPublicId'],
+        where: buildAdminReturnListWhere({
+          type: 'REFURBISHMENT',
+          adminVisible: true,
+          statuses: ['APPROVED', 'LABEL_GENERATED'],
+        }),
+      }),
+      prisma.returnRequest.groupBy({
+        by: ['submissionPublicId'],
+        where: buildAdminReturnListWhere({
+          type: 'REFURBISHMENT',
+          adminVisible: true,
+          status: 'IN_TRANSIT',
+        }),
+      }),
+      prisma.returnRequest.groupBy({
+        by: ['submissionPublicId'],
+        where: buildAdminReturnListWhere({
+          type: 'REFURBISHMENT',
+          adminVisible: true,
+          status: 'UNDER_INSPECTION',
+        }),
+      }),
+      prisma.returnPackageRequest.count({ where: { status: 'REQUESTED' } }),
+      prisma.returnRequest.count({ where: inspectionTodayWhere }),
+    ]);
+
+    return {
+      pendingStandard: pendingStandardGroups.length,
+      refurbishmentTotal: refurbGroups.length,
+      packageRequested,
+      inspectionToday,
+      inspectionQueues: {
+        eligibility: eligibilityGroups.length,
+        awaiting: awaitingGroups.length,
+        transit: transitGroups.length,
+        physical: physicalGroups.length,
+        adminVisibleTotal: adminVisibleGroups.length,
+      },
+    };
   }
 
   async listForUser(userPublicId) {
@@ -580,17 +934,21 @@ export class ReturnsService {
       include: returnInclude,
       orderBy: { createdAt: 'asc' },
     });
-    const statusEvents = await listReturnStatusEvents(row.id);
+    const rowsWithEvents = await Promise.all(
+      submissionItems.map(async (item) => ({
+        ...item,
+        refundPreview: computeRowRefundPreview(item),
+        statusEvents: await listReturnStatusEvents(item.id),
+      }))
+    );
+    const statusEvents = buildSubmissionStatusEvents(rowsWithEvents);
     const submissionRefundPreview = submissionItems.reduce(
       (sum, item) => sum + Number(computeRowRefundPreview(item) || 0),
       0
     );
     const submissionReturnNumber =
       submissionItems.find((item) => item.returnNumber)?.returnNumber || row.returnNumber || null;
-    const rowsWithPreview = submissionItems.map((item) => ({
-      ...item,
-      refundPreview: computeRowRefundPreview(item),
-    }));
+    const rowsWithPreview = rowsWithEvents.map(({ statusEvents: _events, ...item }) => item);
     const submission = buildReturnSubmission(rowsWithPreview, { includeEvents: false });
     const packageRequest = await this.getPackageRequestForSubmission(submissionItems);
     const receivePackages = await this.listReceivePackages(submissionKey);
@@ -731,6 +1089,25 @@ export class ReturnsService {
     }
     const refurbItemById = new Map(refurbItems.map((item) => [item.orderItemId, item]));
 
+    const returnType = payload.type || 'STANDARD';
+    for (const publicId of itemPublicIds) {
+      const targetItem = order.orderItems.find((i) => i.publicId === publicId);
+      if (!targetItem) throw new AppError(404, 'Order item not found');
+      if (targetItem.cancelledAt) {
+        throw new AppError(
+          400,
+          'Cancelled order items cannot be returned',
+          'ORDER_ITEM_CANCELLED',
+          { orderItemId: publicId }
+        );
+      }
+      // BR-001: product-condition eligibility is line-scoped; any ineligible line fails the request.
+      assertOrderLineEligibleForReturnType({
+        returnType,
+        productType: targetItem.product?.productType,
+      });
+    }
+
     if (payload.type === 'REFURBISHMENT') {
       const { isRefurbishedEnabled } = await import('../config/feature-flags.js');
       if (!isRefurbishedEnabled()) {
@@ -746,13 +1123,6 @@ export class ReturnsService {
       const usedAgeDays = (Date.now() - windowStart.getTime()) / (1000 * 60 * 60 * 24);
       if (usedAgeDays > windowDays) {
         throw new AppError(400, `Used return window (${windowDays} days from delivery) has passed`);
-      }
-      for (const publicId of itemPublicIds) {
-        const targetItem = order.orderItems.find((i) => i.publicId === publicId);
-        if (!targetItem) throw new AppError(404, 'Order item not found');
-        if (targetItem.product?.productType === 'REFURBISHED') {
-          throw new AppError(400, 'Return Used Product is only available for eligible new items');
-        }
       }
     }
 
@@ -808,6 +1178,7 @@ export class ReturnsService {
 
       const returnable = returnableQuantityForLine({
         quantity: orderItem.quantity,
+        cancelledAt: orderItem.cancelledAt,
         returnRequests: lineReturns,
       });
       const requestedQty =
@@ -816,7 +1187,7 @@ export class ReturnsService {
           : Number(payload.quantities?.[publicId] ?? payload.quantity ?? 1);
       const qty = Math.max(1, Number.isFinite(requestedQty) ? requestedQty : 1);
 
-      if (returnable <= 0) {
+      if (orderItem.cancelledAt || returnable <= 0) {
         insufficient.push({ orderItemId: publicId, openReturns: lineReturns });
         continue;
       }
@@ -898,13 +1269,11 @@ export class ReturnsService {
           ? initialReturnStatusForDecision(eligibilityEval.decision)
           : 'REQUESTED';
 
-      // Partial returns: clamp the requested quantity to what was purchased.
-      const purchasedQty = Math.max(1, Number(orderItem.quantity || 1));
       const requestedQty =
         payload.type === 'REFURBISHMENT'
           ? Number(refurbItem?.quantity ?? 1)
           : Number(payload.quantities?.[publicId] ?? payload.quantity ?? 1);
-      const quantity = Math.min(purchasedQty, Math.max(1, Number.isFinite(requestedQty) ? requestedQty : 1));
+      const requestedUnits = Math.max(1, Number.isFinite(requestedQty) ? requestedQty : 1);
 
       const reasonMap =
         payload.reasons && typeof payload.reasons === 'object' ? payload.reasons : {};
@@ -933,13 +1302,65 @@ export class ReturnsService {
             : payload.photoUrls || undefined
           : undefined;
 
+      // WS-A5: lock OrderItem, recalculate returnable, then create — prevents concurrent over-claim.
       const row = await prisma.$transaction(async (tx) => {
+        const lockedRows = await tx.$queryRaw`
+          SELECT id, "publicId", quantity, "cancelledAt"
+          FROM "OrderItem"
+          WHERE id = ${orderItem.id}
+          FOR UPDATE
+        `;
+        const locked = lockedRows?.[0];
+        if (!locked) throw new AppError(404, 'Order item not found');
+        if (locked.cancelledAt) {
+          throw new AppError(
+            400,
+            'Cancelled order items cannot be returned',
+            'ORDER_ITEM_CANCELLED',
+            { orderItemId: publicId }
+          );
+        }
+
+        const lineReturns = await tx.returnRequest.findMany({
+          where: {
+            orderItemId: locked.id,
+            status: { notIn: [...TERMINAL_RETURN_REJECT_STATUSES] },
+          },
+          select: { status: true, quantity: true },
+        });
+
+        const returnable = returnableQuantityForLine({
+          quantity: locked.quantity,
+          cancelledAt: locked.cancelledAt,
+          returnRequests: lineReturns,
+        });
+        const quantity = Math.min(
+          Math.max(1, Number(locked.quantity) || 1),
+          requestedUnits
+        );
+        if (returnable <= 0) {
+          throw new AppError(
+            409,
+            'Selected items on this order already have an open return request',
+            'RETURN_ALREADY_OPEN',
+            { orderItemId: publicId, returnable: 0, requested: quantity }
+          );
+        }
+        if (quantity > returnable) {
+          throw new AppError(
+            400,
+            `You can return at most ${returnable} unit${returnable === 1 ? '' : 's'} for this line item`,
+            'RETURN_QUANTITY_EXCEEDED',
+            { orderItemId: publicId, returnable, requested: quantity }
+          );
+        }
+
         const rr = await tx.returnRequest.create({
           data: {
             ...(submissionPublicId ? { submissionPublicId } : {}),
             userId: user.id,
             orderId: order.id,
-            orderItemId: orderItem.id,
+            orderItemId: locked.id,
             type: payload.type,
             reason: lineReason,
             notes: lineNotes,
@@ -1100,7 +1521,11 @@ export class ReturnsService {
 
     let targets = siblings.filter((s) => s.status === 'ELIGIBILITY_REVIEW');
     if (requestedLineIds?.length) {
-      targets = targets.filter((s) => requestedLineIds.includes(s.publicId));
+      targets = targets.filter(
+        (s) =>
+          requestedLineIds.includes(s.publicId) ||
+          requestedLineIds.includes(String(s.id))
+      );
     }
     // If caller passed a specific line that is still pending, prefer that when no lineIds list.
     if (!requestedLineIds?.length && rr.status === 'ELIGIBILITY_REVIEW' && targets.length > 1) {
@@ -1109,6 +1534,13 @@ export class ReturnsService {
 
     if (!targets.length) {
       throw new AppError(400, 'Return is not awaiting eligibility review');
+    }
+
+    if (decision !== 'approve' && decision !== 'reject') {
+      throw new AppError(400, 'Decision must be approve or reject');
+    }
+    if (decision === 'reject' && !String(notes || '').trim()) {
+      throw new AppError(400, 'A rejection reason is required');
     }
 
     const nextStatus = decision === 'approve' ? 'APPROVED' : 'ELIGIBILITY_REJECTED';
@@ -1414,79 +1846,125 @@ export class ReturnsService {
 
   async awardRefurbStoreCredit(rr) {
     try {
-      if (Number(rr.creditAwarded || 0) > 0) {
-        return Number(rr.creditAwarded);
-      }
-      const wallet = await prisma.storeCreditWallet.upsert({
-        where: { userId: rr.userId },
-        update: {},
-        create: { userId: rr.userId, balance: 0, heldBalance: 0 },
-      });
-      let itemMemberPrice = 0;
-      let isRefurbishedItem = false;
-      if (rr.orderItemId) {
-        const line = await prisma.orderItem.findUnique({
-          where: { id: rr.orderItemId },
-          select: {
-            price: true,
-            memberPriceSnapshot: true,
-            product: { select: { productType: true } },
-          },
-        });
-        itemMemberPrice = Number(line?.memberPriceSnapshot ?? line?.price ?? 0);
-        isRefurbishedItem = line?.product?.productType === 'REFURBISHED';
-      }
-      if (itemMemberPrice <= 0) {
-        const settings = await getBusinessSettings();
-        itemMemberPrice = Number(settings.accessMembershipPriceUsd ?? 50);
-      }
-      const acceptedQty = Math.max(
-        0,
-        Number(
-          rr.acceptedQuantity != null ? rr.acceptedQuantity : Math.max(1, Number(rr.quantity ?? 1))
-        )
-      );
-      // Refurbished items are returnable via the used path but earn no store credit.
-      const unitCredit = isRefurbishedItem ? 0 : computeRefurbStoreCredit(itemMemberPrice);
-      const amount = Math.round(unitCredit * acceptedQty * 100) / 100;
-      if (amount <= 0) {
-        await prisma.returnRequest.update({
-          where: { id: rr.id },
-          data: { creditAwarded: 0 },
-        });
-        return 0;
-      }
-      await prisma.storeCreditWallet.update({
-        where: { id: wallet.id },
-        data: { balance: wallet.balance + amount },
-      });
-      await prisma.storeCreditTransaction.create({
-        data: {
-          walletId: wallet.id,
-          type: 'EARNED',
+      if (!rr?.id) return 0;
+
+      const result = await prisma.$transaction(async (tx) => {
+        const lockedRows = await tx.$queryRaw`
+          SELECT
+            id,
+            "publicId",
+            "userId",
+            "orderItemId",
+            status,
+            quantity,
+            "acceptedQuantity",
+            "creditAwarded"
+          FROM "ReturnRequest"
+          WHERE id = ${rr.id}
+          FOR UPDATE
+        `;
+        const locked = lockedRows?.[0];
+        if (!locked) return { amount: 0, created: false };
+
+        const already = Number(locked.creditAwarded || 0);
+        if (already > 0) {
+          return { amount: already, created: false, skipped: true };
+        }
+
+        let itemMemberPrice = 0;
+        let isRefurbishedItem = false;
+        if (locked.orderItemId) {
+          const line = await tx.orderItem.findUnique({
+            where: { id: locked.orderItemId },
+            select: {
+              price: true,
+              memberPriceSnapshot: true,
+              product: { select: { productType: true } },
+            },
+          });
+          itemMemberPrice = Number(line?.memberPriceSnapshot ?? line?.price ?? 0);
+          isRefurbishedItem = line?.product?.productType === 'REFURBISHED';
+        }
+        if (itemMemberPrice <= 0) {
+          const settings = await getBusinessSettings();
+          itemMemberPrice = Number(settings.accessMembershipPriceUsd ?? 50);
+        }
+
+        const acceptedQty = Math.max(
+          0,
+          Number(
+            locked.acceptedQuantity != null
+              ? locked.acceptedQuantity
+              : Math.max(1, Number(locked.quantity ?? 1))
+          )
+        );
+        // Refurbished items are returnable via the used path but earn no store credit.
+        const unitCredit = isRefurbishedItem ? 0 : computeRefurbStoreCredit(itemMemberPrice);
+        const amount = Math.round(unitCredit * acceptedQty * 100) / 100;
+
+        if (amount <= 0) {
+          await tx.returnRequest.update({
+            where: { id: locked.id },
+            data: { creditAwarded: 0 },
+          });
+          return { amount: 0, created: false, skipped: true };
+        }
+
+        const { awardEarnedCreditInTx, refurbEarnSourceKey } = await import('./wallet.service.js');
+        const earn = await awardEarnedCreditInTx(tx, {
+          userId: locked.userId,
           amount,
-          note: `Reward from approved refurbishment return ${rr.publicId} (${acceptedQty} unit${acceptedQty === 1 ? '' : 's'})`,
-        },
+          sourceKey: refurbEarnSourceKey(locked.publicId),
+          note: `Reward from approved refurbishment return ${locked.publicId} (${acceptedQty} unit${acceptedQty === 1 ? '' : 's'})`,
+        });
+
+        await tx.returnRequest.update({
+          where: { id: locked.id },
+          data: { creditAwarded: earn.amount },
+        });
+
+        if (earn.created) {
+          await appendReturnActionNote(tx, {
+            returnRequestId: locked.id,
+            status: locked.status || rr.status,
+            note: `Store credit awarded · $${Number(earn.amount).toFixed(2)} (${acceptedQty} unit${acceptedQty === 1 ? '' : 's'})`,
+          });
+        }
+
+        return {
+          amount: earn.amount,
+          created: earn.created,
+          skipped: earn.skipped,
+          publicId: locked.publicId,
+          acceptedQty,
+        };
       });
-      await prisma.returnRequest.update({
-        where: { id: rr.id },
-        data: { creditAwarded: amount },
-      });
-      await appendReturnActionNote(prisma, {
-        returnRequestId: rr.id,
-        status: rr.status,
-        note: `Store credit awarded · $${amount.toFixed(2)} (${acceptedQty} unit${acceptedQty === 1 ? '' : 's'})`,
-      });
-      await emailService.sendTemplate({
-        to: rr.user.email,
-        template: 'store-credit-update',
-        context: {
-          name: [rr.user.firstName, rr.user.lastName].filter(Boolean).join(' '),
-          amount: `$${amount.toFixed(2)}`,
-          actionUrl: `${config.frontend.customerUrl}/dashboard/wallet`,
-        },
-      });
-      return amount;
+
+      if (result.created && result.amount > 0) {
+        const user =
+          rr.user ||
+          (await prisma.user.findUnique({
+            where: { id: rr.userId },
+            select: { email: true, firstName: true, lastName: true },
+          }));
+        if (user?.email) {
+          try {
+            await emailService.sendTemplate({
+              to: user.email,
+              template: 'store-credit-update',
+              context: {
+                name: [user.firstName, user.lastName].filter(Boolean).join(' '),
+                amount: `$${Number(result.amount).toFixed(2)}`,
+                actionUrl: `${config.frontend.customerUrl}/dashboard/wallet`,
+              },
+            });
+          } catch (emailErr) {
+            console.error('[returns] store credit email failed', result.publicId, emailErr);
+          }
+        }
+      }
+
+      return Number(result.amount || 0);
     } catch (error) {
       if (!isMissingWalletTableError(error)) throw error;
       return 0;
@@ -1968,7 +2446,7 @@ export class ReturnsService {
         : rr.inspectorPhotoUrlsJson;
 
     if (rejectedQuantity > 0 && body.complete && (!inspectorPhotoUrls || !inspectorPhotoUrls.length)) {
-      // Evidence recommended but not hard-required for v1 partial rejects without photos on complete
+      throw new AppError(400, 'At least one evidence photo is required when rejecting units');
     }
 
     const disposition =
@@ -2216,6 +2694,10 @@ export class ReturnsService {
           : null
         : rr.inspectorPhotoUrlsJson;
 
+    if (rejectedQuantity > 0 && body.complete && (!inspectorPhotoUrls || !inspectorPhotoUrls.length)) {
+      throw new AppError(400, 'At least one evidence photo is required when rejecting units');
+    }
+
     const notes =
       body.notes !== undefined
         ? body.notes
@@ -2441,12 +2923,7 @@ export class ReturnsService {
       orderBy: { createdAt: 'asc' },
     });
     const restockable = siblings.filter((s) => {
-      const accepted =
-        s.acceptedQuantity != null
-          ? Number(s.acceptedQuantity)
-          : s.status === 'APPROVED'
-            ? Math.max(1, Number(s.quantity || 1))
-            : 0;
+      const accepted = lineAcceptedQty(s);
       return (s.status === 'APPROVED' || accepted > 0) && accepted > 0;
     });
     if (!restockable.length) {
@@ -2462,10 +2939,7 @@ export class ReturnsService {
     await prisma.$transaction(async (tx) => {
       for (const sibling of restockable) {
         if (sibling.restockedAt) continue;
-        const maxQty =
-          sibling.acceptedQuantity != null
-            ? Math.max(0, Number(sibling.acceptedQuantity))
-            : Math.max(1, Number(sibling.quantity || 1));
+        const maxQty = lineAcceptedQty(sibling);
         if (maxQty <= 0) continue;
         let qty = maxQty;
         if (selections) {
@@ -2528,6 +3002,283 @@ export class ReturnsService {
     });
 
     return this.getById(returnPublicId);
+  }
+
+  /**
+   * Approve (if needed) → Stripe refund → per-line restock for clean RESTOCK lines.
+   * Idempotent via stripeRefundId / restockedAt. Never restocks before refund succeeds.
+   */
+  async approveAndSettle(returnPublicId, body, actor) {
+    const requestedLineIds = Array.isArray(body?.lineIds)
+      ? body.lineIds.map((id) => String(id).trim()).filter(Boolean)
+      : [];
+    if (!requestedLineIds.length) {
+      throw new AppError(400, 'lineIds is required');
+    }
+
+    const rr = await prisma.returnRequest.findFirst({
+      where: {
+        OR: [{ publicId: returnPublicId }, { submissionPublicId: returnPublicId }],
+      },
+      select: { submissionPublicId: true, type: true, publicId: true },
+      orderBy: { createdAt: 'asc' },
+    });
+    if (!rr) throw new AppError(404, 'Return request not found');
+    if (rr.type !== 'STANDARD') {
+      throw new AppError(400, 'Approve & Settle applies to standard returns only');
+    }
+
+    const submissionKey = rr.submissionPublicId || rr.publicId;
+    const siblings = await prisma.returnRequest.findMany({
+      where: { submissionPublicId: submissionKey, type: 'STANDARD' },
+      include: {
+        orderItem: {
+          include: { product: { select: { id: true, productType: true, name: true } } },
+        },
+        order: {
+          select: {
+            paymentStatus: true,
+            publicId: true,
+            taxAmount: true,
+            stripePaymentIntentId: true,
+            stripeCheckoutSessionId: true,
+            orderItems: { select: { price: true, quantity: true } },
+          },
+        },
+      },
+      orderBy: { createdAt: 'asc' },
+    });
+
+    const byId = new Map();
+    for (const s of siblings) {
+      byId.set(s.publicId, s);
+      byId.set(String(s.id), s);
+    }
+
+    const { getStripe } = await import('./payment.service.js');
+    if (!getStripe()) {
+      throw new AppError(503, 'Stripe is not configured', 'STRIPE_NOT_CONFIGURED');
+    }
+
+    const results = [];
+    let stopBatch = false;
+
+    for (const lineId of requestedLineIds) {
+      if (stopBatch) {
+        results.push({
+          lineId,
+          productName: null,
+          ok: false,
+          error: 'Stopped after an unexpected payment error on a previous line',
+          steps: { approved: false, refunded: false, restocked: false },
+        });
+        continue;
+      }
+
+      let line = byId.get(lineId);
+      if (!line) {
+        results.push({
+          lineId,
+          productName: null,
+          ok: false,
+          error: 'Unknown return line',
+          steps: { approved: false, refunded: false, restocked: false },
+        });
+        continue;
+      }
+
+      const productName = line.orderItem?.product?.name || 'Item';
+      const eligibility = evaluateStandardSettleEligibility(line);
+      if (!eligibility.eligible) {
+        results.push({
+          lineId: line.publicId,
+          productName,
+          ok: false,
+          error: eligibility.reason || 'Not eligible for Approve & Settle',
+          steps: { approved: false, refunded: false, restocked: false },
+        });
+        continue;
+      }
+
+      {
+        const { isRefundablePaymentStatus } = await import('../lib/order-refund-balance.js');
+        if (line.order?.paymentStatus && !isRefundablePaymentStatus(line.order.paymentStatus)) {
+          results.push({
+            lineId: line.publicId,
+            productName,
+            ok: false,
+            error: 'Order is not in a refundable payment state',
+            steps: { approved: false, refunded: false, restocked: false },
+          });
+          continue;
+        }
+      }
+
+      const steps = {
+        approved: line.status === 'APPROVED',
+        refunded: Boolean(line.stripeRefundId || line.refundedAt),
+        restocked: Boolean(line.restockedAt),
+        refundAmount: line.refundAmount != null ? Number(line.refundAmount) : 0,
+        restockedQty: line.restockedQuantity != null ? Number(line.restockedQuantity) : 0,
+        stripeRefundId: line.stripeRefundId || null,
+      };
+
+      try {
+        // 1) Approve if needed
+        if (line.status !== 'APPROVED') {
+          await this.inspectLine(
+            submissionKey,
+            {
+              lineId: line.publicId,
+              acceptedQuantity: Math.max(0, Number(line.acceptedQuantity ?? 0)),
+              rejectedQuantity: Math.max(0, Number(line.rejectedQuantity ?? 0)),
+              inspectionChecklist: line.inspectionChecklistJson,
+              rejectionReason: line.rejectionReason,
+              inspectorPhotoUrls: line.inspectorPhotoUrlsJson,
+              disposition: 'RESTOCK',
+              dispositionQuantity: Math.max(0, Number(line.acceptedQuantity ?? 0)),
+              rejectedDisposition: line.rejectedDisposition,
+              complete: true,
+            },
+            actor
+          );
+          steps.approved = true;
+          line = await prisma.returnRequest.findUnique({
+            where: { id: line.id },
+            include: {
+              orderItem: {
+                include: { product: { select: { id: true, productType: true, name: true } } },
+              },
+              order: {
+                select: {
+                  paymentStatus: true,
+                  publicId: true,
+                  taxAmount: true,
+                  stripePaymentIntentId: true,
+                  stripeCheckoutSessionId: true,
+                  orderItems: { select: { price: true, quantity: true } },
+                },
+              },
+            },
+          });
+          if (!line || line.status !== 'APPROVED') {
+            throw new AppError(400, 'Approve step did not leave the line APPROVED');
+          }
+        }
+
+        // 2) Refund (never restock before this succeeds)
+        if (!line.stripeRefundId && !line.refundedAt) {
+          const refundResult = await processStandardReturnRefund(line, actor);
+          steps.refunded = true;
+          steps.refundAmount = Number(refundResult.refundAmount || 0);
+          steps.stripeRefundId = refundResult.stripeRefundId || null;
+          line = await prisma.returnRequest.findUnique({
+            where: { id: line.id },
+            include: {
+              orderItem: true,
+            },
+          });
+        } else {
+          steps.refunded = true;
+          steps.refundAmount = Number(line.refundAmount || 0);
+          steps.stripeRefundId = line.stripeRefundId || null;
+        }
+
+        // 3) Restock this line only
+        if (!line.restockedAt) {
+          const restocked = await restockStandardLinesExplicit(
+            [
+              {
+                ...line,
+                type: 'STANDARD',
+                disposition: line.disposition || 'RESTOCK',
+              },
+            ],
+            actor
+          );
+          const qty = restocked[0]?.quantity ?? lineAcceptedQty(line);
+          steps.restocked = true;
+          steps.restockedQty = qty;
+          await writeAdminAudit({
+            actorId: actor?.id,
+            actorEmail: actor?.email,
+            action: 'RETURN_RESTOCK',
+            entityType: 'ReturnRequest',
+            entityId: line.publicId,
+            meta: { items: [{ returnItemId: line.publicId, quantity: qty }], via: 'approve_and_settle' },
+          });
+        } else {
+          steps.restocked = true;
+          steps.restockedQty = Number(line.restockedQuantity || lineAcceptedQty(line));
+        }
+
+        results.push({
+          lineId: line.publicId,
+          productName,
+          ok: true,
+          error: null,
+          steps,
+        });
+      } catch (err) {
+        const message =
+          err instanceof AppError
+            ? err.message
+            : err?.message || 'Approve & Settle failed for this line';
+        const isApp = err instanceof AppError;
+        const unexpectedStripe =
+          !isApp ||
+          (err.code &&
+            String(err.code).startsWith('STRIPE') &&
+            err.code !== 'STRIPE_NOT_CONFIGURED' &&
+            err.statusCode >= 500);
+
+        results.push({
+          lineId: line.publicId,
+          productName,
+          ok: false,
+          error: message,
+          steps,
+        });
+
+        if (unexpectedStripe || (!isApp && err?.type === 'StripeError')) {
+          stopBatch = true;
+        }
+        // Known AppErrors: continue remaining eligible lines.
+      }
+    }
+
+    const totals = results.reduce(
+      (acc, r) => {
+        if (r.ok && r.steps) {
+          acc.refundAmount += Number(r.steps.refundAmount || 0);
+          acc.restockQuantity += Number(r.steps.restockedQty || 0);
+        }
+        return acc;
+      },
+      { refundAmount: 0, restockQuantity: 0 }
+    );
+    totals.refundAmount = Math.round(totals.refundAmount * 100) / 100;
+
+    await writeAdminAudit({
+      actorId: actor?.id,
+      actorEmail: actor?.email,
+      action: 'RETURN_APPROVE_AND_SETTLE',
+      entityType: 'ReturnRequest',
+      entityId: submissionKey,
+      meta: {
+        lineIds: requestedLineIds,
+        results,
+        totals,
+      },
+    });
+
+    const detail = await this.getById(submissionKey);
+    return {
+      eligibleCount: results.filter((r) => r.ok).length,
+      results,
+      totals,
+      return: detail,
+    };
   }
 
   async getPackageRequestForSubmission(rows) {
@@ -2943,6 +3694,107 @@ export class ReturnsService {
       }
     }
     return { results };
+  }
+
+  /**
+   * Lightweight cursor for inspection triage (ids + position only).
+   * Stages map to actionable line statuses; visibility matches admin queue.
+   */
+  async getTriageCursor({ stage, cursor, direction = 'current' } = {}) {
+    const STAGE_STATUSES = {
+      eligibility: ['ELIGIBILITY_REVIEW'],
+      receive: ['IN_TRANSIT', 'LABEL_GENERATED'],
+      physical: ['RECEIVED', 'UNDER_INSPECTION'],
+    };
+    const statuses = STAGE_STATUSES[String(stage || '')];
+    if (!statuses) {
+      throw new AppError(400, 'Invalid triage stage. Use eligibility, receive, or physical.');
+    }
+
+    let rows = await prisma.returnRequest.findMany({
+      where: { type: 'REFURBISHMENT', status: { in: statuses } },
+      select: {
+        id: true,
+        publicId: true,
+        submissionPublicId: true,
+        status: true,
+        createdAt: true,
+        orderId: true,
+        customerShippingSubmittedAt: true,
+        manualTrackingNumber: true,
+      },
+      orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
+    });
+
+    const orderIds = [...new Set(rows.map((r) => r.orderId).filter(Boolean))];
+    const openPkgOrders = await loadOpenPackageOrderIds(orderIds);
+    rows = rows.filter((row) => isRefurbVisibleToAdmin(row, openPkgOrders));
+
+    const total = rows.length;
+    if (!total) {
+      return {
+        empty: true,
+        stage,
+        total: 0,
+        position: 0,
+        lineId: null,
+        submissionId: null,
+        status: null,
+        nextLineId: null,
+        prevLineId: null,
+      };
+    }
+
+    let index = 0;
+    const cursorId = cursor ? String(cursor).trim() : '';
+    if (cursorId) {
+      const found = rows.findIndex((r) => r.publicId === cursorId);
+      if (found >= 0) {
+        if (direction === 'next') index = found + 1;
+        else if (direction === 'prev') index = found - 1;
+        else index = found;
+      } else if (direction === 'prev') {
+        // Stale cursor at start — stay at first item.
+        index = 0;
+      } else {
+        // Stale/missing cursor (completed or concurrent): resume at first remaining.
+        // FE prefers nextLineId captured before mutation when available.
+        index = 0;
+      }
+    }
+
+    if (index < 0) {
+      // Prev past the first item — stay on first (no wrap loop).
+      index = 0;
+    }
+    if (index >= total) {
+      return {
+        empty: true,
+        stage,
+        total,
+        position: total,
+        lineId: null,
+        submissionId: null,
+        status: null,
+        nextLineId: null,
+        prevLineId: rows[total - 1]?.publicId ?? null,
+        completed: true,
+      };
+    }
+
+    const current = rows[index];
+    return {
+      empty: false,
+      completed: false,
+      stage,
+      total,
+      position: index + 1,
+      lineId: current.publicId,
+      submissionId: current.submissionPublicId || current.publicId,
+      status: current.status,
+      nextLineId: rows[index + 1]?.publicId ?? null,
+      prevLineId: rows[index - 1]?.publicId ?? null,
+    };
   }
 }
 

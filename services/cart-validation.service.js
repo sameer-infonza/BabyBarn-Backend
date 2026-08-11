@@ -248,6 +248,35 @@ export async function validateCartLines(inputItems, opts = {}) {
   };
 }
 
+/**
+ * True when sanitize would drop or clamp lines — callers must not silently proceed to payment.
+ * @param {{ removed?: unknown[]; adjusted?: unknown[] } | null | undefined} validation
+ */
+export function hasMaterialCartChanges(validation) {
+  const removed = validation?.removed?.length ?? 0;
+  const adjusted = validation?.adjusted?.length ?? 0;
+  return removed > 0 || adjusted > 0;
+}
+
+/**
+ * Fail-closed gate for PaymentIntent / checkout-session creation.
+ * @param {{ ok?: boolean; summary?: string | null; removed?: CartIssue[]; adjusted?: CartIssue[]; items?: CartValidLine[] }} validation
+ */
+export function assertNoMaterialCartChanges(validation) {
+  if (!hasMaterialCartChanges(validation)) return;
+  throw new AppError(
+    409,
+    validation?.summary ||
+      'Your cart changed because of stock or availability. Review the updates before paying.',
+    'CART_CHANGED',
+    {
+      removed: validation.removed || [],
+      adjusted: validation.adjusted || [],
+      items: validation.items || [],
+    }
+  );
+}
+
 export function buildCartValidationSummary(validItems, removed, adjusted) {
   const parts = [];
   if (validItems.length > 0 && (removed.length > 0 || adjusted.length > 0)) {

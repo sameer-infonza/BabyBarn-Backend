@@ -4,15 +4,23 @@ import { writeAdminAudit } from './audit.service.js';
 import { appendReturnActionNote } from './return-status-events.service.js';
 import { emailService } from './email.service.js';
 import { config } from '../config/env.js';
+import {
+  assertRefundWithinRemaining,
+  classifyStripeRefundError,
+  derivePaymentStatusFromRefundTotals,
+  extractStripeRefundBalance,
+  fetchStripeRefundBalance,
+  isRefundablePaymentStatus,
+  localRemainingRefundableUsd,
+  moneyRound,
+  resolveRemainingRefundableCents,
+  usdToCents,
+} from '../lib/order-refund-balance.js';
 
 async function resolveActorUserId(actor) {
   if (!actor?.id) return null;
   const user = await prisma.user.findUnique({ where: { publicId: actor.id }, select: { id: true } });
   return user?.id ?? null;
-}
-
-function moneyRound(n) {
-  return Math.round(Number(n || 0) * 100) / 100;
 }
 
 /** Product-value (pre-tax) for a standard return line. */
@@ -25,12 +33,14 @@ export function computeStandardReturnSubtotal(orderItem, quantity = 1) {
 
 /**
  * Order merchandise subtotal from line items (pre-tax, before store credit).
- * @param {{ price?: number, quantity?: number }[] | null | undefined} orderItems
+ * Prefer excluding cancelled lines so tax share matches remaining order tax after partial cancel.
  */
-export function orderMerchandiseSubtotal(orderItems) {
+export function orderMerchandiseSubtotal(orderItems, { excludeCancelled = false } = {}) {
   if (!Array.isArray(orderItems) || !orderItems.length) return 0;
+  const lines = excludeCancelled ? orderItems.filter((line) => !line.cancelledAt) : orderItems;
+  if (!lines.length) return 0;
   return moneyRound(
-    orderItems.reduce(
+    lines.reduce(
       (sum, line) => sum + Number(line.price ?? 0) * Math.max(0, Number(line.quantity ?? 0)),
       0
     )
@@ -44,7 +54,7 @@ export function orderMerchandiseSubtotal(orderItems) {
 export function computeReturnTaxShare(returnMerchandise, order) {
   const orderTax = Math.max(0, Number(order?.taxAmount ?? 0));
   if (orderTax <= 0 || returnMerchandise <= 0) return 0;
-  const orderMerch = orderMerchandiseSubtotal(order?.orderItems);
+  const orderMerch = orderMerchandiseSubtotal(order?.orderItems, { excludeCancelled: true });
   if (orderMerch <= 0) return 0;
   return moneyRound(orderTax * (returnMerchandise / orderMerch));
 }
@@ -81,20 +91,170 @@ async function resolvePaymentIntentId(order) {
   return { stripe, paymentIntentId };
 }
 
+function idempotentResult(returnRequest, paymentStatus) {
+  return {
+    skipped: true,
+    refundAmount: returnRequest.refundAmount,
+    stripeRefundId: returnRequest.stripeRefundId,
+    returnRequest,
+    paymentStatus,
+  };
+}
+
+function mapStripeRefundError(err) {
+  const classified = classifyStripeRefundError(err);
+  if (!classified) return null;
+  return new AppError(400, classified.message, classified.code);
+}
+
+/**
+ * Persist return refund + update order payment ledger inside a transaction.
+ * Safe to retry when Stripe already succeeded (idempotent on return.stripeRefundId).
+ */
+async function persistReturnRefundAndOrderState({
+  returnRequestId,
+  orderId,
+  refundAmountUsd,
+  stripeRefundId,
+  refundPaymentMethodLabel,
+  amountPaidCents,
+  amountRefundedCentsAfter,
+  actor,
+  returnPublicId,
+  returnStatus,
+}) {
+  const actorUserId = await resolveActorUserId(actor);
+  const requestedCents = usdToCents(refundAmountUsd);
+
+  const result = await prisma.$transaction(async (tx) => {
+    const lockedReturns = await tx.$queryRaw`
+      SELECT id, "stripeRefundId", "refundAmount", "refundedAt"
+      FROM "ReturnRequest"
+      WHERE id = ${returnRequestId}
+      FOR UPDATE
+    `;
+    const lockedReturn = lockedReturns?.[0];
+    if (!lockedReturn) {
+      throw new AppError(404, 'Return request not found');
+    }
+    if (lockedReturn.stripeRefundId) {
+      const existing = await tx.returnRequest.findUnique({ where: { id: returnRequestId } });
+      const orderRow = await tx.order.findUnique({
+        where: { id: orderId },
+        select: { paymentStatus: true },
+      });
+      return {
+        skipped: true,
+        refundAmount: existing?.refundAmount,
+        stripeRefundId: existing?.stripeRefundId,
+        returnRequest: existing,
+        paymentStatus: orderRow?.paymentStatus,
+      };
+    }
+
+    const lockedOrders = await tx.$queryRaw`
+      SELECT id, "totalAmount", "paymentStatus"
+      FROM "Order"
+      WHERE id = ${orderId}
+      FOR UPDATE
+    `;
+    const lockedOrder = lockedOrders?.[0];
+    if (!lockedOrder) {
+      throw new AppError(404, 'Order not found');
+    }
+
+    // Local ledger re-check under lock (cancel + other return refunds reduce totalAmount).
+    const localRemainingCents = usdToCents(localRemainingRefundableUsd(lockedOrder));
+    const withinLocal = assertRefundWithinRemaining(requestedCents, localRemainingCents);
+    if (!withinLocal.ok) {
+      throw new AppError(400, withinLocal.message, withinLocal.code);
+    }
+
+    if (!isRefundablePaymentStatus(lockedOrder.paymentStatus)) {
+      throw new AppError(
+        400,
+        'Order is not in a refundable payment state',
+        'ORDER_NOT_REFUNDABLE'
+      );
+    }
+
+    const nextTotal = moneyRound(
+      Math.max(0, Number(lockedOrder.totalAmount) - Number(refundAmountUsd))
+    );
+    const paymentStatus = derivePaymentStatusFromRefundTotals(
+      amountPaidCents,
+      amountRefundedCentsAfter
+    );
+
+    const updated = await tx.returnRequest.update({
+      where: { id: returnRequestId },
+      data: {
+        refundAmount: refundAmountUsd,
+        stripeRefundId,
+        refundedAt: new Date(),
+        ...(refundPaymentMethodLabel ? { refundPaymentMethodLabel } : {}),
+      },
+    });
+
+    await tx.order.update({
+      where: { id: orderId },
+      data: {
+        totalAmount: nextTotal,
+        paymentStatus,
+      },
+    });
+
+    await appendReturnActionNote(tx, {
+      returnRequestId,
+      status: returnStatus,
+      actorUserId,
+      note: `Refund processed · $${Number(refundAmountUsd).toFixed(2)} · order payment ${paymentStatus}`,
+    });
+
+    return {
+      skipped: false,
+      refundAmount: refundAmountUsd,
+      stripeRefundId,
+      returnRequest: updated,
+      paymentStatus,
+      orderTotalAmount: nextTotal,
+    };
+  });
+
+  if (!result.skipped) {
+    await writeAdminAudit({
+      actorId: actor?.id,
+      actorEmail: actor?.email,
+      action: 'RETURN_REFUND',
+      entityType: 'ReturnRequest',
+      entityId: returnPublicId,
+      meta: {
+        refundAmountUsd,
+        stripeRefundId,
+        orderId,
+        paymentStatus: result.paymentStatus,
+        orderTotalAmount: result.orderTotalAmount,
+        amountPaidCents,
+        amountRefundedCentsAfter,
+      },
+    });
+  }
+
+  return result;
+}
+
 /**
  * Issue a partial Stripe refund for an approved standard return (product + proportional tax).
  * Shipping is never refunded. Idempotent when stripeRefundId is already set on the return.
+ *
+ * Remaining refundable amount is enforced from Stripe + local order.totalAmount (not status alone).
  */
 export async function processStandardReturnRefund(returnRequest, actor) {
   if (returnRequest.type !== 'STANDARD') {
     throw new AppError(400, 'Refunds apply to standard returns only');
   }
   if (returnRequest.stripeRefundId) {
-    return {
-      skipped: true,
-      refundAmount: returnRequest.refundAmount,
-      stripeRefundId: returnRequest.stripeRefundId,
-    };
+    return idempotentResult(returnRequest);
   }
 
   const full = await prisma.returnRequest.findUnique({
@@ -106,10 +266,11 @@ export async function processStandardReturnRefund(returnRequest, actor) {
           id: true,
           publicId: true,
           paymentStatus: true,
+          totalAmount: true,
+          taxAmount: true,
           stripePaymentIntentId: true,
           stripeCheckoutSessionId: true,
-          taxAmount: true,
-          orderItems: { select: { price: true, quantity: true } },
+          orderItems: { select: { price: true, quantity: true, cancelledAt: true } },
         },
       },
       user: { select: { email: true, firstName: true, lastName: true } },
@@ -118,32 +279,99 @@ export async function processStandardReturnRefund(returnRequest, actor) {
   if (!full?.orderItem || !full.order) {
     throw new AppError(400, 'Return is missing order line data for refund');
   }
-  if (full.order.paymentStatus !== 'PAID') {
-    throw new AppError(400, 'Order is not in a refundable payment state');
+  if (full.stripeRefundId) {
+    return idempotentResult(full);
+  }
+
+  if (!isRefundablePaymentStatus(full.order.paymentStatus)) {
+    throw new AppError(
+      400,
+      'Order is not in a refundable payment state',
+      'ORDER_NOT_REFUNDABLE'
+    );
   }
 
   const qty = full.acceptedQuantity != null ? full.acceptedQuantity : full.quantity;
   const refundAmountUsd = computeStandardReturnRefundAmount(full.orderItem, qty, full.order);
-  if (refundAmountUsd <= 0) {
-    throw new AppError(400, 'Refund amount must be greater than zero');
+  const requestedCents = usdToCents(refundAmountUsd);
+  if (requestedCents < 1) {
+    throw new AppError(400, 'Refund amount must be greater than zero', 'REFUND_AMOUNT_INVALID');
   }
 
-  const amountCents = Math.round(refundAmountUsd * 100);
   const { stripe, paymentIntentId } = await resolvePaymentIntentId(full.order);
 
-  const refund = await stripe.refunds.create(
-    {
-      payment_intent: paymentIntentId,
-      amount: amountCents,
-      metadata: {
-        returnPublicId: full.publicId,
-        orderPublicId: full.order.publicId,
-        actorEmail: actor?.email || '',
-        refundType: 'standard_return',
+  let stripeBalance;
+  try {
+    stripeBalance = await fetchStripeRefundBalance(stripe, paymentIntentId);
+  } catch (err) {
+    console.error('[return-refund] failed to load Stripe balance', full.publicId, err);
+    throw new AppError(
+      502,
+      'Unable to verify remaining refundable balance with Stripe. Try again shortly.',
+      'STRIPE_BALANCE_UNAVAILABLE'
+    );
+  }
+
+  const remainingCents = resolveRemainingRefundableCents({
+    stripeRemainingCents: stripeBalance?.remainingCents,
+    localRemainingUsd: localRemainingRefundableUsd(full.order),
+  });
+
+  const within = assertRefundWithinRemaining(requestedCents, remainingCents);
+  if (!within.ok) {
+    throw new AppError(400, within.message, within.code);
+  }
+
+  // Stable per-return key so retries / double-clicks reuse the same Stripe refund.
+  const idempotencyKey = `return-refund-${full.publicId}`.slice(0, 255);
+
+  let refund;
+  try {
+    refund = await stripe.refunds.create(
+      {
+        payment_intent: paymentIntentId,
+        amount: requestedCents,
+        metadata: {
+          returnPublicId: full.publicId,
+          orderPublicId: full.order.publicId,
+          actorEmail: actor?.email || '',
+          refundType: 'standard_return',
+        },
       },
-    },
-    { idempotencyKey: `return-refund-${full.publicId}-${amountCents}` }
-  );
+      { idempotencyKey }
+    );
+  } catch (err) {
+    const mapped = mapStripeRefundError(err);
+    if (mapped) throw mapped;
+    // Uncertain / network failure: do not mark local refunded. Retry is safe via idempotency key.
+    console.error('[return-refund] Stripe refund create failed', full.publicId, err);
+    throw new AppError(
+      502,
+      'Stripe refund failed. No local refund was recorded — safe to retry.',
+      'STRIPE_REFUND_FAILED'
+    );
+  }
+
+  // Re-read Stripe balance after refund for authoritative payment status.
+  let balanceAfter = stripeBalance
+    ? {
+        amountPaidCents: stripeBalance.amountPaidCents,
+        amountRefundedCents: stripeBalance.amountRefundedCents + requestedCents,
+        remainingCents: Math.max(0, stripeBalance.remainingCents - requestedCents),
+      }
+    : null;
+  try {
+    const fresh = await fetchStripeRefundBalance(stripe, paymentIntentId);
+    if (fresh) balanceAfter = fresh;
+  } catch {
+    // Non-fatal — use optimistic post-refund totals from pre-balance + this refund.
+  }
+  if (!balanceAfter) {
+    balanceAfter = extractStripeRefundBalance({
+      amount_received: requestedCents,
+      latest_charge: { amount: requestedCents, amount_refunded: requestedCents },
+    });
+  }
 
   let refundPaymentMethodLabel = null;
   try {
@@ -151,11 +379,7 @@ export async function processStandardReturnRefund(returnRequest, actor) {
       expand: ['payment_method', 'latest_charge'],
     });
     const pm =
-      typeof pi.payment_method === 'object' && pi.payment_method
-        ? pi.payment_method
-        : typeof pi.latest_charge === 'object' && pi.latest_charge?.payment_method_details
-          ? null
-          : null;
+      typeof pi.payment_method === 'object' && pi.payment_method ? pi.payment_method : null;
     const card =
       pm?.card ||
       (typeof pi.latest_charge === 'object' ? pi.latest_charge?.payment_method_details?.card : null);
@@ -167,49 +391,66 @@ export async function processStandardReturnRefund(returnRequest, actor) {
     // Non-fatal — destination label is best-effort.
   }
 
-  const updated = await prisma.returnRequest.update({
-    where: { id: full.id },
-    data: {
-      refundAmount: refundAmountUsd,
+  let persisted;
+  try {
+    persisted = await persistReturnRefundAndOrderState({
+      returnRequestId: full.id,
+      orderId: full.order.id,
+      refundAmountUsd,
       stripeRefundId: refund.id,
-      refundedAt: new Date(),
-      ...(refundPaymentMethodLabel ? { refundPaymentMethodLabel } : {}),
-    },
-  });
-
-  await appendReturnActionNote(prisma, {
-    returnRequestId: full.id,
-    status: full.status,
-    actorUserId: await resolveActorUserId(actor),
-    note: `Refund processed · $${refundAmountUsd.toFixed(2)}`,
-  });
-
-  await writeAdminAudit({
-    actorId: actor?.id,
-    actorEmail: actor?.email,
-    action: 'RETURN_REFUND',
-    entityType: 'ReturnRequest',
-    entityId: full.publicId,
-    meta: { refundAmountUsd, stripeRefundId: refund.id },
-  });
-
-  if (full.user?.email) {
-    await emailService.sendTemplate({
-      to: full.user.email,
-      template: 'refund-confirmation',
-      context: {
-        name: [full.user.firstName, full.user.lastName].filter(Boolean).join(' '),
-        amount: `$${refundAmountUsd.toFixed(2)}`,
-        orderId: full.order.publicId,
-        actionUrl: `${config.frontend.customerUrl}/dashboard/returns/${full.publicId}`,
-      },
+      refundPaymentMethodLabel,
+      amountPaidCents: balanceAfter.amountPaidCents,
+      amountRefundedCentsAfter: balanceAfter.amountRefundedCents,
+      actor,
+      returnPublicId: full.publicId,
+      returnStatus: full.status,
     });
+  } catch (err) {
+    if (err instanceof AppError) throw err;
+    // Stripe succeeded; local persist failed. Retry is safe via idempotency key + stripeRefundId null check.
+    console.error(
+      '[return-refund] Stripe refund succeeded but local persist failed',
+      full.publicId,
+      refund.id,
+      err
+    );
+    throw new AppError(
+      500,
+      `Stripe refund ${refund.id} succeeded but local recording failed. Retry this refund to reconcile.`,
+      'RETURN_REFUND_PERSIST_FAILED',
+      { stripeRefundId: refund.id, refundAmountUsd }
+    );
+  }
+
+  if (!persisted.skipped && full.user?.email) {
+    try {
+      await emailService.sendTemplate({
+        to: full.user.email,
+        template: 'refund-confirmation',
+        context: {
+          name: [full.user.firstName, full.user.lastName].filter(Boolean).join(' '),
+          amount: `$${refundAmountUsd.toFixed(2)}`,
+          orderId: full.order.publicId,
+          actionUrl: `${config.frontend.customerUrl}/dashboard/returns/${full.publicId}`,
+        },
+      });
+    } catch (emailErr) {
+      console.error('[return-refund] confirmation email failed', full.publicId, emailErr);
+    }
   }
 
   return {
-    skipped: false,
-    refundAmount: refundAmountUsd,
-    stripeRefundId: refund.id,
-    returnRequest: updated,
+    skipped: Boolean(persisted.skipped),
+    refundAmount: persisted.refundAmount ?? refundAmountUsd,
+    stripeRefundId: persisted.stripeRefundId || refund.id,
+    returnRequest: persisted.returnRequest,
+    paymentStatus: persisted.paymentStatus,
   };
 }
+
+export {
+  derivePaymentStatusFromRefundTotals,
+  isRefundablePaymentStatus,
+  assertRefundWithinRemaining,
+  moneyRound,
+};
