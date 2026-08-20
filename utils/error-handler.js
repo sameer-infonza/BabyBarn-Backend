@@ -88,7 +88,7 @@ export const errorHandler = (err, req, res, next) => {
   if (err?.name === 'MulterError') {
     const message =
       err.code === 'LIMIT_FILE_SIZE'
-        ? 'Image must be 5 MB or smaller.'
+        ? 'Image is too large. Carousel/marketing images max 20 MB; product and return photos max 5 MB.'
         : err.message || 'File upload failed';
     return res.status(400).json({
       success: false,

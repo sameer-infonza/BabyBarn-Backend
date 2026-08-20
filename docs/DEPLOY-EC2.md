@@ -55,3 +55,10 @@ Trigger manually: **Actions → Deploy to EC2 → Run workflow**.
 curl -s http://127.0.0.1:5000/health
 # or your public IP: curl http://13.218.44.12:5000/health
 ```
+
+## 5. Nginx upload size (carousel / marketing)
+
+Admin uploads large letter/hero photos through the **admin** hostname. Set
+`client_max_body_size 25M;` on admin + API (+ store) server blocks — see
+[`docs/nginx/babybarn.conf`](./nginx/babybarn.conf). API-only limits leave admin
+stuck at nginx’s default **1m**.

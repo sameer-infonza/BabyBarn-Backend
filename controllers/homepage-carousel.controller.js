@@ -1,3 +1,4 @@
+import { config } from '../config/env.js';
 import {
   listAdminHomepageCarousel,
   getAdminHomepageCarouselSlide,
@@ -8,6 +9,15 @@ import {
   reorderHomepageCarousel,
   searchProductsForCarousel,
 } from '../services/homepage-carousel.service.js';
+
+function resolvePublicBaseUrl(req) {
+  if (config.publicBaseUrl) return config.publicBaseUrl;
+  const forwardedProto = req.get('x-forwarded-proto')?.split(',')[0]?.trim();
+  const forwardedHost = req.get('x-forwarded-host')?.split(',')[0]?.trim();
+  const protocol = forwardedProto || req.protocol;
+  const host = forwardedHost || req.get('host');
+  return `${protocol}://${host}`.replace(/\/$/, '');
+}
 
 export const homepageCarouselController = {
   async list(_req, res) {
@@ -54,7 +64,9 @@ export const homepageCarouselController = {
     if (!req.file) {
       return res.status(400).json({ success: false, message: 'No image uploaded' });
     }
-    const url = `/uploads/marketing/${req.file.filename}`;
-    res.status(201).json({ success: true, data: { url } });
+    const path = `/uploads/marketing/${req.file.filename}`;
+    const url = `${resolvePublicBaseUrl(req)}${path}`;
+    // Prefer storing `path` (relative) in DB; `url` is for immediate admin preview.
+    res.status(201).json({ success: true, data: { url, path } });
   },
 };

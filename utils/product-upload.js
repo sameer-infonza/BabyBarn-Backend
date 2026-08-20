@@ -24,7 +24,12 @@ function fileFilter(_req, file, cb) {
   else cb(new Error('Only JPEG, PNG, or WebP images are allowed'));
 }
 
-function createImageUpload(destinationDir) {
+/** Default product / return / avatar limit. */
+export const IMAGE_UPLOAD_MAX_BYTES = 5 * 1024 * 1024;
+/** Hero / letter / marketing carousel images (often larger lifestyle photos). */
+export const MARKETING_IMAGE_UPLOAD_MAX_BYTES = 20 * 1024 * 1024;
+
+function createImageUpload(destinationDir, maxBytes = IMAGE_UPLOAD_MAX_BYTES) {
   const storage = multer.diskStorage({
     destination(_req, _file, cb) {
       ensureUploadDirs();
@@ -40,7 +45,7 @@ function createImageUpload(destinationDir) {
 
   return multer({
     storage,
-    limits: { fileSize: 5 * 1024 * 1024 },
+    limits: { fileSize: maxBytes },
     fileFilter,
   });
 }
@@ -68,6 +73,6 @@ export const returnPhotoUpload = createImageUpload(RETURNS_DIR);
 
 export const avatarImageUpload = createImageUpload(AVATARS_DIR);
 
-export const marketingImageUpload = createImageUpload(MARKETING_DIR);
+export const marketingImageUpload = createImageUpload(MARKETING_DIR, MARKETING_IMAGE_UPLOAD_MAX_BYTES);
 
 export { UPLOAD_ROOT, PRODUCTS_DIR, RETURNS_DIR, AVATARS_DIR, MARKETING_DIR };
