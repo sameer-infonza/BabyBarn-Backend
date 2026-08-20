@@ -61,6 +61,7 @@ const slideInclude = {
           productType: true,
           isActiveListing: true,
           isDraft: true,
+          category: { select: { name: true } },
         },
       },
     },
@@ -72,6 +73,10 @@ function mapCard(card) {
   const fromProduct = product && !product.isDraft && product.isActiveListing;
   const productPath = fromProduct && product.slug ? `/products/${product.slug}` : null;
   const href = card.customHref || productPath || null;
+  const categoryFromProduct =
+    product?.productType === 'REFURBISHED'
+      ? 'Refurbished'
+      : product?.category?.name || null;
   return {
     id: card.publicId,
     sortOrder: card.sortOrder,
@@ -80,12 +85,19 @@ function mapCard(card) {
     href,
     customHref: card.customHref || null,
     name: card.customName || product?.name || 'Product',
-    category: card.customCategory || (product?.productType === 'REFURBISHED' ? 'Refurbished' : null),
+    category: card.customCategory || categoryFromProduct,
     imageUrl: card.customImageUrl || product?.imageUrl || null,
     memberPrice:
       card.customMemberPrice ??
-      (fromProduct ? product.memberPrice ?? product.price : null),
-    fullPrice: card.customFullPrice ?? (fromProduct ? product.price : null),
+      (fromProduct
+        ? product.memberPrice != null
+          ? Number(product.memberPrice)
+          : product.price != null
+            ? Number(product.price)
+            : null
+        : null),
+    fullPrice:
+      card.customFullPrice ?? (fromProduct && product.price != null ? Number(product.price) : null),
     isRefurbished: card.isRefurbished || product?.productType === 'REFURBISHED' || false,
     placeholderBg: card.placeholderBg || null,
   };
@@ -176,6 +188,7 @@ export async function searchProductsForCarousel(q = '', limit = 12) {
       price: true,
       memberPrice: true,
       productType: true,
+      category: { select: { name: true } },
     },
   });
   return products.map((p) => ({
@@ -183,8 +196,10 @@ export async function searchProductsForCarousel(q = '', limit = 12) {
     name: p.name,
     slug: p.slug,
     imageUrl: p.imageUrl,
-    memberPrice: p.memberPrice ?? p.price,
-    fullPrice: p.price,
+    category:
+      p.productType === 'REFURBISHED' ? 'Refurbished' : p.category?.name || null,
+    memberPrice: p.memberPrice != null ? Number(p.memberPrice) : p.price != null ? Number(p.price) : null,
+    fullPrice: p.price != null ? Number(p.price) : null,
     isRefurbished: p.productType === 'REFURBISHED',
   }));
 }
