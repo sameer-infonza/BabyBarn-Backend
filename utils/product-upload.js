@@ -7,12 +7,14 @@ const UPLOAD_ROOT = path.join(process.cwd(), 'uploads');
 const PRODUCTS_DIR = path.join(UPLOAD_ROOT, 'products');
 const RETURNS_DIR = path.join(UPLOAD_ROOT, 'returns');
 const AVATARS_DIR = path.join(UPLOAD_ROOT, 'avatars');
+const MARKETING_DIR = path.join(UPLOAD_ROOT, 'marketing');
 export const SHIPPING_LABELS_DIR = path.join(UPLOAD_ROOT, 'shipping-labels');
 
 export function ensureUploadDirs() {
   fs.mkdirSync(PRODUCTS_DIR, { recursive: true });
   fs.mkdirSync(RETURNS_DIR, { recursive: true });
   fs.mkdirSync(AVATARS_DIR, { recursive: true });
+  fs.mkdirSync(MARKETING_DIR, { recursive: true });
   fs.mkdirSync(SHIPPING_LABELS_DIR, { recursive: true });
 }
 
@@ -66,4 +68,6 @@ export const returnPhotoUpload = createImageUpload(RETURNS_DIR);
 
 export const avatarImageUpload = createImageUpload(AVATARS_DIR);
 
-export { UPLOAD_ROOT, PRODUCTS_DIR, RETURNS_DIR, AVATARS_DIR };
+export const marketingImageUpload = createImageUpload(MARKETING_DIR);
+
+export { UPLOAD_ROOT, PRODUCTS_DIR, RETURNS_DIR, AVATARS_DIR, MARKETING_DIR };

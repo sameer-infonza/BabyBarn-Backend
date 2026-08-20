@@ -86,6 +86,9 @@ build_app() {
       log "prisma generate + migrate deploy"
       npx prisma generate
       npx prisma migrate deploy
+      # Idempotent: creates the 4 design homepage slides when the table is empty
+      log "seed homepage carousel (skip if slides already exist)"
+      npm run seed:homepage-carousel || true
       ;;
     *)
       echo "Unknown DEPLOY_TYPE: ${DEPLOY_TYPE}"

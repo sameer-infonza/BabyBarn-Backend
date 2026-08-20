@@ -3,9 +3,12 @@ import { authenticate, authorize } from '../middleware/auth.js';
 import { requireConsoleModule } from '../middleware/admin-console.js';
 import { adminController } from '../controllers/admin.controller.js';
 import { shippingAdminController } from '../controllers/shipping-admin.controller.js';
+import { homepageCarouselController } from '../controllers/homepage-carousel.controller.js';
+import { marketingImageUpload } from '../utils/product-upload.js';
 import adminNotificationsRoutes from './admin-notifications.js';
 
 const router = Router();
+const homepage = requireConsoleModule('homepage');
 
 router.use('/notifications', adminNotificationsRoutes);
 
@@ -141,6 +144,71 @@ router.post(
   authorize('ADMIN', 'ADMIN_TEAM'),
   requireConsoleModule('shipping'),
   (req, res, next) => shippingAdminController.testUps(req, res).catch(next)
+);
+
+router.get(
+  '/homepage-carousel',
+  authenticate,
+  authorize('ADMIN', 'ADMIN_TEAM'),
+  homepage,
+  (req, res, next) => homepageCarouselController.list(req, res).catch(next)
+);
+router.get(
+  '/homepage-carousel/product-search',
+  authenticate,
+  authorize('ADMIN', 'ADMIN_TEAM'),
+  homepage,
+  (req, res, next) => homepageCarouselController.searchProducts(req, res).catch(next)
+);
+router.put(
+  '/homepage-carousel/reorder',
+  authenticate,
+  authorize('ADMIN', 'ADMIN_TEAM'),
+  homepage,
+  (req, res, next) => homepageCarouselController.reorder(req, res).catch(next)
+);
+router.post(
+  '/homepage-carousel/upload-image',
+  authenticate,
+  authorize('ADMIN', 'ADMIN_TEAM'),
+  homepage,
+  marketingImageUpload.single('image'),
+  (req, res, next) => homepageCarouselController.uploadImage(req, res).catch(next)
+);
+router.post(
+  '/homepage-carousel',
+  authenticate,
+  authorize('ADMIN', 'ADMIN_TEAM'),
+  homepage,
+  (req, res, next) => homepageCarouselController.create(req, res).catch(next)
+);
+router.get(
+  '/homepage-carousel/:id',
+  authenticate,
+  authorize('ADMIN', 'ADMIN_TEAM'),
+  homepage,
+  (req, res, next) => homepageCarouselController.get(req, res).catch(next)
+);
+router.patch(
+  '/homepage-carousel/:id',
+  authenticate,
+  authorize('ADMIN', 'ADMIN_TEAM'),
+  homepage,
+  (req, res, next) => homepageCarouselController.update(req, res).catch(next)
+);
+router.delete(
+  '/homepage-carousel/:id',
+  authenticate,
+  authorize('ADMIN', 'ADMIN_TEAM'),
+  homepage,
+  (req, res, next) => homepageCarouselController.deactivate(req, res).catch(next)
+);
+router.delete(
+  '/homepage-carousel/:id/hard',
+  authenticate,
+  authorize('ADMIN', 'ADMIN_TEAM'),
+  homepage,
+  (req, res, next) => homepageCarouselController.remove(req, res).catch(next)
 );
 
 router.get('/team', authenticate, authorize('ADMIN'), (req, res, next) =>

@@ -17,6 +17,7 @@ export const ADMIN_CONSOLE_ROUTE_MODULES = [
   'activity',
   'profile',
   'notifications',
+  'homepage',
 ];
 
 /** Business-facing team permission modules (coarse-grained, no granular permissions). */
@@ -28,6 +29,7 @@ export const TEAM_PERMISSION_MODULES = [
   'finance-management',
   'membership-management',
   'user-management',
+  'content-management',
 ];
 
 export const TEAM_PERMISSION_TO_ROUTE_MODULES = {
@@ -40,6 +42,7 @@ export const TEAM_PERMISSION_TO_ROUTE_MODULES = {
   'finance-management': ['finance', 'store-credit', 'activity'],
   'membership-management': ['access'],
   'user-management': ['customers'],
+  'content-management': ['homepage'],
 };
 
 export function isValidRouteModule(slug) {

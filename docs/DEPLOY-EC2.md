@@ -15,6 +15,7 @@ cd BabyBarn-Backend
 cp .env.example .env   # edit with production DATABASE_URL, Stripe, SMTP, etc.
 npm ci
 npx prisma migrate deploy
+npm run seed:homepage-carousel   # creates 4 design homepage slides if table empty
 pm2 start ecosystem.config.cjs --env production
 pm2 startup
 pm2 save
@@ -43,7 +44,7 @@ Workflow [`.github/workflows/deploy-ec2.yml`](../.github/workflows/deploy-ec2.ym
 1. **CI** — `npm ci` + `prisma generate`
 2. **Deploy** — SSH to EC2, run [`scripts/deploy-ec2.sh`](../scripts/deploy-ec2.sh):
    - `git fetch` + `git reset --hard origin/master` (no pull)
-   - `npm ci`, `prisma migrate deploy`
+   - `npm ci`, `prisma migrate deploy`, `npm run seed:homepage-carousel` (idempotent)
    - `pm2 restart babybarn-api`
 
 Trigger manually: **Actions → Deploy to EC2 → Run workflow**.

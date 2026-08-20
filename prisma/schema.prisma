@@ -152,6 +152,12 @@ enum AdminNotificationType {
   ACCESS_EXPIRING
 }
 
+enum HomepageCarouselSlideType {
+  HERO
+  PRODUCT_GRID
+  LETTER
+}
+
 enum ShippingProviderLogLevel {
   INFO
   WARN
@@ -402,6 +408,7 @@ model Product {
   conditionGrade       RefurbConditionGrade?
   refurbishedAt        DateTime?
   refurbishmentJobsListed RefurbishmentJob[] @relation("RefurbJobListedProduct")
+  homepageCarouselCards HomepageCarouselProductCard[]
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -1043,6 +1050,74 @@ model BusinessSettings {
   accessMembershipPriceUsd   Float    @default(50)
   accessUsedReturnWindowDays Int      @default(365)
   updatedAt                  DateTime @updatedAt
+}
+
+/// Homepage Section 1 carousel slides (hero / product grid / letter).
+model HomepageCarouselSlide {
+  id        Int                       @id @default(autoincrement())
+  publicId  String                    @unique @default(cuid())
+  sortOrder Int                       @default(0)
+  isActive  Boolean                   @default(true)
+  slideType HomepageCarouselSlideType
+
+  eyebrow   String?
+  title     String?
+  subtitle  String?
+  bodyText  String?                   @db.Text
+  backgroundTone String?              // cream | blue-soft | cream-2 | purple
+
+  primaryCtaLabel   String?
+  primaryCtaHref    String?
+  secondaryCtaLabel String?
+  secondaryCtaHref  String?
+
+  // HERO
+  chipLabel      String?
+  rewardPercent  String?
+  rewardLabel    String?
+  imageUrl1      String?
+  imageLabel1    String?
+  imageUrl2      String?
+  imageLabel2    String?
+
+  // LETTER
+  backgroundImageUrl String?
+  signatureName      String?
+  signatureFrom      String?
+
+  productCards HomepageCarouselProductCard[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([isActive, sortOrder])
+  @@index([sortOrder])
+}
+
+model HomepageCarouselProductCard {
+  id        Int    @id @default(autoincrement())
+  publicId  String @unique @default(cuid())
+  slideId   Int
+  slide     HomepageCarouselSlide @relation(fields: [slideId], references: [id], onDelete: Cascade)
+  sortOrder Int    @default(0)
+
+  productId Int?
+  product   Product? @relation(fields: [productId], references: [id], onDelete: SetNull)
+
+  customName        String?
+  customCategory    String?
+  customImageUrl    String?
+  customMemberPrice Float?
+  customFullPrice   Float?
+  customHref        String?
+  isRefurbished     Boolean @default(false)
+  placeholderBg     String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([slideId, sortOrder])
+  @@index([productId])
 }
 
 // Configurable shipping carrier integration (UPS, Shippo, future providers).
