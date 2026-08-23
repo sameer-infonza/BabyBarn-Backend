@@ -1,0 +1,234 @@
+﻿CREATE TYPE "OrderStatus" AS ENUM ('PENDING', 'PROCESSING', 'CONFIRMED', 'SHIPPED', 'DELIVERED', 'CANCELLED', 'RETURNED', 'REFUNDED');
+CREATE TYPE "OrderPaymentStatus" AS ENUM ('UNPAID', 'PAID', 'FAILED', 'REFUNDED', 'PARTIALLY_REFUNDED');
+CREATE TYPE "OrderFulfillmentStatus" AS ENUM ('NEW_ORDER', 'ACCEPTED', 'PICKUP_READY', 'LABEL_GENERATED', 'SHIPPED', 'IN_TRANSIT', 'OUT_FOR_DELIVERY', 'DELIVERED');
+CREATE TYPE "ReturnType" AS ENUM ('STANDARD', 'REFURBISHMENT');
+CREATE TYPE "ReturnStatus" AS ENUM ('REQUESTED', 'ELIGIBILITY_REVIEW', 'ELIGIBILITY_REJECTED', 'APPROVED', 'LABEL_GENERATED', 'IN_TRANSIT', 'RECEIVED', 'UNDER_INSPECTION', 'INSPECTION_APPROVED', 'INSPECTION_REJECTED', 'REJECTED', 'CANCELLED');
+CREATE TYPE "RefurbEligibilityDecision" AS ENUM ('PASS', 'FAIL', 'MANUAL_REVIEW');
+CREATE TYPE "RefurbConditionGrade" AS ENUM ('A', 'B', 'C');
+CREATE TYPE "ReturnPackageRequestStatus" AS ENUM ('REQUESTED', 'APPROVED', 'REJECTED', 'SENT');
+CREATE TYPE "OrderItemPricingTier" AS ENUM ('STANDARD', 'ACCESS');
+CREATE TYPE "StoreCreditTxnType" AS ENUM ('EARNED', 'REDEEMED', 'ADJUSTED', 'HOLD', 'RELEASE');
+CREATE TYPE "MembershipPaymentType" AS ENUM ('PURCHASE', 'RENEWAL');
+CREATE TYPE "ProductType" AS ENUM ('NEW', 'REFURBISHED');
+CREATE TYPE "InventoryLedgerEventType" AS ENUM ('RESERVE', 'RELEASE', 'COMMIT', 'ADJUST', 'RESTOCK', 'REFUND_RESTORE');
+CREATE TYPE "ProductUnitStatus" AS ENUM ('IN_STOCK', 'RESERVED', 'SOLD', 'WITH_CUSTOMER', 'RETURNED', 'INSPECTION', 'REFURBISHING', 'QA_HOLD', 'AVAILABLE_REFURB', 'RETIRED');
+CREATE TYPE "RefurbishmentJobStatus" AS ENUM ('RECEIVED', 'INSPECTION', 'CLEANING', 'IRONING', 'REPAIR', 'IN_PROGRESS', 'QA_APPROVED', 'LISTED', 'CANCELLED');
+CREATE TYPE "CancellationReviewStatus" AS ENUM ('NONE', 'PENDING', 'APPROVED', 'REJECTED');
+CREATE TYPE "AdminNotificationType" AS ENUM ('NEW_ORDER', 'RETURN_REQUEST', 'LOW_STOCK', 'CANCELLATION_REVIEW', 'INSPECTION_QUEUED', 'ACCESS_EXPIRING');
+CREATE TYPE "HomepageCarouselSlideType" AS ENUM ('HERO', 'PRODUCT_GRID', 'LETTER');
+CREATE TYPE "ShippingProviderLogLevel" AS ENUM ('INFO', 'WARN', 'ERROR');
+CREATE TYPE "PortalScope" AS ENUM ('CUSTOMER', 'STAFF');
+CREATE TYPE "AddressType" AS ENUM ('HOME', 'BUSINESS');
+CREATE TYPE "CheckoutIntentStatus" AS ENUM ('PENDING', 'CONSUMED', 'EXPIRED', 'FAILED');
+CREATE TABLE "Role" (
+CREATE TABLE "User" (
+CREATE TABLE "MembershipPayment" (
+CREATE TABLE "EmailVerificationToken" (
+CREATE TABLE "PasswordResetToken" (
+CREATE TABLE "Address" (
+CREATE TABLE "Category" (
+CREATE TABLE "Product" (
+CREATE TABLE "ProductVariant" (
+CREATE TABLE "CheckoutIntent" (
+CREATE TABLE "CheckoutIntentLine" (
+CREATE TABLE "Order" (
+CREATE TABLE "ShipmentTrackingEvent" (
+CREATE TABLE "PickupList" (
+CREATE TABLE "PickupListLine" (
+CREATE TABLE "ShippingSettings" (
+CREATE TABLE "OrderItem" (
+CREATE TABLE "ReturnRequest" (
+CREATE TABLE "ReturnReceivePackage" (
+CREATE TABLE "ReturnReceivePackageLine" (
+CREATE TABLE "ReturnStatusEvent" (
+CREATE TABLE "ReturnPackageRequest" (
+CREATE TABLE "InventoryLedgerEvent" (
+CREATE TABLE "ProductUnit" (
+CREATE TABLE "ProductUnitEvent" (
+CREATE TABLE "RefurbishmentJob" (
+CREATE TABLE "ReturnEligibilityQuestionnaire" (
+CREATE TABLE "RefurbInspectionRecord" (
+CREATE TABLE "WishlistItem" (
+CREATE TABLE "StockAlertSubscription" (
+CREATE TABLE "AdminAuditLog" (
+CREATE TABLE "AdminNotification" (
+CREATE TABLE "AdminNotificationRead" (
+CREATE TABLE "BusinessSettings" (
+CREATE TABLE "HomepageCarouselSlide" (
+CREATE TABLE "HomepageCarouselProductCard" (
+CREATE TABLE "ShippingProvider" (
+CREATE TABLE "ShippingServiceMethod" (
+CREATE TABLE "ShippingProviderLog" (
+CREATE TABLE "StoreCreditWallet" (
+CREATE TABLE "StoreCreditTransaction" (
+CREATE TABLE "StripeWebhookEvent" (
+CREATE TABLE "JobLease" (
+CREATE TABLE "RefreshToken" (
+CREATE TABLE "InventoryAdjustment" (
+CREATE UNIQUE INDEX "Role_publicId_key" ON "Role"("publicId");
+CREATE UNIQUE INDEX "Role_name_key" ON "Role"("name");
+CREATE UNIQUE INDEX "User_publicId_key" ON "User"("publicId");
+CREATE UNIQUE INDEX "User_accessNumber_key" ON "User"("accessNumber");
+CREATE INDEX "User_email_idx" ON "User"("email");
+CREATE INDEX "User_portalScope_idx" ON "User"("portalScope");
+CREATE INDEX "User_roleId_idx" ON "User"("roleId");
+CREATE INDEX "User_publicId_idx" ON "User"("publicId");
+CREATE INDEX "User_isActive_idx" ON "User"("isActive");
+CREATE INDEX "User_accessNumber_idx" ON "User"("accessNumber");
+CREATE INDEX "User_isGuest_idx" ON "User"("isGuest");
+CREATE UNIQUE INDEX "User_email_portalScope_key" ON "User"("email", "portalScope");
+CREATE UNIQUE INDEX "MembershipPayment_publicId_key" ON "MembershipPayment"("publicId");
+CREATE INDEX "MembershipPayment_userId_idx" ON "MembershipPayment"("userId");
+CREATE INDEX "MembershipPayment_paidAt_idx" ON "MembershipPayment"("paidAt");
+CREATE INDEX "MembershipPayment_stripeSessionId_idx" ON "MembershipPayment"("stripeSessionId");
+CREATE UNIQUE INDEX "EmailVerificationToken_publicId_key" ON "EmailVerificationToken"("publicId");
+CREATE UNIQUE INDEX "EmailVerificationToken_token_key" ON "EmailVerificationToken"("token");
+CREATE INDEX "EmailVerificationToken_userId_idx" ON "EmailVerificationToken"("userId");
+CREATE INDEX "EmailVerificationToken_token_idx" ON "EmailVerificationToken"("token");
+CREATE UNIQUE INDEX "PasswordResetToken_publicId_key" ON "PasswordResetToken"("publicId");
+CREATE UNIQUE INDEX "PasswordResetToken_token_key" ON "PasswordResetToken"("token");
+CREATE INDEX "PasswordResetToken_userId_idx" ON "PasswordResetToken"("userId");
+CREATE INDEX "PasswordResetToken_token_idx" ON "PasswordResetToken"("token");
+CREATE UNIQUE INDEX "Address_publicId_key" ON "Address"("publicId");
+CREATE INDEX "Address_userId_idx" ON "Address"("userId");
+CREATE UNIQUE INDEX "Category_publicId_key" ON "Category"("publicId");
+CREATE INDEX "Category_parentId_idx" ON "Category"("parentId");
+CREATE UNIQUE INDEX "Category_parentId_name_key" ON "Category"("parentId", "name");
+CREATE UNIQUE INDEX "Category_parentId_slug_key" ON "Category"("parentId", "slug");
+CREATE UNIQUE INDEX "Product_publicId_key" ON "Product"("publicId");
+CREATE UNIQUE INDEX "Product_slug_key" ON "Product"("slug");
+CREATE UNIQUE INDEX "Product_sku_key" ON "Product"("sku");
+CREATE INDEX "Product_categoryId_idx" ON "Product"("categoryId");
+CREATE INDEX "Product_slug_idx" ON "Product"("slug");
+CREATE INDEX "Product_publicId_idx" ON "Product"("publicId");
+CREATE INDEX "Product_isDraft_idx" ON "Product"("isDraft");
+CREATE INDEX "Product_productType_idx" ON "Product"("productType");
+CREATE INDEX "Product_sourceReturnId_idx" ON "Product"("sourceReturnId");
+CREATE INDEX "Product_sourceProductId_idx" ON "Product"("sourceProductId");
+CREATE INDEX "Product_ageGroups_idx" ON "Product"("ageGroups");
+CREATE UNIQUE INDEX "ProductVariant_publicId_key" ON "ProductVariant"("publicId");
+CREATE INDEX "ProductVariant_productId_idx" ON "ProductVariant"("productId");
+CREATE UNIQUE INDEX "ProductVariant_productId_sku_key" ON "ProductVariant"("productId", "sku");
+CREATE UNIQUE INDEX "CheckoutIntent_publicId_key" ON "CheckoutIntent"("publicId");
+CREATE UNIQUE INDEX "CheckoutIntent_stripePaymentIntentId_key" ON "CheckoutIntent"("stripePaymentIntentId");
+CREATE UNIQUE INDEX "CheckoutIntent_orderPublicId_key" ON "CheckoutIntent"("orderPublicId");
+CREATE INDEX "CheckoutIntent_userId_status_idx" ON "CheckoutIntent"("userId", "status");
+CREATE INDEX "CheckoutIntent_checkoutSignature_idx" ON "CheckoutIntent"("checkoutSignature");
+CREATE INDEX "CheckoutIntent_createdAt_idx" ON "CheckoutIntent"("createdAt");
+CREATE INDEX "CheckoutIntentLine_checkoutIntentId_idx" ON "CheckoutIntentLine"("checkoutIntentId");
+CREATE INDEX "CheckoutIntentLine_productId_idx" ON "CheckoutIntentLine"("productId");
+CREATE UNIQUE INDEX "Order_publicId_key" ON "Order"("publicId");
+CREATE UNIQUE INDEX "Order_orderNumber_key" ON "Order"("orderNumber");
+CREATE UNIQUE INDEX "Order_stripeCheckoutSessionId_key" ON "Order"("stripeCheckoutSessionId");
+CREATE UNIQUE INDEX "Order_stripePaymentIntentId_key" ON "Order"("stripePaymentIntentId");
+CREATE INDEX "Order_userId_idx" ON "Order"("userId");
+CREATE INDEX "Order_status_idx" ON "Order"("status");
+CREATE INDEX "Order_fulfillmentStatus_idx" ON "Order"("fulfillmentStatus");
+CREATE INDEX "Order_publicId_idx" ON "Order"("publicId");
+CREATE INDEX "Order_orderNumber_idx" ON "Order"("orderNumber");
+CREATE INDEX "Order_paymentStatus_idx" ON "Order"("paymentStatus");
+CREATE INDEX "Order_cancellationReviewStatus_idx" ON "Order"("cancellationReviewStatus");
+CREATE UNIQUE INDEX "ShipmentTrackingEvent_publicId_key" ON "ShipmentTrackingEvent"("publicId");
+CREATE INDEX "ShipmentTrackingEvent_orderId_createdAt_idx" ON "ShipmentTrackingEvent"("orderId", "createdAt");
+CREATE UNIQUE INDEX "PickupList_publicId_key" ON "PickupList"("publicId");
+CREATE UNIQUE INDEX "PickupListLine_publicId_key" ON "PickupListLine"("publicId");
+CREATE INDEX "PickupListLine_orderId_idx" ON "PickupListLine"("orderId");
+CREATE UNIQUE INDEX "PickupListLine_pickupListId_orderId_key" ON "PickupListLine"("pickupListId", "orderId");
+CREATE UNIQUE INDEX "OrderItem_publicId_key" ON "OrderItem"("publicId");
+CREATE INDEX "OrderItem_orderId_idx" ON "OrderItem"("orderId");
+CREATE INDEX "OrderItem_productId_idx" ON "OrderItem"("productId");
+CREATE INDEX "OrderItem_productVariantId_idx" ON "OrderItem"("productVariantId");
+CREATE INDEX "OrderItem_pickedByUserId_idx" ON "OrderItem"("pickedByUserId");
+CREATE INDEX "OrderItem_cancelledAt_idx" ON "OrderItem"("cancelledAt");
+CREATE UNIQUE INDEX "ReturnRequest_publicId_key" ON "ReturnRequest"("publicId");
+CREATE UNIQUE INDEX "ReturnRequest_returnNumber_key" ON "ReturnRequest"("returnNumber");
+CREATE INDEX "ReturnRequest_userId_idx" ON "ReturnRequest"("userId");
+CREATE INDEX "ReturnRequest_orderId_idx" ON "ReturnRequest"("orderId");
+CREATE INDEX "ReturnRequest_status_idx" ON "ReturnRequest"("status");
+CREATE INDEX "ReturnRequest_submissionPublicId_idx" ON "ReturnRequest"("submissionPublicId");
+CREATE INDEX "ReturnRequest_returnNumber_idx" ON "ReturnRequest"("returnNumber");
+CREATE UNIQUE INDEX "ReturnReceivePackage_publicId_key" ON "ReturnReceivePackage"("publicId");
+CREATE INDEX "ReturnReceivePackage_submissionPublicId_idx" ON "ReturnReceivePackage"("submissionPublicId");
+CREATE UNIQUE INDEX "ReturnReceivePackage_submissionPublicId_packageNumber_key" ON "ReturnReceivePackage"("submissionPublicId", "packageNumber");
+CREATE UNIQUE INDEX "ReturnReceivePackageLine_publicId_key" ON "ReturnReceivePackageLine"("publicId");
+CREATE INDEX "ReturnReceivePackageLine_packageId_idx" ON "ReturnReceivePackageLine"("packageId");
+CREATE INDEX "ReturnReceivePackageLine_returnRequestId_idx" ON "ReturnReceivePackageLine"("returnRequestId");
+CREATE UNIQUE INDEX "ReturnStatusEvent_publicId_key" ON "ReturnStatusEvent"("publicId");
+CREATE INDEX "ReturnStatusEvent_returnRequestId_createdAt_idx" ON "ReturnStatusEvent"("returnRequestId", "createdAt");
+CREATE UNIQUE INDEX "ReturnPackageRequest_publicId_key" ON "ReturnPackageRequest"("publicId");
+CREATE INDEX "ReturnPackageRequest_userId_idx" ON "ReturnPackageRequest"("userId");
+CREATE INDEX "ReturnPackageRequest_orderId_idx" ON "ReturnPackageRequest"("orderId");
+CREATE INDEX "ReturnPackageRequest_returnRequestId_idx" ON "ReturnPackageRequest"("returnRequestId");
+CREATE INDEX "ReturnPackageRequest_status_idx" ON "ReturnPackageRequest"("status");
+CREATE UNIQUE INDEX "InventoryLedgerEvent_publicId_key" ON "InventoryLedgerEvent"("publicId");
+CREATE INDEX "InventoryLedgerEvent_productId_createdAt_idx" ON "InventoryLedgerEvent"("productId", "createdAt");
+CREATE INDEX "InventoryLedgerEvent_productVariantId_idx" ON "InventoryLedgerEvent"("productVariantId");
+CREATE INDEX "InventoryLedgerEvent_referenceType_referenceId_idx" ON "InventoryLedgerEvent"("referenceType", "referenceId");
+CREATE INDEX "InventoryLedgerEvent_eventType_idx" ON "InventoryLedgerEvent"("eventType");
+CREATE INDEX "InventoryLedgerEvent_createdAt_idx" ON "InventoryLedgerEvent"("createdAt");
+CREATE UNIQUE INDEX "ProductUnit_publicId_key" ON "ProductUnit"("publicId");
+CREATE UNIQUE INDEX "ProductUnit_unitSku_key" ON "ProductUnit"("unitSku");
+CREATE INDEX "ProductUnit_productId_idx" ON "ProductUnit"("productId");
+CREATE INDEX "ProductUnit_status_idx" ON "ProductUnit"("status");
+CREATE INDEX "ProductUnit_sourceReturnId_idx" ON "ProductUnit"("sourceReturnId");
+CREATE UNIQUE INDEX "ProductUnitEvent_publicId_key" ON "ProductUnitEvent"("publicId");
+CREATE INDEX "ProductUnitEvent_unitId_createdAt_idx" ON "ProductUnitEvent"("unitId", "createdAt");
+CREATE UNIQUE INDEX "RefurbishmentJob_publicId_key" ON "RefurbishmentJob"("publicId");
+CREATE UNIQUE INDEX "RefurbishmentJob_returnRequestId_key" ON "RefurbishmentJob"("returnRequestId");
+CREATE INDEX "RefurbishmentJob_status_idx" ON "RefurbishmentJob"("status");
+CREATE UNIQUE INDEX "ReturnEligibilityQuestionnaire_publicId_key" ON "ReturnEligibilityQuestionnaire"("publicId");
+CREATE UNIQUE INDEX "ReturnEligibilityQuestionnaire_returnRequestId_key" ON "ReturnEligibilityQuestionnaire"("returnRequestId");
+CREATE INDEX "ReturnEligibilityQuestionnaire_autoDecision_idx" ON "ReturnEligibilityQuestionnaire"("autoDecision");
+CREATE UNIQUE INDEX "RefurbInspectionRecord_publicId_key" ON "RefurbInspectionRecord"("publicId");
+CREATE INDEX "RefurbInspectionRecord_returnRequestId_idx" ON "RefurbInspectionRecord"("returnRequestId");
+CREATE INDEX "RefurbInspectionRecord_refurbishmentJobId_idx" ON "RefurbInspectionRecord"("refurbishmentJobId");
+CREATE INDEX "WishlistItem_userId_idx" ON "WishlistItem"("userId");
+CREATE INDEX "WishlistItem_productId_idx" ON "WishlistItem"("productId");
+CREATE UNIQUE INDEX "WishlistItem_userId_productId_productVariantId_key" ON "WishlistItem"("userId", "productId", "productVariantId");
+CREATE INDEX "StockAlertSubscription_productId_idx" ON "StockAlertSubscription"("productId");
+CREATE INDEX "StockAlertSubscription_userId_idx" ON "StockAlertSubscription"("userId");
+CREATE UNIQUE INDEX "StockAlertSubscription_userId_productId_productVariantId_key" ON "StockAlertSubscription"("userId", "productId", "productVariantId");
+CREATE UNIQUE INDEX "AdminAuditLog_publicId_key" ON "AdminAuditLog"("publicId");
+CREATE INDEX "AdminAuditLog_entityType_entityId_idx" ON "AdminAuditLog"("entityType", "entityId");
+CREATE INDEX "AdminAuditLog_createdAt_idx" ON "AdminAuditLog"("createdAt");
+CREATE UNIQUE INDEX "AdminNotification_publicId_key" ON "AdminNotification"("publicId");
+CREATE INDEX "AdminNotification_type_entityId_idx" ON "AdminNotification"("type", "entityId");
+CREATE INDEX "AdminNotification_module_idx" ON "AdminNotification"("module");
+CREATE INDEX "AdminNotification_createdAt_idx" ON "AdminNotification"("createdAt");
+CREATE INDEX "AdminNotificationRead_userId_idx" ON "AdminNotificationRead"("userId");
+CREATE INDEX "AdminNotificationRead_notificationId_idx" ON "AdminNotificationRead"("notificationId");
+CREATE UNIQUE INDEX "AdminNotificationRead_userId_notificationId_key" ON "AdminNotificationRead"("userId", "notificationId");
+CREATE UNIQUE INDEX "HomepageCarouselSlide_publicId_key" ON "HomepageCarouselSlide"("publicId");
+CREATE INDEX "HomepageCarouselSlide_isActive_sortOrder_idx" ON "HomepageCarouselSlide"("isActive", "sortOrder");
+CREATE INDEX "HomepageCarouselSlide_sortOrder_idx" ON "HomepageCarouselSlide"("sortOrder");
+CREATE UNIQUE INDEX "HomepageCarouselProductCard_publicId_key" ON "HomepageCarouselProductCard"("publicId");
+CREATE INDEX "HomepageCarouselProductCard_slideId_sortOrder_idx" ON "HomepageCarouselProductCard"("slideId", "sortOrder");
+CREATE INDEX "HomepageCarouselProductCard_productId_idx" ON "HomepageCarouselProductCard"("productId");
+CREATE UNIQUE INDEX "ShippingProvider_publicId_key" ON "ShippingProvider"("publicId");
+CREATE UNIQUE INDEX "ShippingProvider_slug_key" ON "ShippingProvider"("slug");
+CREATE INDEX "ShippingProvider_enabled_idx" ON "ShippingProvider"("enabled");
+CREATE INDEX "ShippingProvider_sortOrder_idx" ON "ShippingProvider"("sortOrder");
+CREATE UNIQUE INDEX "ShippingServiceMethod_publicId_key" ON "ShippingServiceMethod"("publicId");
+CREATE INDEX "ShippingServiceMethod_providerId_idx" ON "ShippingServiceMethod"("providerId");
+CREATE UNIQUE INDEX "ShippingServiceMethod_providerId_code_key" ON "ShippingServiceMethod"("providerId", "code");
+CREATE INDEX "ShippingProviderLog_providerSlug_createdAt_idx" ON "ShippingProviderLog"("providerSlug", "createdAt");
+CREATE INDEX "ShippingProviderLog_createdAt_idx" ON "ShippingProviderLog"("createdAt");
+CREATE UNIQUE INDEX "StoreCreditWallet_publicId_key" ON "StoreCreditWallet"("publicId");
+CREATE UNIQUE INDEX "StoreCreditWallet_userId_key" ON "StoreCreditWallet"("userId");
+CREATE UNIQUE INDEX "StoreCreditTransaction_publicId_key" ON "StoreCreditTransaction"("publicId");
+CREATE UNIQUE INDEX "StoreCreditTransaction_sourceKey_key" ON "StoreCreditTransaction"("sourceKey");
+CREATE INDEX "StoreCreditTransaction_walletId_idx" ON "StoreCreditTransaction"("walletId");
+CREATE INDEX "StoreCreditTransaction_type_idx" ON "StoreCreditTransaction"("type");
+CREATE INDEX "StoreCreditTransaction_orderPublicId_idx" ON "StoreCreditTransaction"("orderPublicId");
+CREATE UNIQUE INDEX "StripeWebhookEvent_eventId_key" ON "StripeWebhookEvent"("eventId");
+CREATE INDEX "StripeWebhookEvent_processedAt_idx" ON "StripeWebhookEvent"("processedAt");
+CREATE INDEX "StripeWebhookEvent_status_idx" ON "StripeWebhookEvent"("status");
+CREATE INDEX "JobLease_leaseExpiresAt_idx" ON "JobLease"("leaseExpiresAt");
+CREATE UNIQUE INDEX "RefreshToken_publicId_key" ON "RefreshToken"("publicId");
+CREATE UNIQUE INDEX "RefreshToken_tokenHash_key" ON "RefreshToken"("tokenHash");
+CREATE INDEX "RefreshToken_userId_idx" ON "RefreshToken"("userId");
+CREATE UNIQUE INDEX "InventoryAdjustment_publicId_key" ON "InventoryAdjustment"("publicId");
+CREATE INDEX "InventoryAdjustment_productId_idx" ON "InventoryAdjustment"("productId");
+CREATE INDEX "InventoryAdjustment_productVariantId_idx" ON "InventoryAdjustment"("productVariantId");
+CREATE INDEX "InventoryAdjustment_userId_idx" ON "InventoryAdjustment"("userId");
+CREATE INDEX "InventoryAdjustment_createdAt_idx" ON "InventoryAdjustment"("createdAt");
