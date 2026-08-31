@@ -48,6 +48,7 @@ import { formatOrderLedgerLabel, orderLedgerNote } from '../lib/inventory-ledger
 import * as orderDocuments from './pdf/order-documents.service.js';
 import { emailService } from './email.service.js';
 import { config } from '../config/env.js';
+import { applyFreeShippingWaiver } from '../lib/free-shipping.js';
 import { verifyOrderTrackingToken } from '../lib/order-tracking-token.js';
 import { assignOrderNumber, placeholderOrderNumber } from '../utils/order-number.js';
 import {
@@ -440,7 +441,8 @@ export class OrderService {
       hasAccess: effectiveHasAccess,
     });
     const selectedRate = resolveSelectedRate(shippingRates.rates, payload?.selectedRateId, payload?.selectedRate);
-    const shippingCost = Number(selectedRate?.amount || 0);
+    const quotedShipping = Number(selectedRate?.amount || 0);
+    const shippingCost = applyFreeShippingWaiver(subtotalApplied, quotedShipping);
 
     let accessSavings = null;
     if (!hasAccess) {
@@ -456,7 +458,10 @@ export class OrderService {
         hasAccess: !includeAccessMembership,
       });
       const compareRate = matchRateByServiceTier(compareShippingRates.rates, selectedRate);
-      const compareShippingCost = Number(compareRate?.amount || 0);
+      const compareShippingCost = applyFreeShippingWaiver(
+        subtotalApplied,
+        Number(compareRate?.amount || 0)
+      );
       shippingSavings = Math.max(
         0,
         includeAccessMembership ? compareShippingCost - shippingCost : shippingCost - compareShippingCost
@@ -1131,7 +1136,7 @@ export class OrderService {
         hasAccess,
       });
       selectedRate = resolveSelectedRate(shippingRates.rates, opts.selectedRateId, opts.selectedRate);
-      shippingCost = Number(selectedRate?.amount || 0);
+      shippingCost = applyFreeShippingWaiver(subtotal, Number(selectedRate?.amount || 0));
       shipmentId = shippingRates.shipmentId || null;
     } catch (error) {
       console.error('[order] checkout shipping rates failed', order.publicId, error?.message || error);

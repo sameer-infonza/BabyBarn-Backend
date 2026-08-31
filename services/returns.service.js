@@ -1621,7 +1621,7 @@ export class ReturnsService {
     if (rr.type === 'REFURBISHMENT') {
       throw new AppError(
         400,
-        'Refurbishment returns use customer-provided USPS tracking. Generate labels are not used for this path.'
+        'Refurbishment returns use customer-provided UPS tracking. Generate labels are not used for this path.'
       );
     }
     if (!['APPROVED', 'LABEL_GENERATED'].includes(rr.status)) {
@@ -3334,13 +3334,13 @@ export class ReturnsService {
 
     const rows = await this._loadUserSubmissionRows(user.id, returnPublicId);
     const primary = rows[0];
-    if (primary.type !== 'REFURBISHMENT') throw new AppError(400, 'Only refurbishment returns accept USPS shipment details');
+    if (primary.type !== 'REFURBISHMENT') throw new AppError(400, 'Only refurbishment returns accept UPS shipment details');
     if (!['APPROVED', 'LABEL_GENERATED'].includes(primary.status)) {
       throw new AppError(400, 'Return is not awaiting your shipment details');
     }
 
     const tracking = String(trackingNumber || '').trim();
-    if (!tracking) throw new AppError(400, 'USPS tracking number is required');
+    if (!tracking) throw new AppError(400, 'UPS tracking number is required');
 
     const shipped = shippedAt ? new Date(shippedAt) : new Date();
     const noteTrimmed = note ? String(note).trim() : null;
@@ -3354,7 +3354,7 @@ export class ReturnsService {
           where: { id: row.id },
           data: {
             status: 'IN_TRANSIT',
-            manualCarrier: 'USPS',
+            manualCarrier: 'UPS',
             manualTrackingNumber: tracking,
             manualShippedAt: shipped,
             customerShippingNote: noteTrimmed,
@@ -3369,7 +3369,7 @@ export class ReturnsService {
           fromStatus: row.status,
           toStatus: 'IN_TRANSIT',
           actorUserId: user.id,
-          note: noteTrimmed ? `Customer shipped via USPS · ${noteTrimmed}` : 'Customer shipped via USPS',
+          note: noteTrimmed ? `Customer shipped via UPS · ${noteTrimmed}` : 'Customer shipped via UPS',
         });
       }
     });
@@ -3418,7 +3418,7 @@ export class ReturnsService {
 
     const activeDeadline = rr.keepWaitingUntil || rr.shipByDeadline;
     if (!activeDeadline) {
-      throw new AppError(400, 'Expected receive date is not set yet — waiting for customer USPS tracking or envelope dispatch');
+      throw new AppError(400, 'Expected receive date is not set yet — waiting for customer UPS tracking or envelope dispatch');
     }
     if (new Date() <= new Date(activeDeadline)) {
       throw new AppError(400, 'Keep waiting is only available after the expected receive date has passed');

@@ -110,6 +110,8 @@ export const config = {
   /** Blind auto-restock on approve is off; admins restock via pick UI (plan 41). */
   standardReturnRestock: process.env.STANDARD_RETURN_RESTOCK === 'true',
   salesTaxRate: Number(process.env.SALES_TAX_RATE ?? 0.06),
+  /** Merchandise subtotal at or above this amount waives shipping at checkout (USD). */
+  freeShippingThresholdUsd: Number(process.env.FREE_SHIPPING_THRESHOLD_USD ?? 75),
   /** Days before ACCESS expiry to send the pre-expiry reminder email (comma-separated for multiple, e.g. "14,0"). */
   accessRenewalReminderDays: (process.env.ACCESS_RENEWAL_REMINDER_DAYS || '14,0')
     .split(',')

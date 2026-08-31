@@ -46,6 +46,7 @@ import { getBusinessSettings } from './admin.service.js';
 import { assertMembershipCheckoutAllowed } from './membership-eligibility.service.js';
 import { assignOrderNumber, placeholderOrderNumber } from '../utils/order-number.js';
 import { completeMembershipFromBundledCheckout } from './membership.service.js';
+import { applyFreeShippingWaiver } from '../lib/free-shipping.js';
 import {
   buildCheckoutSignature,
   buildCheckoutSignatureFromOrder,
@@ -389,7 +390,7 @@ export class CheckoutIntentService {
         hasAccess: effectiveHasAccess,
       });
       selectedRate = resolveSelectedRate(shippingRates.rates, opts.selectedRateId, opts.selectedRate);
-      shippingCost = Number(selectedRate?.amount || 0);
+      shippingCost = applyFreeShippingWaiver(subtotal, Number(selectedRate?.amount || 0));
       shipmentId = shippingRates.shipmentId || null;
     } catch (error) {
       console.error('[checkout-intent] shipping rates failed', intent.publicId, error?.message || error);
