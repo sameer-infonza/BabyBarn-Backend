@@ -135,7 +135,7 @@ export async function assertMembershipCheckoutAllowed(userPublicId, opts = {}) {
         eligibility.status === 'active'
           ? `${eligibility.message} ${eligibility.renewalMessage}`
           : eligibility.status === 'none'
-            ? 'You do not have an ACCESS membership to renew yet.'
+            ? 'You do not have a Farmhouse Friends membership to renew yet.'
             : 'Renewal is not available for your membership right now.';
       throw new AppError(409, msg, 'MEMBERSHIP_RENEWAL_NOT_AVAILABLE', eligibility);
     }

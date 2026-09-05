@@ -120,11 +120,11 @@ export async function seedHomepageCarousel(prisma, options = {}) {
       bodyText: HERO_BODY,
       rewardPercent: '20%',
       rewardLabel:
-        'Send your little one’s gently worn pieces back to us, and receive 20% toward their next size up as a reward for doing good.',
+        'Join Farmhouse Friends and send your little ones’ gently worn pieces back to us, and receive 20% toward their next size up.',
       primaryCtaLabel: 'Shop the collection',
       primaryCtaHref: '/products',
-      secondaryCtaLabel: 'How the return program works',
-      secondaryCtaHref: '/how-it-works',
+      secondaryCtaLabel: 'Join Farmhouse Friends',
+      secondaryCtaHref: '/farmhouse-friends',
       imageLabel1: 'hero — baby in organic cotton',
       imageLabel2: 'detail — fabric',
     },
@@ -156,6 +156,8 @@ export async function seedHomepageCarousel(prisma, options = {}) {
       bodyText: LETTER_BODY,
       signatureName: 'You got this!',
       signatureFrom: 'Sincerely,\nTeam Baby Barn',
+      primaryCtaLabel: 'Read the full note',
+      primaryCtaHref: '/blog#dear-parents',
     },
   });
 

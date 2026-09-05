@@ -708,8 +708,8 @@ export async function createMembershipCheckoutSession(userPublicId, opts = {}) {
           currency: 'usd',
           unit_amount: unitCents,
           product_data: {
-            name: 'ACCESS Membership',
-            description: 'Baby Barn ACCESS member benefits',
+            name: 'Farmhouse Friends',
+            description: 'Baby Barn Farmhouse Friends member benefits',
           },
         },
       },
@@ -775,7 +775,7 @@ export async function createOrderCheckoutSession(userPublicId, items, opts = {})
         currency: 'usd',
         unit_amount: Math.round(Number(checkoutIntent.accessMembershipAmount) * 100),
         product_data: {
-          name: 'Baby Barn ACCESS Membership (1 year)',
+          name: 'Baby Barn Farmhouse Friends (1 year)',
         },
       },
     });
@@ -1505,7 +1505,7 @@ export async function getMembershipCheckoutSummary(userPublicId, sessionId) {
   }
 
   if (getFlow(session.metadata) !== 'membership') {
-    throw new AppError(400, 'Not an ACCESS membership checkout session');
+    throw new AppError(400, 'Not a Farmhouse Friends checkout session');
   }
   if (session.metadata?.userPublicId !== userPublicId) {
     throw new AppError(403, 'Unauthorized to access this checkout session');

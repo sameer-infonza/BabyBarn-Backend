@@ -372,7 +372,7 @@ export class OrderService {
     if (user.isGuest && includeAccessMembership) {
       throw new AppError(
         403,
-        'ACCESS membership requires a full account. Please sign in or create an account.',
+        'Farmhouse Friends requires a full account. Please sign in or create an account.',
         'FULL_ACCOUNT_REQUIRED'
       );
     }

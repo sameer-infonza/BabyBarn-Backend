@@ -79,7 +79,7 @@ export async function getFinanceStats({ dateFrom, dateTo } = {}) {
     membershipRevenueInOrders: membershipStats.membershipRevenue,
     membershipPaymentCount: membershipStats.membershipPaymentCount,
     membershipNote:
-      'ACCESS membership revenue is tracked in the membership payment ledger (Stripe Checkout).',
+      'Farmhouse Friends revenue is tracked in the membership payment ledger (Stripe Checkout).',
     activeMembersCount: activeMembers,
   };
 }

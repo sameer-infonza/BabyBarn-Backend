@@ -58,7 +58,7 @@ export function renderBrandedEmailTemplate(template, context = {}, brand) {
     const bodyHtml = `
       ${emailHeroText('Welcome aboard', 'Your account is active — explore curated essentials for your little one.')}
       ${greet(name)}
-      ${emailBodyParagraph('Shop new and circular pieces, track orders, and manage ACCESS membership from your dashboard.')}
+      ${emailBodyParagraph('Shop new and circular pieces, track orders, and manage Farmhouse Friends from your dashboard.')}
       ${emailCtaButton(context.actionUrl, 'Go to dashboard')}
     `;
     const { html } = doc(subject, 'Welcome to Baby Barn', bodyHtml, brand);
@@ -269,9 +269,9 @@ export function renderBrandedEmailTemplate(template, context = {}, brand) {
   }
 
   if (template === 'access-purchase') {
-    const subject = 'Your ACCESS membership is active';
+    const subject = 'Your Farmhouse Friends membership is active';
     const bodyHtml = `
-      ${emailHeroText('ACCESS is active', 'Member pricing and circular returns are now unlocked.')}
+      ${emailHeroText('Farmhouse Friends is active', 'Member pricing and circular returns are now unlocked.')}
       ${greet(name)}
       ${emailPanel(
         `<table width="100%">${emailInfoRows([
@@ -283,16 +283,16 @@ export function renderBrandedEmailTemplate(template, context = {}, brand) {
       )}
       ${emailCtaButton(context.actionUrl, 'View membership')}
     `;
-    const { html } = doc(subject, 'ACCESS membership confirmed', bodyHtml, brand);
+    const { html } = doc(subject, 'Farmhouse Friends confirmed', bodyHtml, brand);
     return {
       subject,
       html,
-      text: `ACCESS active. Member ${context.accessNumber}. Valid until ${context.validUntil}. ${context.actionUrl}`,
+      text: `Farmhouse Friends active. Member ${context.accessNumber}. Valid until ${context.validUntil}. ${context.actionUrl}`,
     };
   }
 
   if (template === 'access-renewal') {
-    const subject = 'Your ACCESS membership has been renewed';
+    const subject = 'Your Farmhouse Friends membership has been renewed';
     const bodyHtml = `
       ${greet(name)}
       ${emailPanel(
@@ -305,35 +305,35 @@ export function renderBrandedEmailTemplate(template, context = {}, brand) {
       )}
       ${emailCtaButton(context.actionUrl, 'View membership')}
     `;
-    const { html } = doc(subject, 'ACCESS renewed', bodyHtml, brand);
-    return { subject, html, text: `ACCESS renewed until ${context.validUntil}. ${context.actionUrl}` };
+    const { html } = doc(subject, 'Farmhouse Friends renewed', bodyHtml, brand);
+    return { subject, html, text: `Farmhouse Friends renewed until ${context.validUntil}. ${context.actionUrl}` };
   }
 
   if (template === 'access-renewal-reminder') {
-    const subject = 'Your ACCESS membership renews soon';
+    const subject = 'Your Farmhouse Friends membership renews soon';
     const bodyHtml = `
       ${greet(name)}
       ${emailBodyParagraph(
-        `Your ACCESS membership (<strong>${escapeHtml(context.accessNumber || '')}</strong>) expires on <strong>${escapeHtml(context.validUntil || '')}</strong>.`
+        `Your Farmhouse Friends membership (<strong>${escapeHtml(context.accessNumber || '')}</strong>) expires on <strong>${escapeHtml(context.validUntil || '')}</strong>.`
       )}
       ${emailBodyParagraph('Renew now to keep member pricing, returns, and refurbished access without interruption.')}
-      ${emailCtaButton(context.actionUrl, 'Renew ACCESS', 'secondary')}
-      ${emailMutedNote('ACCESS is an annual one-time payment — not a recurring subscription.')}
+      ${emailCtaButton(context.actionUrl, 'Renew Farmhouse Friends', 'secondary')}
+      ${emailMutedNote('Farmhouse Friends is an annual one-time payment — not a recurring subscription.')}
     `;
-    const { html } = doc(subject, 'Renew ACCESS before it expires', bodyHtml, brand);
-    return { subject, html, text: `ACCESS expires ${context.validUntil}. Renew: ${context.actionUrl}` };
+    const { html } = doc(subject, 'Renew Farmhouse Friends before it expires', bodyHtml, brand);
+    return { subject, html, text: `Farmhouse Friends expires ${context.validUntil}. Renew: ${context.actionUrl}` };
   }
 
   if (template === 'access-expired') {
-    const subject = 'Your ACCESS membership has expired';
+    const subject = 'Your Farmhouse Friends membership has expired';
     const bodyHtml = `
       ${greet(name)}
-      ${emailBodyParagraph(`Your ACCESS membership expired on <strong>${escapeHtml(context.validUntil || '')}</strong>.`)}
+      ${emailBodyParagraph(`Your Farmhouse Friends membership expired on <strong>${escapeHtml(context.validUntil || '')}</strong>.`)}
       ${emailBodyParagraph('Reactivate anytime to restore member pricing and circular benefits.')}
-      ${emailCtaButton(context.actionUrl, 'Reactivate ACCESS')}
+      ${emailCtaButton(context.actionUrl, 'Reactivate Farmhouse Friends')}
     `;
-    const { html } = doc(subject, 'ACCESS expired', bodyHtml, brand);
-    return { subject, html, text: `ACCESS expired. Reactivate: ${context.actionUrl}` };
+    const { html } = doc(subject, 'Farmhouse Friends expired', bodyHtml, brand);
+    return { subject, html, text: `Farmhouse Friends expired. Reactivate: ${context.actionUrl}` };
   }
 
   if (template === 'team-invite') {

@@ -1114,7 +1114,7 @@ export class ReturnsService {
         throw new AppError(403, 'Refurbishment returns are not available yet');
       }
       const hasAccess = Boolean(user.accessMemberUntil && user.accessMemberUntil > new Date());
-      if (!hasAccess) throw new AppError(403, 'ACCESS membership required for refurbishment returns');
+      if (!hasAccess) throw new AppError(403, 'Farmhouse Friends required for refurbishment returns');
       const windowStart = resolveUsedReturnWindowStart(order);
       if (!windowStart) {
         throw new AppError(400, 'Return Used Product becomes available after delivery');

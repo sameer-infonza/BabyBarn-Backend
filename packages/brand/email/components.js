@@ -252,7 +252,7 @@ export function emailInvoiceBlock(opts = {}) {
   const extraTotals = [
     opts.tax != null ? { label: 'Tax', value: opts.tax } : null,
     opts.storeCredit != null ? { label: 'Store credit', value: opts.storeCredit } : null,
-    opts.accessMembership != null ? { label: 'ACCESS membership', value: opts.accessMembership } : null,
+    opts.accessMembership != null ? { label: 'Farmhouse Friends', value: opts.accessMembership } : null,
   ].filter(Boolean);
 
   const totals = [
