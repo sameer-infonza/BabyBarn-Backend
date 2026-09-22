@@ -5,6 +5,11 @@ import { slugifyName } from '../utils/slug.js';
 import { config } from '../config/env.js';
 import { prisma } from '../lib/prisma.js';
 import { AGE_AXIS_NAME, ageOrderIndex, isCanonicalAge } from '../lib/age-groups.js';
+import {
+  ensureBarcodesForProduct,
+  reattachVariantBarcodes,
+  snapshotVariantBarcodeSkus,
+} from './barcode.service.js';
 
 /**
  * Denormalized age list for fast PLP filtering. For variant products it is the
@@ -827,8 +832,15 @@ export class ProductService {
             : undefined,
         },
         include: { category: true, variants: { orderBy: { sortOrder: 'asc' } } },
-      });
+        });
 
+      return product;
+    }).then(async (product) => {
+      try {
+        await ensureBarcodesForProduct(product.id);
+      } catch (err) {
+        console.error('[barcode] ensure after create failed', product.id, err);
+      }
       return product;
     });
   }
@@ -996,6 +1008,7 @@ export class ProductService {
           });
         }
 
+        const barcodeSkuSnapshot = await snapshotVariantBarcodeSkus(tx, product.id);
         await tx.productVariant.deleteMany({ where: { productId: product.id } });
 
         if (isVariantProduct) {
@@ -1025,7 +1038,7 @@ export class ProductService {
             updatePayload.sku = await ensureUniqueParentSku(tx);
           }
 
-          return tx.product.update({
+          const next = await tx.product.update({
             where: { id: product.id },
             data: {
               ...updatePayload,
@@ -1043,6 +1056,8 @@ export class ProductService {
             },
             include: { category: true, variants: { orderBy: { sortOrder: 'asc' } } },
           });
+          await reattachVariantBarcodes(tx, product.id, barcodeSkuSnapshot);
+          return next;
         }
 
         updatePayload.inventoryModel = 'simple';
@@ -1087,6 +1102,12 @@ export class ProductService {
         include: { category: true, variants: { orderBy: { sortOrder: 'asc' } } },
       });
     });
+
+    try {
+      await ensureBarcodesForProduct(updated.id);
+    } catch (err) {
+      console.error('[barcode] ensure after update failed', updated.id, err);
+    }
 
     const { productAvailableStock } = await import('./inventory-reservation.js');
     const { isSellableAvailable } = await import('../lib/inventory-stock-rules.js');

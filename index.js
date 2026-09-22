@@ -23,6 +23,8 @@ import membershipRoutes from './routes/membership.js';
 import checkoutRoutes from './routes/checkout.js';
 import wishlistRoutes from './routes/wishlist.js';
 import stockAlertsRoutes from './routes/stock-alerts.js';
+import systemRoutes from './routes/system.js';
+import { primaryLanIpv4 } from './lib/lan-host.js';
 import { stripeWebhook } from './controllers/payment.controller.js';
 import { startScheduledJobs } from './services/scheduled-jobs.service.js';
 
@@ -60,6 +62,15 @@ app.use(
       if (config.corsOrigins.includes(origin)) {
         callback(null, true);
         return;
+      }
+
+      if (config.nodeEnv !== 'production') {
+        const lanDev =
+          /^https?:\/\/(192\.168\.\d{1,3}\.\d{1,3}|10\.\d{1,3}\.\d{1,3}\.\d{1,3}|172\.(1[6-9]|2\d|3[01])\.\d{1,3}\.\d{1,3})(:\d+)?$/i;
+        if (lanDev.test(origin)) {
+          callback(null, true);
+          return;
+        }
       }
 
       callback(new AppError(403, `CORS origin rejected: ${origin}`));
@@ -173,6 +184,7 @@ function mountApi(prefix) {
   app.use(`${prefix}/checkout`, checkoutRoutes);
   app.use(`${prefix}/wishlist`, wishlistRoutes);
   app.use(`${prefix}/stock-alerts`, stockAlertsRoutes);
+  app.use(`${prefix}/system`, systemRoutes);
 }
 
 mountApi('/api');
@@ -233,10 +245,14 @@ try {
   process.exit(1);
 }
 
-app.listen(PORT, () => {
+app.listen(PORT, '0.0.0.0', () => {
+  const lan = primaryLanIpv4();
   console.log('');
   console.log('══════════════════════════════════════════════');
   console.log(`  Baby Barn API listening on http://localhost:${PORT}`);
+  if (lan) {
+    console.log(`  Same WiFi:    http://${lan}:${PORT}/api`);
+  }
   console.log(`  Health check: http://localhost:${PORT}/health/live`);
   console.log(`  API base:     http://localhost:${PORT}/api`);
   console.log(`  Environment:  ${config.nodeEnv}`);

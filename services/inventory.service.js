@@ -203,6 +203,7 @@ function flattenProductToSkuLines(p) {
         name: p.name,
         variantLabel: combinationLabel(v.combination),
         sku: v.sku,
+        barcodeCode: (p.barcodes || []).find((b) => b.productVariantId === v.id)?.code ?? null,
         category,
         productType: p.productType,
         reorderPoint: p.reorderPoint ?? null,
@@ -232,6 +233,7 @@ function flattenProductToSkuLines(p) {
       name: p.name,
       variantLabel: '—',
       sku: p.sku,
+      barcodeCode: (p.barcodes || []).find((b) => b.productVariantId == null)?.code ?? null,
       category,
       productType: p.productType,
       reorderPoint: p.reorderPoint ?? null,
@@ -311,6 +313,7 @@ export class InventoryService {
           { name: { contains: q, mode: 'insensitive' } },
           { sku: { contains: q, mode: 'insensitive' } },
           { variants: { some: { sku: { contains: q, mode: 'insensitive' } } } },
+          { barcodes: { some: { code: { contains: q, mode: 'insensitive' } } } },
         ],
       });
     }
@@ -321,6 +324,7 @@ export class InventoryService {
         category: true,
         variants: { orderBy: { sortOrder: 'asc' } },
         sourceProduct: { select: { publicId: true, name: true, sku: true } },
+        barcodes: { select: { code: true, productVariantId: true } },
       },
       orderBy: { updatedAt: 'desc' },
     });

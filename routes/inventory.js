@@ -61,4 +61,91 @@ router.patch(
   (req, res, next) => inventoryController.updateProductType(req, res).catch(next)
 );
 
+const barcodeStaff = [authenticate, authorize('ADMIN', 'ADMIN_TEAM'), requireConsoleModuleAny(['inventory', 'products'])];
+
+router.get('/barcodes/lookup', ...barcodeStaff, (req, res, next) =>
+  inventoryController.lookupBarcode(req, res).catch(next)
+);
+router.get('/barcodes/pdf', ...barcodeStaff, (req, res, next) =>
+  inventoryController.barcodePdf(req, res).catch(next)
+);
+router.get('/barcodes/png', ...barcodeStaff, (req, res, next) =>
+  inventoryController.barcodePng(req, res).catch(next)
+);
+router.post('/barcodes/ensure', ...barcodeStaff, (req, res, next) =>
+  inventoryController.ensureBarcodeBySku(req, res).catch(next)
+);
+router.patch('/barcodes/location', ...barcodeStaff, (req, res, next) =>
+  inventoryController.updateBarcodeLocation(req, res).catch(next)
+);
+router.get('/barcodes/:code/pdf', ...barcodeStaff, (req, res, next) =>
+  inventoryController.barcodePdf(req, res).catch(next)
+);
+router.get('/barcodes/:code/png', ...barcodeStaff, (req, res, next) =>
+  inventoryController.barcodePng(req, res).catch(next)
+);
+router.post('/barcodes/:code/sent', ...barcodeStaff, (req, res, next) =>
+  inventoryController.markBarcodeSent(req, res).catch(next)
+);
+router.post('/barcodes/:code/regenerate', ...barcodeStaff, (req, res, next) =>
+  inventoryController.regenerateBarcode(req, res).catch(next)
+);
+router.get('/barcodes', ...barcodeStaff, (req, res, next) =>
+  inventoryController.listBarcodes(req, res).catch(next)
+);
+
+router.post('/scan/resolve', ...barcodeStaff, (req, res, next) =>
+  inventoryController.scanResolve(req, res).catch(next)
+);
+router.post('/scan/receive', ...barcodeStaff, (req, res, next) =>
+  inventoryController.scanReceive(req, res).catch(next)
+);
+router.post('/scan/add', ...barcodeStaff, (req, res, next) =>
+  inventoryController.scanAdd(req, res).catch(next)
+);
+router.post('/scan/verify', ...barcodeStaff, (req, res, next) =>
+  inventoryController.scanVerify(req, res).catch(next)
+);
+router.post('/scan/pick', ...barcodeStaff, (req, res, next) =>
+  inventoryController.scanPick(req, res).catch(next)
+);
+router.get('/scan/orders/:ref', ...barcodeStaff, (req, res, next) =>
+  inventoryController.scanOrderChecklist(req, res).catch(next)
+);
+router.post('/scan/cancel-restore', ...barcodeStaff, (req, res, next) =>
+  inventoryController.scanCancelRestore(req, res).catch(next)
+);
+router.post('/scan/return-restock', ...barcodeStaff, (req, res, next) =>
+  inventoryController.scanReturnRestock(req, res).catch(next)
+);
+router.post('/scan/refurb', ...barcodeStaff, (req, res, next) =>
+  inventoryController.scanRefurb(req, res).catch(next)
+);
+
+function sseTokenAuth(req, res, next) {
+  if (!req.headers.authorization && req.query.token) {
+    req.headers.authorization = `Bearer ${String(req.query.token)}`;
+  }
+  next();
+}
+
+router.post('/scan/sessions', ...barcodeStaff, (req, res, next) =>
+  inventoryController.createScanSession(req, res).catch(next)
+);
+router.post('/scan/sessions/:code/join', ...barcodeStaff, (req, res, next) =>
+  inventoryController.joinScanSession(req, res).catch(next)
+);
+router.get('/scan/sessions/:code', ...barcodeStaff, (req, res, next) =>
+  inventoryController.getScanSession(req, res).catch(next)
+);
+router.get('/scan/sessions/:code/qr', (req, res, next) =>
+  inventoryController.scanSessionQr(req, res).catch(next)
+);
+router.get('/scan/sessions/:code/events', sseTokenAuth, ...barcodeStaff, (req, res, next) =>
+  inventoryController.scanSessionEvents(req, res).catch(next)
+);
+router.post('/scan/relay', ...barcodeStaff, (req, res, next) =>
+  inventoryController.scanRelay(req, res).catch(next)
+);
+
 export default router;

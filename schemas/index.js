@@ -848,6 +848,74 @@ export const inventoryProductTypeSchema = z.object({
   productType: z.enum(['NEW', 'REFURBISHED']),
 });
 
+export const barcodeLookupQuerySchema = z
+  .object({
+    code: z.string().trim().min(1).max(64).optional(),
+    sku: z.string().trim().min(1).max(80).optional(),
+  })
+  .refine((d) => d.code || d.sku, { message: 'code or sku is required' });
+
+export const barcodeListQuerySchema = z.object({
+  productId: z.string().trim().min(1),
+});
+
+export const barcodeEnsureSchema = z.object({
+  sku: z.string().trim().min(1).max(80),
+});
+
+export const barcodeRegenerateSchema = z.object({
+  confirmSent: z.boolean().optional().default(false),
+});
+
+export const barcodeLocationSchema = z.object({
+  query: z.string().trim().min(1).max(80),
+  warehouseLocation: z.string().trim().max(120).nullable().optional(),
+});
+
+export const scanResolveSchema = z.object({
+  code: z.string().trim().min(1).max(80),
+});
+
+export const scanAdjustSchema = z.object({
+  code: z.string().trim().min(1).max(80),
+  mode: z.enum(['each', 'bulk']).optional().default('bulk'),
+  quantity: z.number().int().min(1).optional(),
+  reason: z.string().trim().max(500).optional(),
+  location: z.string().trim().max(120).optional(),
+});
+
+export const scanVerifySchema = z.object({
+  code: z.string().trim().min(1).max(80),
+  counted: z.number().int().min(0),
+  applyAdjustment: z.boolean().optional().default(false),
+});
+
+export const scanOrderSchema = z.object({
+  code: z.string().trim().min(1).max(80),
+  orderRef: z.string().trim().min(1).max(80),
+  mode: z.enum(['each', 'bulk']).optional().default('each'),
+  quantity: z.number().int().min(1).optional(),
+});
+
+export const scanOrderRefParamsSchema = z.object({
+  ref: z.string().trim().min(1).max(80),
+});
+
+export const scanReturnSchema = z.object({
+  code: z.string().trim().min(1).max(80),
+  returnRef: z.string().trim().min(1).max(80),
+  quantity: z.number().int().min(1).optional(),
+});
+
+export const scanRelaySchema = z.object({
+  sessionCode: z.string().trim().min(4).max(8),
+  code: z.string().trim().min(1).max(80),
+});
+
+export const scanSessionJoinParamsSchema = z.object({
+  code: z.string().trim().min(4).max(8),
+});
+
 const shipAddressSchema = z.object({
   fullName: z.string().min(1).optional(),
   name: z.string().min(1).optional(),

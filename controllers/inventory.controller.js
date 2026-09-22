@@ -1,6 +1,25 @@
 import { inventoryService } from '../services/inventory.service.js';
+import { barcodeService } from '../services/barcode.service.js';
+import { inventoryScanService } from '../services/inventory-scan.service.js';
+import { scanRelayService } from '../services/scan-relay.service.js';
 import { validate } from '../utils/validation.js';
-import { inventoryAdjustSchema, inventoryProductTypeSchema } from '../schemas/index.js';
+import {
+  barcodeEnsureSchema,
+  barcodeListQuerySchema,
+  barcodeLocationSchema,
+  barcodeLookupQuerySchema,
+  barcodeRegenerateSchema,
+  inventoryAdjustSchema,
+  inventoryProductTypeSchema,
+  scanAdjustSchema,
+  scanOrderSchema,
+  scanOrderRefParamsSchema,
+  scanResolveSchema,
+  scanRelaySchema,
+  scanReturnSchema,
+  scanSessionJoinParamsSchema,
+  scanVerifySchema,
+} from '../schemas/index.js';
 import { toPublicJson } from '../utils/serialize.js';
 
 export class InventoryController {
@@ -94,6 +113,184 @@ export class InventoryController {
   async productOverview(req, res) {
     const data = await inventoryService.getProductOverview(req.params.id);
     res.status(200).json({ success: true, data: toPublicJson(data) });
+  }
+
+  async listBarcodes(req, res) {
+    const { productId } = await validate(barcodeListQuerySchema, req.query);
+    const data = await barcodeService.listForProductPublicId(productId);
+    res.status(200).json({ success: true, data });
+  }
+
+  async lookupBarcode(req, res) {
+    const q = await validate(barcodeLookupQuerySchema, req.query);
+    const data = await barcodeService.lookup(q.code || q.sku, { ensureIfSku: false });
+    res.status(200).json({ success: true, data });
+  }
+
+  async ensureBarcodeBySku(req, res) {
+    const body = await validate(barcodeEnsureSchema, req.body ?? {});
+    const data = await barcodeService.ensureBySku(body.sku);
+    res.status(200).json({ success: true, data });
+  }
+
+  async updateBarcodeLocation(req, res) {
+    const body = await validate(barcodeLocationSchema, req.body ?? {});
+    const data = await barcodeService.updateLocation(body.query, body.warehouseLocation, {
+      id: req.user?.id ?? null,
+      email: req.user?.email ?? null,
+    });
+    res.status(200).json({ success: true, data });
+  }
+
+  async regenerateBarcode(req, res) {
+    const body = await validate(barcodeRegenerateSchema, req.body ?? {});
+    const data = await barcodeService.regenerate(req.params.code, {
+      confirmSent: Boolean(body.confirmSent),
+      actor: { id: req.user?.id ?? null, email: req.user?.email ?? null },
+    });
+    res.status(200).json({ success: true, data });
+  }
+
+  async markBarcodeSent(req, res) {
+    const data = await barcodeService.markSent(req.params.code, {
+      id: req.user?.id ?? null,
+      email: req.user?.email ?? null,
+    });
+    res.status(200).json({ success: true, data });
+  }
+
+  async barcodePdf(req, res) {
+    const fromQuery = String(req.query.codes || req.query.code || '');
+    const fromParam = req.params.code ? String(req.params.code) : '';
+    const codes = `${fromQuery},${fromParam}`
+      .split(',')
+      .map((s) => s.trim())
+      .filter(Boolean);
+    if (codes.length === 0 && req.query.sku) {
+      const row = await barcodeService.ensureBySku(String(req.query.sku));
+      codes.push(row.code);
+    }
+    const buffer = await barcodeService.renderLabelPdf(codes);
+    const filename = codes.length === 1 ? `barcode-${codes[0]}.pdf` : 'barcodes.pdf';
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', `inline; filename="${filename}"`);
+    res.status(200).send(buffer);
+  }
+
+  async barcodePng(req, res) {
+    let code = String(req.params.code || req.query.code || '').trim();
+    if (!code && req.query.sku) {
+      const row = await barcodeService.ensureBySku(String(req.query.sku));
+      code = row.code;
+    }
+    const buffer = await barcodeService.renderLabelPng(code);
+    res.setHeader('Content-Type', 'image/png');
+    res.setHeader('Content-Disposition', `inline; filename="barcode-${code}.png"`);
+    res.status(200).send(buffer);
+  }
+
+  actor(req) {
+    return { id: req.user?.id ?? null, email: req.user?.email ?? null };
+  }
+
+  async scanResolve(req, res) {
+    const body = await validate(scanResolveSchema, req.body ?? {});
+    const data = await inventoryScanService.resolveScan(body.code);
+    res.status(200).json({ success: true, data });
+  }
+
+  async scanReceive(req, res) {
+    const body = await validate(scanAdjustSchema, req.body ?? {});
+    const data = await inventoryScanService.receiveOrAdd({ ...body, actor: this.actor(req), kind: 'receive' });
+    res.status(200).json({ success: true, data: toPublicJson(data) });
+  }
+
+  async scanAdd(req, res) {
+    const body = await validate(scanAdjustSchema, req.body ?? {});
+    const data = await inventoryScanService.receiveOrAdd({ ...body, actor: this.actor(req), kind: 'add' });
+    res.status(200).json({ success: true, data: toPublicJson(data) });
+  }
+
+  async scanVerify(req, res) {
+    const body = await validate(scanVerifySchema, req.body ?? {});
+    const data = await inventoryScanService.verifyCount({ ...body, actor: this.actor(req) });
+    res.status(200).json({ success: true, data });
+  }
+
+  async scanPick(req, res) {
+    const body = await validate(scanOrderSchema, req.body ?? {});
+    const data = await inventoryScanService.pickByScan({ ...body, actor: this.actor(req) });
+    res.status(200).json({ success: true, data: toPublicJson(data) });
+  }
+
+  async scanOrderChecklist(req, res) {
+    const params = await validate(scanOrderRefParamsSchema, { ref: req.params.ref });
+    const data = await inventoryScanService.getOrderPickChecklist(params.ref);
+    res.status(200).json({ success: true, data: toPublicJson(data) });
+  }
+
+  async scanCancelRestore(req, res) {
+    const body = await validate(scanOrderSchema, req.body ?? {});
+    const data = await inventoryScanService.cancelRestoreByScan({ ...body, actor: this.actor(req) });
+    res.status(200).json({ success: true, data });
+  }
+
+  async scanReturnRestock(req, res) {
+    const body = await validate(scanReturnSchema, req.body ?? {});
+    const data = await inventoryScanService.returnRestockByScan({ ...body, actor: this.actor(req) });
+    res.status(200).json({ success: true, data: toPublicJson(data) });
+  }
+
+  async scanRefurb(req, res) {
+    const body = await validate(scanReturnSchema, req.body ?? {});
+    const data = await inventoryScanService.refurbMoveByScan({ ...body, actor: this.actor(req) });
+    res.status(200).json({ success: true, data });
+  }
+
+  async createScanSession(req, res) {
+    const data = scanRelayService.createScanSession(this.actor(req));
+    res.status(201).json({ success: true, data });
+  }
+
+  async joinScanSession(req, res) {
+    const params = await validate(scanSessionJoinParamsSchema, {
+      code: String(req.params.code || '').trim(),
+    });
+    const data = scanRelayService.joinScanSession(params.code);
+    res.status(200).json({ success: true, data });
+  }
+
+  async getScanSession(req, res) {
+    const params = await validate(scanSessionJoinParamsSchema, {
+      code: String(req.params.code || '').trim(),
+    });
+    const data = scanRelayService.getScanSession(params.code);
+    res.status(200).json({ success: true, data });
+  }
+
+  async scanSessionEvents(req, res) {
+    const params = await validate(scanSessionJoinParamsSchema, {
+      code: String(req.params.code || '').trim(),
+    });
+    scanRelayService.subscribeScanSession(params.code, res);
+  }
+
+  async scanSessionQr(req, res) {
+    const params = await validate(scanSessionJoinParamsSchema, {
+      code: String(req.params.code || '').trim(),
+    });
+    scanRelayService.getScanSession(params.code);
+    const joinUrl = req.query.joinUrl ? String(req.query.joinUrl) : undefined;
+    const buffer = await scanRelayService.renderSessionJoinQr(params.code, joinUrl);
+    res.setHeader('Content-Type', 'image/png');
+    res.setHeader('Cache-Control', 'private, max-age=300');
+    res.status(200).send(buffer);
+  }
+
+  async scanRelay(req, res) {
+    const body = await validate(scanRelaySchema, req.body ?? {});
+    const data = scanRelayService.relayScanToSession(body.sessionCode, body.code, this.actor(req));
+    res.status(200).json({ success: true, data });
   }
 }
 

@@ -384,6 +384,8 @@ model Product {
   sizeAgeGroup         String?
   ageGroups            String[]    @default([])
   vendor               String?
+  /// Warehouse aisle / bin for simple SKUs (variant uses ProductVariant.warehouseLocation).
+  warehouseLocation    String?
   tags                 String?
   isDraft              Boolean  @default(false)
   isActiveListing      Boolean  @default(true)
@@ -400,6 +402,7 @@ model Product {
   wishlistItems        WishlistItem[]
   stockAlertSubscriptions StockAlertSubscription[]
   productUnits         ProductUnit[]
+  barcodes             ProductBarcode[]
   sourceReturnId       Int?
   sourceReturn         ReturnRequest? @relation("RefurbListedFromReturn", fields: [sourceReturnId], references: [id], onDelete: SetNull)
   sourceProductId      Int?
@@ -437,6 +440,7 @@ model ProductVariant {
   memberPriceOverride Float?
   imageUrl      String?
   sortOrder     Int      @default(0)
+  warehouseLocation String?
 
   inventoryAdjustments InventoryAdjustment[]
   inventoryLedgerEvents InventoryLedgerEvent[]
@@ -445,12 +449,46 @@ model ProductVariant {
   wishlistItems        WishlistItem[]
   stockAlertSubscriptions StockAlertSubscription[]
   productUnits         ProductUnit[]
+  barcodes             ProductBarcode[]
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
   @@unique([productId, sku])
   @@index([productId])
+}
+
+/// Permanent catalog identity. Never derived from SKU; lookup joins live product fields.
+model ProductBarcode {
+  id               Int      @id @default(autoincrement())
+  publicId         String   @unique @default(cuid())
+  /// Immutable scan value, e.g. BBP-A1B2C3D4. Not the SKU.
+  code             String   @unique
+  /// p:{productId} or v:{variantId} — unique sellable-line key (avoids NULL unique issues).
+  targetKey        String   @unique
+  productId        Int
+  product          Product  @relation(fields: [productId], references: [id], onDelete: Cascade)
+  productVariantId Int?
+  productVariant   ProductVariant? @relation(fields: [productVariantId], references: [id], onDelete: SetNull)
+  sentToVendorAt   DateTime?
+  aliases          ProductBarcodeAlias[]
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+
+  @@index([productId])
+  @@index([productVariantId])
+}
+
+/// Old BBP codes kept after regenerate-while-sent so vendor labels still resolve.
+model ProductBarcodeAlias {
+  id               Int            @id @default(autoincrement())
+  publicId         String         @unique @default(cuid())
+  code             String         @unique
+  productBarcodeId Int
+  productBarcode   ProductBarcode @relation(fields: [productBarcodeId], references: [id], onDelete: Cascade)
+  createdAt        DateTime       @default(now())
+
+  @@index([productBarcodeId])
 }
 
 enum CheckoutIntentStatus {
