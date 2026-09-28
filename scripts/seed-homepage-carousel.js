@@ -157,7 +157,7 @@ export async function seedHomepageCarousel(prisma, options = {}) {
       signatureName: 'You got this!',
       signatureFrom: 'Sincerely,\nTeam Baby Barn',
       primaryCtaLabel: 'Read the full note',
-      primaryCtaHref: '/blog#dear-parents',
+      primaryCtaHref: '/blog/dear-parents',
     },
   });
 

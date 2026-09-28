@@ -753,6 +753,7 @@ export async function createOrderCheckoutSession(userPublicId, items, opts = {})
     babyName: opts.babyName,
     contactEmail: opts.contactEmail,
     contactPhone: opts.contactPhone,
+    sharedMembershipCode: opts.sharedMembershipCode,
   });
 
   const successUrl = `${config.storeUrl}/checkout/success?session_id={CHECKOUT_SESSION_ID}`;
@@ -1208,6 +1209,7 @@ export async function createOrderPaymentIntent(userPublicId, items, opts = {}) {
     babyName: opts.babyName,
     contactEmail: opts.contactEmail,
     contactPhone: opts.contactPhone,
+    sharedMembershipCode: opts.sharedMembershipCode,
   });
 
   return ensureCheckoutPaymentIntent(stripe, checkoutIntent, user, opts);

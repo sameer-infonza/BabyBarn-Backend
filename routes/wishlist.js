@@ -7,5 +7,6 @@ const router = Router();
 router.get('/', authenticate, ...requireCustomerFullAccount, (req, res, next) => wishlistController.list(req, res).catch(next));
 router.put('/sync', authenticate, ...requireCustomerFullAccount, (req, res, next) => wishlistController.sync(req, res).catch(next));
 router.post('/toggle', authenticate, ...requireCustomerFullAccount, (req, res, next) => wishlistController.toggle(req, res).catch(next));
+router.post('/move-to-cart', authenticate, ...requireCustomerFullAccount, (req, res, next) => wishlistController.moveToCart(req, res).catch(next));
 
 export default router;

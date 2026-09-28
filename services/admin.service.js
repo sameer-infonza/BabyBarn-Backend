@@ -665,11 +665,32 @@ export async function getBusinessSettings() {
   return {
     accessMembershipPriceUsd: row.accessMembershipPriceUsd,
     accessUsedReturnWindowDays: row.accessUsedReturnWindowDays ?? 365,
+    membershipSharingEnabled: row.membershipSharingEnabled !== false,
+    membershipShareMaxUsers: row.membershipShareMaxUsers ?? 0,
+    membershipShareMaxPerDay: row.membershipShareMaxPerDay ?? 0,
+    membershipShareMaxPerMonth: row.membershipShareMaxPerMonth ?? 0,
+    membershipShareMaxPerYear: row.membershipShareMaxPerYear ?? 0,
     updatedAt: row.updatedAt,
   };
 }
 
-export async function updateBusinessSettings({ accessMembershipPriceUsd, accessUsedReturnWindowDays }) {
+function nonNegativeInt(value, label) {
+  const n = Math.floor(Number(value));
+  if (!Number.isFinite(n) || n < 0 || n > 100000) {
+    throw new AppError(400, `Invalid ${label}`);
+  }
+  return n;
+}
+
+export async function updateBusinessSettings({
+  accessMembershipPriceUsd,
+  accessUsedReturnWindowDays,
+  membershipSharingEnabled,
+  membershipShareMaxUsers,
+  membershipShareMaxPerDay,
+  membershipShareMaxPerMonth,
+  membershipShareMaxPerYear,
+}) {
   if (accessMembershipPriceUsd != null) {
     const n = Number(accessMembershipPriceUsd);
     if (Number.isNaN(n) || n < 0 || n > 99999) {
@@ -690,6 +711,19 @@ export async function updateBusinessSettings({ accessMembershipPriceUsd, accessU
       where: { id: 1 },
       create: { id: 1, accessUsedReturnWindowDays: days },
       update: { accessUsedReturnWindowDays: days },
+    });
+  }
+  const sharingPatch = {};
+  if (membershipSharingEnabled != null) sharingPatch.membershipSharingEnabled = Boolean(membershipSharingEnabled);
+  if (membershipShareMaxUsers != null) sharingPatch.membershipShareMaxUsers = nonNegativeInt(membershipShareMaxUsers, 'user limit');
+  if (membershipShareMaxPerDay != null) sharingPatch.membershipShareMaxPerDay = nonNegativeInt(membershipShareMaxPerDay, 'daily limit');
+  if (membershipShareMaxPerMonth != null) sharingPatch.membershipShareMaxPerMonth = nonNegativeInt(membershipShareMaxPerMonth, 'monthly limit');
+  if (membershipShareMaxPerYear != null) sharingPatch.membershipShareMaxPerYear = nonNegativeInt(membershipShareMaxPerYear, 'yearly limit');
+  if (Object.keys(sharingPatch).length) {
+    await prisma.businessSettings.upsert({
+      where: { id: 1 },
+      create: { id: 1, ...sharingPatch },
+      update: sharingPatch,
     });
   }
   return getBusinessSettings();

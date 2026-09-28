@@ -331,6 +331,7 @@ export const createOrderSchema = z.object({
   orderId: z.string().min(1).optional(),
   contactEmail: z.string().email().optional(),
   contactPhone: z.string().trim().max(40).optional(),
+  sharedMembershipCode: z.string().trim().min(1).max(40).optional(),
 });
 
 export const checkoutQuoteSchema = z.object({
@@ -348,6 +349,7 @@ export const checkoutQuoteSchema = z.object({
   storeCreditToApply: z.number().min(0).optional(),
   includeAccessMembership: z.boolean().optional(),
   babyName: z.string().trim().min(1).max(120).optional(),
+  sharedMembershipCode: z.string().trim().min(1).max(40).optional(),
 });
 
 /** Live cart / buy-again validation (public — no auth required). */

@@ -2,6 +2,7 @@ import { prisma } from '../lib/prisma.js';
 import bcrypt from 'bcryptjs';
 import { PORTAL_SCOPE, findUserByEmailAndPortal, portalScopeFromRoleName } from '../lib/portal-scope.js';
 import { seedHomepageCarousel } from './seed-homepage-carousel.js';
+import { seedBlog } from './seed-blog.js';
 
 const DEFAULT_ROLES = [
   'ADMIN',
@@ -109,11 +110,13 @@ async function main() {
   const roles = await seedRoles();
   const users = await seedUsers();
   const carousel = await seedHomepageCarousel(prisma);
+  const blog = await seedBlog(prisma);
 
   console.log('\nSeed summary');
   console.log(`Roles -> created: ${roles.created}, skipped: ${roles.skipped}`);
   console.log(`Users -> created: ${users.created}, skipped: ${users.skipped}`);
   console.log(`Homepage carousel -> created: ${carousel.created}, skipped: ${carousel.skipped}`);
+  console.log(`Blog -> created: ${blog.created}, skipped: ${blog.skipped}`);
 }
 
 main()

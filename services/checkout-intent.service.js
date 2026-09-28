@@ -43,6 +43,7 @@ import {
   selectedRateUpdateData,
 } from './order.service.js';
 import { getBusinessSettings } from './admin.service.js';
+import { assertShareCodeAvailableForPayment, resolveSharedMembership } from './membership-sharing.service.js';
 import { assertMembershipCheckoutAllowed } from './membership-eligibility.service.js';
 import { assignOrderNumber, placeholderOrderNumber } from '../utils/order-number.js';
 import { completeMembershipFromBundledCheckout } from './membership.service.js';
@@ -69,6 +70,7 @@ function checkoutSignature(items, opts = {}) {
     shippingAddress: opts.shippingAddress,
     includeAccessMembership: opts.includeAccessMembership,
     babyName: opts.membershipBabyName || opts.babyName,
+    sharedMembershipCode: opts.sharedMembershipCode,
   });
 }
 
@@ -273,7 +275,12 @@ export class CheckoutIntentService {
       }
     }
 
-    const effectiveHasAccess = hasAccess || includeAccessMembership;
+    let sharedAccess = null;
+    const sharedCode = String(opts.sharedMembershipCode || '').trim();
+    if (sharedCode && !hasAccess && !includeAccessMembership) {
+      sharedAccess = await resolveSharedMembership(sharedCode, user.id);
+    }
+    const effectiveHasAccess = hasAccess || includeAccessMembership || Boolean(sharedAccess);
     const settings = await getBusinessSettings();
     const accessMembershipAmount = includeAccessMembership
       ? Number(settings.accessMembershipPriceUsd || 50)
@@ -282,10 +289,16 @@ export class CheckoutIntentService {
       ? String(opts.membershipBabyName || opts.babyName || user.babyName || '').trim()
       : null;
 
-    const signature = checkoutSignature(items, { ...opts, includeAccessMembership, membershipBabyName });
+    const signature = checkoutSignature(items, {
+      ...opts,
+      includeAccessMembership,
+      membershipBabyName,
+      sharedMembershipCode: sharedAccess?.accessNumber || '',
+    });
     const expiresAt = new Date(Date.now() + config.pendingOrderTtlMinutes * 60 * 1000);
 
     let subtotal = 0;
+    let sharedDiscount = 0;
     const lineCreates = [];
 
     const intent = await db().$transaction(async (tx) => {
@@ -343,6 +356,9 @@ export class CheckoutIntentService {
           memberPriceSnapshot: linePricing.memberPriceSnapshot,
           pricingTier: linePricing.pricingTier,
         });
+        if (sharedAccess && linePricing.retailUnitPrice != null) {
+          sharedDiscount += Math.max(0, Number(linePricing.retailUnitPrice) - Number(linePricing.price)) * item.quantity;
+        }
 
         await reserveOrderLineStock(tx, product, variantDbId, item.quantity, {
           referenceType: 'checkout_intent',
@@ -367,6 +383,10 @@ export class CheckoutIntentService {
           includeAccessMembership,
           accessMembershipAmount,
           membershipBabyName,
+          sharedAccessOwnerId: sharedAccess?.ownerId ?? null,
+          sharedAccessCodeId: sharedAccess?.codeId ?? null,
+          sharedAccessNumber: sharedAccess?.accessNumber ?? null,
+          sharedAccessDiscount: sharedAccess ? sharedDiscount : 0,
           contactEmail,
           placedAsGuest: Boolean(user.isGuest),
           shippingAddressJson: opts.shippingAddress ?? null,
@@ -544,6 +564,7 @@ export class CheckoutIntentService {
       const hasAccess =
         buyer?.accessMemberUntil != null && new Date(buyer.accessMemberUntil) > new Date();
       const includeReturnEnvelope = Boolean(hasAccess && !intent.placedAsGuest);
+      await assertShareCodeAvailableForPayment(tx, intent.sharedAccessCodeId);
 
       const created = await tx.order.create({
         data: {
@@ -574,6 +595,10 @@ export class CheckoutIntentService {
           selectedRateCurrency: intent.selectedRateCurrency,
           selectedRateEstimatedDays: intent.selectedRateEstimatedDays,
           accessMembershipIncluded: Boolean(intent.includeAccessMembership),
+          sharedAccessOwnerId: intent.sharedAccessOwnerId ?? null,
+          sharedAccessCodeId: intent.sharedAccessCodeId ?? null,
+          sharedAccessNumber: intent.sharedAccessNumber ?? null,
+          sharedAccessDiscount: Number(intent.sharedAccessDiscount || 0),
           orderItems: {
             create: intent.lines.map((line) => ({
               productId: line.productId,

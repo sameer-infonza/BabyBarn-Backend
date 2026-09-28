@@ -29,6 +29,12 @@ export class WishlistController {
     const data = await wishlistService.toggle(req.user.id, productId, variantId ?? null);
     res.status(200).json({ success: true, data });
   }
+
+  async moveToCart(req, res) {
+    const { productId, variantId } = req.body ?? {};
+    const data = await wishlistService.moveToCart(req.user.id, productId, variantId ?? null);
+    res.status(200).json({ success: true, data: toPublicJson(data) });
+  }
 }
 
 export const wishlistController = new WishlistController();

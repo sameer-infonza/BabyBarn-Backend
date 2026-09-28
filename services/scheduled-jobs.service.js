@@ -77,6 +77,16 @@ export const SCHEDULED_JOBS = Object.freeze([
     },
   },
   {
+    key: 'publish-scheduled-blog-posts',
+    intervalMs: 60 * 1000,
+    leaseMs: 45 * 1000,
+    initialDelayMs: 20 * 1000,
+    run: async () => {
+      const { publishDueScheduledPosts } = await import('./blog.service.js');
+      return publishDueScheduledPosts();
+    },
+  },
+  {
     key: 'guest-data-retention-purge',
     intervalMs: 24 * 60 * 60 * 1000,
     leaseMs: 30 * 60 * 1000,

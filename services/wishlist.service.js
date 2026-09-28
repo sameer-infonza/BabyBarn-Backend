@@ -54,25 +54,32 @@ export class WishlistService {
     });
 
     return rows
-      .filter((row) => {
-        if (!row.product || row.product.isDraft || !row.product.isActiveListing) return false;
-        // Sold-out refurbished SKUs are hidden from the storefront — drop from wishlist too.
-        if (row.product.productType === 'REFURBISHED') {
-          const available = row.productVariant
-            ? variantAvailableStock(row.productVariant)
-            : productAvailableStock(row.product);
-          return isSellableAvailable(available, 'REFURBISHED');
-        }
-        return true;
-      })
-      .map((row) => ({
-        productId: row.product.publicId,
-        variantId: row.productVariant?.publicId ?? null,
-        priceAtAdd: row.priceAtAdd,
-        addedAt: row.createdAt,
-        product: row.product,
-        variant: row.productVariant,
-      }));
+      .filter((row) => row.product && !row.product.isDraft && row.product.isActiveListing)
+      .map((row) => this.toPublicRow(row));
+  }
+
+  toPublicRow(row) {
+    const available = row.productVariant
+      ? variantAvailableStock(row.productVariant)
+      : productAvailableStock(row.product);
+    const currentPrice =
+      row.productVariant?.priceOverride != null
+        ? Number(row.productVariant.priceOverride)
+        : Number(row.product.price);
+    return {
+      productId: row.product.publicId,
+      variantId: row.productVariant?.publicId ?? null,
+      name: row.product.name,
+      slug: row.product.slug,
+      imageUrl: row.product.imageUrl,
+      condition: row.product.productType === 'REFURBISHED' ? 'REFURBISHED' : 'NEW',
+      currentPrice,
+      memberPrice: row.product.memberPrice != null ? Number(row.product.memberPrice) : null,
+      available,
+      inStock: isSellableAvailable(available, row.product.productType),
+      priceAtAdd: row.priceAtAdd != null ? Number(row.priceAtAdd) : null,
+      addedAt: row.createdAt,
+    };
   }
 
   async syncForUser(userPublicId, items) {
@@ -175,6 +182,66 @@ export class WishlistService {
     await maybeAutoSubscribeWishlistRestock(user.id, product, variantDbId);
 
     return { wishlisted: true };
+  }
+
+  async moveToCart(userPublicId, productPublicId, variantPublicId = null) {
+    const user = await prisma.user.findUnique({
+      where: { publicId: userPublicId },
+      select: { id: true },
+    });
+    if (!user) throw new AppError(401, 'Unauthorized');
+
+    const product = await prisma.product.findUnique({
+      where: { publicId: productPublicId },
+      include: { variants: true },
+    });
+    if (!product) throw new AppError(404, 'Product not found');
+
+    let variantDbId = null;
+    if (variantPublicId) {
+      const variant = product.variants.find((row) => row.publicId === variantPublicId);
+      if (!variant) throw new AppError(404, 'Variant not found');
+      variantDbId = variant.id;
+    }
+
+    const existing = await prisma.wishlistItem.findFirst({
+      where: { userId: user.id, productId: product.id, productVariantId: variantDbId },
+      include: {
+        product: {
+          select: {
+            publicId: true,
+            name: true,
+            slug: true,
+            price: true,
+            memberPrice: true,
+            imageUrl: true,
+            stock: true,
+            reservedStock: true,
+            productType: true,
+            isDraft: true,
+            isActiveListing: true,
+            inventoryModel: true,
+          },
+        },
+        productVariant: {
+          select: {
+            publicId: true,
+            stock: true,
+            reservedStock: true,
+            priceOverride: true,
+          },
+        },
+      },
+    });
+    if (!existing) throw new AppError(404, 'Wishlist item not found');
+
+    await prisma.wishlistCartMove.upsert({
+      where: { userId_productId: { userId: user.id, productId: product.id } },
+      create: { userId: user.id, productId: product.id },
+      update: {},
+    });
+    await prisma.wishlistItem.delete({ where: { id: existing.id } });
+    return this.toPublicRow(existing);
   }
 }
 

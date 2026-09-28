@@ -57,6 +57,7 @@ import {
 } from '../utils/checkout-signature.js';
 import { buildParcelsForOrder } from './shipping/order-parcels.js';
 import { assertMembershipCheckoutAllowed } from './membership-eligibility.service.js';
+import { resolveSharedMembership } from './membership-sharing.service.js';
 import fs from 'fs';
 import path from 'path';
 import { SHIPPING_LABELS_DIR } from '../utils/product-upload.js';
@@ -382,7 +383,12 @@ export class OrderService {
     if (includeAccessMembership) {
       await assertMembershipCheckoutAllowed(userPublicId, { intent: 'purchase' });
     }
-    const effectiveHasAccess = hasAccess || includeAccessMembership;
+    let sharedAccess = null;
+    const sharedCode = String(payload?.sharedMembershipCode || '').trim();
+    if (sharedCode && !hasAccess && !includeAccessMembership) {
+      sharedAccess = await resolveSharedMembership(sharedCode, user.id);
+    }
+    const effectiveHasAccess = hasAccess || includeAccessMembership || Boolean(sharedAccess);
     let subtotalRetail = 0;
     let subtotalApplied = 0;
     let memberSubtotalIfAccess = 0;
@@ -512,6 +518,15 @@ export class OrderService {
     return {
       hasAccess: effectiveHasAccess,
       includeAccessMembership,
+      sharedMembership: sharedAccess
+        ? {
+            ownerName: sharedAccess.ownerName,
+            status: sharedAccess.status,
+            expiresAt: sharedAccess.expiresAt,
+            accessNumber: sharedAccess.accessNumber,
+            discount: accessDiscount,
+          }
+        : null,
       accessMembershipFee,
       accessMembershipAnnualFee: hasAccess ? 0 : accessMembershipAnnualFee,
       accessPricingLineCount,

@@ -28,6 +28,11 @@ enum OrderPaymentStatus {
   PARTIALLY_REFUNDED
 }
 
+enum MembershipShareUseMode {
+  ONE_TIME
+  MULTIPLE
+}
+
 // Warehouse / carrier pipeline (orthogonal to OrderStatus; do not remove OrderStatus values).
 enum OrderFulfillmentStatus {
   NEW_ORDER
@@ -158,6 +163,12 @@ enum HomepageCarouselSlideType {
   LETTER
 }
 
+enum BlogPostStatus {
+  DRAFT
+  SCHEDULED
+  PUBLISHED
+}
+
 enum ShippingProviderLogLevel {
   INFO
   WARN
@@ -203,13 +214,18 @@ model User {
   storeCreditWallet      StoreCreditWallet?
   refreshTokens          RefreshToken[]
   membershipPayments     MembershipPayment[]
+  sharedAccessOrders     Order[] @relation("SharedAccessOrders")
+  membershipShareCodes   MembershipShareCode[] @relation("MembershipShareCodes")
   orderItemsPicked       OrderItem[]           @relation("OrderItemPickedBy")
   checkoutIntents      CheckoutIntent[]
   wishlistItems        WishlistItem[]
+  wishlistCartMoves    WishlistCartMove[]
   stockAlertSubscriptions StockAlertSubscription[]
   eligibilityReviews ReturnEligibilityQuestionnaire[] @relation("EligibilityReviewedBy")
   refurbInspections  RefurbInspectionRecord[]         @relation("RefurbInspector")
   returnReceivePackages ReturnReceivePackage[]        @relation("ReturnReceivePackages")
+  blogPostsCreated   BlogPost[]                       @relation("BlogPostCreatedBy")
+  blogPostsUpdated   BlogPost[]                       @relation("BlogPostUpdatedBy")
 
   stripeCustomerId   String?
   accessNumber       String?   @unique
@@ -400,6 +416,7 @@ model Product {
   inventoryAdjustments InventoryAdjustment[]
   inventoryLedgerEvents InventoryLedgerEvent[]
   wishlistItems        WishlistItem[]
+  wishlistCartMoves    WishlistCartMove[]
   stockAlertSubscriptions StockAlertSubscription[]
   productUnits         ProductUnit[]
   barcodes             ProductBarcode[]
@@ -527,6 +544,10 @@ model CheckoutIntent {
   includeAccessMembership Boolean              @default(false)
   accessMembershipAmount  Float                @default(0)
   membershipBabyName      String?
+  sharedAccessOwnerId     Int?
+  sharedAccessCodeId      Int?
+  sharedAccessNumber      String?
+  sharedAccessDiscount    Float                @default(0)
   contactEmail            String?
   placedAsGuest           Boolean              @default(false)
 
@@ -611,6 +632,12 @@ model Order {
   appliedStripeRefundIds   Json?
   storeCreditApplied       Float              @default(0)
   accessMembershipIncluded Boolean            @default(false)
+  sharedAccessOwnerId      Int?
+  sharedAccessOwner        User?  @relation("SharedAccessOrders", fields: [sharedAccessOwnerId], references: [id], onDelete: SetNull)
+  sharedAccessCodeId       Int?
+  sharedAccessCode         MembershipShareCode? @relation(fields: [sharedAccessCodeId], references: [id], onDelete: SetNull)
+  sharedAccessNumber       String?
+  sharedAccessDiscount     Float  @default(0)
   membershipPaymentId      Int?
   membershipPayment        MembershipPayment? @relation(fields: [membershipPaymentId], references: [id], onDelete: SetNull)
   contactEmail             String?
@@ -641,6 +668,24 @@ model Order {
   @@index([orderNumber])
   @@index([paymentStatus])
   @@index([cancellationReviewStatus])
+  @@index([sharedAccessOwnerId])
+  @@index([sharedAccessCodeId])
+}
+
+model MembershipShareCode {
+  id         Int                    @id @default(autoincrement())
+  publicId   String                 @unique @default(cuid())
+  ownerId    Int
+  owner      User                   @relation("MembershipShareCodes", fields: [ownerId], references: [id], onDelete: Cascade)
+  code       String                 @unique
+  noteEmail  String?
+  expiresAt  DateTime?
+  useMode    MembershipShareUseMode
+  revokedAt  DateTime?
+  orders     Order[]
+  createdAt  DateTime               @default(now())
+
+  @@index([ownerId])
 }
 
 model ShipmentTrackingEvent {
@@ -1018,6 +1063,18 @@ model WishlistItem {
   @@index([productId])
 }
 
+model WishlistCartMove {
+  id        Int      @id @default(autoincrement())
+  userId    Int
+  productId Int
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  product   Product  @relation(fields: [productId], references: [id], onDelete: Cascade)
+  createdAt DateTime @default(now())
+
+  @@unique([userId, productId])
+  @@index([productId])
+}
+
 model StockAlertSubscription {
   id               Int      @id @default(autoincrement())
   userId           Int
@@ -1087,6 +1144,12 @@ model BusinessSettings {
   id                         Int      @id @default(1)
   accessMembershipPriceUsd   Float    @default(50)
   accessUsedReturnWindowDays Int      @default(365)
+  membershipSharingEnabled   Boolean  @default(true)
+  /// 0 means no cap.
+  membershipShareMaxUsers    Int      @default(0)
+  membershipShareMaxPerDay   Int      @default(0)
+  membershipShareMaxPerMonth Int      @default(0)
+  membershipShareMaxPerYear  Int      @default(0)
   updatedAt                  DateTime @updatedAt
 }
 
@@ -1302,4 +1365,93 @@ model InventoryAdjustment {
   @@index([productVariantId])
   @@index([userId])
   @@index([createdAt])
+}
+
+model BlogCategory {
+  id              Int                @id @default(autoincrement())
+  publicId        String             @unique @default(cuid())
+  name            String
+  slug            String             @unique
+  description     String             @default("") @db.Text
+  imageUrl        String?
+  imageAlt        String?
+  seoTitle        String?
+  metaDescription String?            @db.Text
+  createdAt       DateTime           @default(now())
+  updatedAt       DateTime           @updatedAt
+  posts           BlogPostCategory[]
+
+  @@index([name])
+}
+
+model BlogTag {
+  id              Int           @id @default(autoincrement())
+  publicId        String        @unique @default(cuid())
+  name            String
+  slug            String        @unique
+  description     String        @default("") @db.Text
+  seoTitle        String?
+  metaDescription String?       @db.Text
+  createdAt       DateTime      @default(now())
+  updatedAt       DateTime      @updatedAt
+  posts           BlogPostTag[]
+
+  @@index([name])
+}
+
+model BlogPost {
+  id               Int            @id @default(autoincrement())
+  publicId         String         @unique @default(cuid())
+  slug             String
+  title            String
+  excerpt          String         @default("") @db.Text
+  contentHtml      String         @default("") @db.Text
+  featuredImageUrl String?
+  featuredImageAlt String?
+  authorName       String         @default("Baby Barn")
+  status           BlogPostStatus @default(DRAFT)
+  featured         Boolean        @default(false)
+  publishedAt      DateTime?
+  scheduledAt      DateTime?
+  viewCount        Int            @default(0)
+  seoTitle         String?
+  metaDescription  String?        @db.Text
+  ogTitle          String?
+  ogDescription    String?        @db.Text
+  ogImageUrl       String?
+  canonicalUrl     String?
+  createdById      Int?
+  updatedById      Int?
+  createdBy        User?          @relation("BlogPostCreatedBy", fields: [createdById], references: [id], onDelete: SetNull)
+  updatedBy        User?          @relation("BlogPostUpdatedBy", fields: [updatedById], references: [id], onDelete: SetNull)
+  deletedAt        DateTime?
+  createdAt        DateTime       @default(now())
+  updatedAt        DateTime       @updatedAt
+  categories       BlogPostCategory[]
+  tags             BlogPostTag[]
+
+  @@index([status, publishedAt])
+  @@index([featured, status])
+  @@index([deletedAt])
+  @@index([slug])
+}
+
+model BlogPostCategory {
+  postId     Int
+  categoryId Int
+  post       BlogPost     @relation(fields: [postId], references: [id], onDelete: Cascade)
+  category   BlogCategory @relation(fields: [categoryId], references: [id], onDelete: Cascade)
+
+  @@id([postId, categoryId])
+  @@index([categoryId])
+}
+
+model BlogPostTag {
+  postId Int
+  tagId  Int
+  post   BlogPost @relation(fields: [postId], references: [id], onDelete: Cascade)
+  tag    BlogTag  @relation(fields: [tagId], references: [id], onDelete: Cascade)
+
+  @@id([postId, tagId])
+  @@index([tagId])
 }

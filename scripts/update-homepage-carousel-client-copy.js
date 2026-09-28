@@ -25,7 +25,7 @@ async function run() {
       where: { slideType: 'LETTER' },
       data: {
         primaryCtaLabel: 'Read the full note',
-        primaryCtaHref: '/blog#dear-parents',
+        primaryCtaHref: '/blog/dear-parents',
         backgroundImageUrl: null,
       },
     });

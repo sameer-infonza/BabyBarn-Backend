@@ -62,6 +62,7 @@ export async function orderCheckout(req, res, next) {
       babyName: body.babyName,
       contactEmail: body.contactEmail,
       contactPhone: body.contactPhone,
+      sharedMembershipCode: body.sharedMembershipCode,
     });
     res.status(200).json({ success: true, data: toPublicJson(data) });
   } catch (e) {
@@ -89,6 +90,7 @@ export async function orderPaymentIntent(req, res, next) {
       babyName: body.babyName,
       contactEmail: body.contactEmail,
       contactPhone: body.contactPhone,
+      sharedMembershipCode: body.sharedMembershipCode,
     });
     res.status(200).json({ success: true, data: toPublicJson(data) });
   } catch (e) {

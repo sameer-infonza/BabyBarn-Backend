@@ -9,6 +9,7 @@ export function buildCheckoutSignature({
   shippingAddress,
   includeAccessMembership,
   babyName,
+  sharedMembershipCode,
 }) {
   const normalizedItems = [...items]
     .map((item) => [item.productId, item.variantId || '', item.quantity])
@@ -33,6 +34,7 @@ export function buildCheckoutSignature({
     ship,
     access: includeAccessMembership ? '1' : '0',
     baby: String(babyName || '').trim().toLowerCase(),
+    share: String(sharedMembershipCode || '').trim().toLowerCase(),
   });
 }
 
@@ -65,5 +67,6 @@ export function buildCheckoutSignatureFromOrder(order, orderItems) {
     ship,
     access: order.includeAccessMembership ? '1' : '0',
     baby: String(order.membershipBabyName || '').trim().toLowerCase(),
+    share: String(order.sharedAccessNumber || '').trim().toLowerCase(),
   });
 }

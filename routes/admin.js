@@ -4,11 +4,21 @@ import { requireConsoleModule } from '../middleware/admin-console.js';
 import { adminController } from '../controllers/admin.controller.js';
 import { shippingAdminController } from '../controllers/shipping-admin.controller.js';
 import { homepageCarouselController } from '../controllers/homepage-carousel.controller.js';
+import { blogController } from '../controllers/blog.controller.js';
 import { marketingImageUpload } from '../utils/product-upload.js';
 import adminNotificationsRoutes from './admin-notifications.js';
+import {
+  getAdminShareDetail,
+  getSharingSettings,
+  listAdminSharing,
+  listAdminSharingActivity,
+  updateSharingSettings,
+} from '../services/membership-sharing.service.js';
 
 const router = Router();
 const homepage = requireConsoleModule('homepage');
+const blog = requireConsoleModule('blog');
+const blogStaff = [authenticate, authorize('ADMIN', 'ADMIN_TEAM'), blog];
 
 router.use('/notifications', adminNotificationsRoutes);
 
@@ -80,6 +90,52 @@ router.get(
   authorize('ADMIN', 'ADMIN_TEAM'),
   requireConsoleModule('access'),
   (req, res, next) => adminController.listAccessMembers(req, res).catch(next)
+);
+router.get(
+  '/access/sharing',
+  authenticate,
+  authorize('ADMIN', 'ADMIN_TEAM'),
+  requireConsoleModule('access'),
+  async (req, res, next) => {
+    try {
+      const [settings, memberships, activity] = await Promise.all([
+        getSharingSettings(),
+        listAdminSharing(),
+        listAdminSharingActivity(),
+      ]);
+      res.status(200).json({ success: true, data: { settings, memberships, activity } });
+    } catch (error) {
+      next(error);
+    }
+  }
+);
+router.get(
+  '/access/sharing/:userId',
+  authenticate,
+  authorize('ADMIN', 'ADMIN_TEAM'),
+  requireConsoleModule('access'),
+  async (req, res, next) => {
+    try {
+      const data = await getAdminShareDetail(req.params.userId);
+      res.status(200).json({ success: true, data });
+    } catch (error) {
+      next(error);
+    }
+  }
+);
+router.patch(
+  '/access/sharing',
+  authenticate,
+  authorize('ADMIN', 'ADMIN_TEAM'),
+  requireConsoleModule('access'),
+  async (req, res, next) => {
+    try {
+      const data = await updateSharingSettings(req.user, req.body || {});
+      res.status(200).json({ success: true, data });
+    } catch (error) {
+      next(error);
+    }
+  }
 );
 router.get(
   '/settings/business',
@@ -210,6 +266,32 @@ router.delete(
   homepage,
   (req, res, next) => homepageCarouselController.remove(req, res).catch(next)
 );
+
+router.get('/blog/analytics', ...blogStaff, (req, res, next) => blogController.analytics(req, res).catch(next));
+router.get('/blog/categories', ...blogStaff, (req, res, next) => blogController.listCategories(req, res).catch(next));
+router.post('/blog/categories', ...blogStaff, (req, res, next) => blogController.createCategory(req, res).catch(next));
+router.patch('/blog/categories/:id', ...blogStaff, (req, res, next) => blogController.updateCategory(req, res).catch(next));
+router.delete('/blog/categories/:id', ...blogStaff, (req, res, next) => blogController.deleteCategory(req, res).catch(next));
+router.get('/blog/tags', ...blogStaff, (req, res, next) => blogController.listTags(req, res).catch(next));
+router.post('/blog/tags', ...blogStaff, (req, res, next) => blogController.createTag(req, res).catch(next));
+router.patch('/blog/tags/:id', ...blogStaff, (req, res, next) => blogController.updateTag(req, res).catch(next));
+router.delete('/blog/tags/:id', ...blogStaff, (req, res, next) => blogController.deleteTag(req, res).catch(next));
+router.post(
+  '/blog/upload-image',
+  ...blogStaff,
+  marketingImageUpload.single('image'),
+  (req, res, next) => blogController.uploadImage(req, res).catch(next)
+);
+router.get('/blog', ...blogStaff, (req, res, next) => blogController.list(req, res).catch(next));
+router.post('/blog', ...blogStaff, (req, res, next) => blogController.create(req, res).catch(next));
+router.post('/blog/:id/duplicate', ...blogStaff, (req, res, next) => blogController.duplicate(req, res).catch(next));
+router.post('/blog/:id/publish', ...blogStaff, (req, res, next) => blogController.publish(req, res).catch(next));
+router.post('/blog/:id/unpublish', ...blogStaff, (req, res, next) => blogController.unpublish(req, res).catch(next));
+router.post('/blog/:id/schedule', ...blogStaff, (req, res, next) => blogController.schedule(req, res).catch(next));
+router.post('/blog/:id/feature', ...blogStaff, (req, res, next) => blogController.feature(req, res).catch(next));
+router.get('/blog/:id', ...blogStaff, (req, res, next) => blogController.get(req, res).catch(next));
+router.patch('/blog/:id', ...blogStaff, (req, res, next) => blogController.update(req, res).catch(next));
+router.delete('/blog/:id', ...blogStaff, (req, res, next) => blogController.remove(req, res).catch(next));
 
 router.get('/team', authenticate, authorize('ADMIN'), (req, res, next) =>
   adminController.listTeam(req, res).catch(next)

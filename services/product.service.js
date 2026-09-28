@@ -4,6 +4,39 @@ import { AppError } from '../utils/error-handler.js';
 import { slugifyName } from '../utils/slug.js';
 import { config } from '../config/env.js';
 import { prisma } from '../lib/prisma.js';
+
+async function wishlistInterestForProducts(productIds) {
+  if (!productIds.length) {
+    return { wish: new Map(), moves: new Map() };
+  }
+  const [wishRows, moveRows] = await Promise.all([
+    prisma.wishlistItem.findMany({
+      where: { productId: { in: productIds } },
+      select: { productId: true, userId: true },
+    }),
+    prisma.wishlistCartMove.groupBy({
+      by: ['productId'],
+      where: { productId: { in: productIds } },
+      _count: { _all: true },
+    }),
+  ]);
+  const wish = new Map();
+  for (const row of wishRows) {
+    const customers = wish.get(row.productId) ?? new Set();
+    customers.add(row.userId);
+    wish.set(row.productId, customers);
+  }
+  const moves = new Map(moveRows.map((row) => [row.productId, row._count._all]));
+  return { wish, moves };
+}
+
+function withWishlistInterest(product, interest) {
+  return {
+    ...product,
+    wishlistCustomerCount: interest.wish.get(product.id)?.size ?? 0,
+    wishlistCartMoveCount: interest.moves.get(product.id) ?? 0,
+  };
+}
 import { AGE_AXIS_NAME, ageOrderIndex, isCanonicalAge } from '../lib/age-groups.js';
 import {
   ensureBarcodesForProduct,
@@ -513,6 +546,9 @@ export class ProductService {
       prisma.product.count({ where }),
     ]);
 
+    const interest = admin ? await wishlistInterestForProducts(products.map((product) => product.id)) : null;
+    const listed = interest ? products.map((product) => withWishlistInterest(product, interest)) : products;
+
     const storefrontProducts =
       !admin && refurbishedEnabled
         ? await attachRelatedRefurbishedToProducts(products)
@@ -536,7 +572,7 @@ export class ProductService {
                   }
                 : null,
             }))
-          : products;
+          : listed;
 
     return {
       products: storefrontProducts,
@@ -636,7 +672,8 @@ export class ProductService {
     // Hiding via 404 made single-qty refurbs vanish mid-checkout while stock is reserved.
 
     if (admin) {
-      return product;
+      const interest = await wishlistInterestForProducts([product.id]);
+      return withWishlistInterest(product, interest);
     }
 
     let relatedRefurbished = null;
