@@ -204,6 +204,7 @@ function flattenProductToSkuLines(p) {
         variantLabel: combinationLabel(v.combination),
         sku: v.sku,
         barcodeCode: (p.barcodes || []).find((b) => b.productVariantId === v.id)?.code ?? null,
+        imageUrl: v.imageUrl || p.imageUrl || null,
         category,
         productType: p.productType,
         reorderPoint: p.reorderPoint ?? null,
@@ -234,6 +235,7 @@ function flattenProductToSkuLines(p) {
       variantLabel: '—',
       sku: p.sku,
       barcodeCode: (p.barcodes || []).find((b) => b.productVariantId == null)?.code ?? null,
+      imageUrl: p.imageUrl || null,
       category,
       productType: p.productType,
       reorderPoint: p.reorderPoint ?? null,
@@ -314,6 +316,11 @@ export class InventoryService {
           { sku: { contains: q, mode: 'insensitive' } },
           { variants: { some: { sku: { contains: q, mode: 'insensitive' } } } },
           { barcodes: { some: { code: { contains: q, mode: 'insensitive' } } } },
+          {
+            barcodes: {
+              some: { aliases: { some: { code: { contains: q, mode: 'insensitive' } } } },
+            },
+          },
         ],
       });
     }
@@ -350,6 +357,41 @@ export class InventoryService {
     };
   }
 
+  /**
+   * Apply a stock delta inside an existing transaction (used by draft session confirm).
+   */
+  async adjustStockInTx(tx, { productPublicId, variantPublicId, delta, reason, userId }) {
+    if (!Number.isInteger(delta) || delta === 0) {
+      throw new AppError(400, 'delta must be a non-zero integer');
+    }
+    const product = await tx.product.findUnique({
+      where: { publicId: productPublicId },
+      include: { variants: { orderBy: { sortOrder: 'asc' } } },
+    });
+    if (!product || product.isDraft) {
+      throw new AppError(404, 'Product not found');
+    }
+    const beforeAvailable = productAvailableStock(product);
+    const beforeTotal = computeTotalStock(product);
+    const { applied } = await adjustManualStock(tx, product, userId, {
+      variantPublicId,
+      delta,
+      reason,
+    });
+    const updated = await tx.product.findUnique({
+      where: { id: product.id },
+      include: { category: true, variants: { orderBy: { sortOrder: 'asc' } } },
+    });
+    return {
+      product: updated,
+      applied,
+      quantityChange: applied,
+      previousTotal: beforeTotal,
+      newTotal: computeTotalStock(updated),
+      beforeAvailable,
+    };
+  }
+
   async adjustStock({ productPublicId, variantPublicId, delta, reason, userPublicId }) {
     if (!Number.isInteger(delta) || delta === 0) {
       throw new AppError(400, 'delta must be a non-zero integer');
@@ -364,36 +406,13 @@ export class InventoryService {
     }
 
     const result = await prisma.$transaction(async (tx) => {
-      const product = await tx.product.findUnique({
-        where: { publicId: productPublicId },
-        include: { variants: { orderBy: { sortOrder: 'asc' } } },
-      });
-
-      if (!product || product.isDraft) {
-        throw new AppError(404, 'Product not found');
-      }
-
-      const beforeAvailable = productAvailableStock(product);
-      const beforeTotal = computeTotalStock(product);
-
-      const { applied } = await adjustManualStock(tx, product, user.id, {
+      return this.adjustStockInTx(tx, {
+        productPublicId,
         variantPublicId,
         delta,
         reason,
+        userId: user.id,
       });
-
-      const updated = await tx.product.findUnique({
-        where: { id: product.id },
-        include: { category: true, variants: { orderBy: { sortOrder: 'asc' } } },
-      });
-
-      return {
-        product: updated,
-        quantityChange: applied,
-        previousTotal: beforeTotal,
-        newTotal: computeTotalStock(updated),
-        beforeAvailable,
-      };
     });
 
     const available = productAvailableStock(result.product);

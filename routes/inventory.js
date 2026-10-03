@@ -97,6 +97,30 @@ router.get('/barcodes', ...barcodeStaff, (req, res, next) =>
 router.post('/scan/resolve', ...barcodeStaff, (req, res, next) =>
   inventoryController.scanResolve(req, res).catch(next)
 );
+router.get('/scan/draft-sessions/active', ...barcodeStaff, (req, res, next) =>
+  inventoryController.getActiveDraftSession(req, res).catch(next)
+);
+router.get('/scan/draft-sessions/:id', ...barcodeStaff, (req, res, next) =>
+  inventoryController.getDraftSession(req, res).catch(next)
+);
+router.post('/scan/draft-sessions/:id/identify', ...barcodeStaff, (req, res, next) =>
+  inventoryController.draftIdentify(req, res).catch(next)
+);
+router.patch('/scan/draft-sessions/:id/lines/:lineId', ...barcodeStaff, (req, res, next) =>
+  inventoryController.draftUpdateLine(req, res).catch(next)
+);
+router.delete('/scan/draft-sessions/:id/lines/:lineId', ...barcodeStaff, (req, res, next) =>
+  inventoryController.draftRemoveLine(req, res).catch(next)
+);
+router.patch('/scan/draft-sessions/:id', ...barcodeStaff, (req, res, next) =>
+  inventoryController.draftUpdateMeta(req, res).catch(next)
+);
+router.post('/scan/draft-sessions/:id/confirm', ...barcodeStaff, (req, res, next) =>
+  inventoryController.draftConfirm(req, res).catch(next)
+);
+router.post('/scan/draft-sessions/:id/discard', ...barcodeStaff, (req, res, next) =>
+  inventoryController.draftDiscard(req, res).catch(next)
+);
 router.post('/scan/receive', ...barcodeStaff, (req, res, next) =>
   inventoryController.scanReceive(req, res).catch(next)
 );

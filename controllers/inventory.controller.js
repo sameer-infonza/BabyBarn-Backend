@@ -1,6 +1,7 @@
 import { inventoryService } from '../services/inventory.service.js';
 import { barcodeService } from '../services/barcode.service.js';
 import { inventoryScanService } from '../services/inventory-scan.service.js';
+import { inventoryScanDraftService } from '../services/inventory-scan-draft.service.js';
 import { scanRelayService } from '../services/scan-relay.service.js';
 import { validate } from '../utils/validation.js';
 import {
@@ -10,6 +11,11 @@ import {
   barcodeLookupQuerySchema,
   barcodeRegenerateSchema,
   inventoryAdjustSchema,
+  inventoryDraftIdentifySchema,
+  inventoryDraftLineParamsSchema,
+  inventoryDraftLineUpdateSchema,
+  inventoryDraftMetaSchema,
+  inventoryDraftSessionParamsSchema,
   inventoryProductTypeSchema,
   scanAdjustSchema,
   scanOrderSchema,
@@ -21,6 +27,7 @@ import {
   scanVerifySchema,
 } from '../schemas/index.js';
 import { toPublicJson } from '../utils/serialize.js';
+import { AppError } from '../utils/error-handler.js';
 
 export class InventoryController {
   async getStats(req, res) {
@@ -291,6 +298,99 @@ export class InventoryController {
     const body = await validate(scanRelaySchema, req.body ?? {});
     const data = scanRelayService.relayScanToSession(body.sessionCode, body.code, this.actor(req));
     res.status(200).json({ success: true, data });
+  }
+
+  async getActiveDraftSession(req, res) {
+    if (!req.user?.id) throw new AppError(401, 'Unauthorized');
+    const data = await inventoryScanDraftService.getOrCreateActiveDraft({
+      userPublicId: req.user.id,
+    });
+    res.status(200).json({ success: true, data: toPublicJson(data) });
+  }
+
+  async getDraftSession(req, res) {
+    if (!req.user?.id) throw new AppError(401, 'Unauthorized');
+    const params = await validate(inventoryDraftSessionParamsSchema, { id: req.params.id });
+    const data = await inventoryScanDraftService.getDraftSession({
+      sessionPublicId: params.id,
+      userPublicId: req.user.id,
+    });
+    res.status(200).json({ success: true, data: toPublicJson(data) });
+  }
+
+  async draftIdentify(req, res) {
+    if (!req.user?.id) throw new AppError(401, 'Unauthorized');
+    const params = await validate(inventoryDraftSessionParamsSchema, { id: req.params.id });
+    const body = await validate(inventoryDraftIdentifySchema, req.body ?? {});
+    const data = await inventoryScanDraftService.identifyAndUpsertLine({
+      sessionPublicId: params.id,
+      userPublicId: req.user.id,
+      code: body.code,
+      incrementScanned: body.incrementScanned,
+    });
+    res.status(200).json({ success: true, data: toPublicJson(data) });
+  }
+
+  async draftUpdateLine(req, res) {
+    if (!req.user?.id) throw new AppError(401, 'Unauthorized');
+    const params = await validate(inventoryDraftLineParamsSchema, {
+      id: req.params.id,
+      lineId: req.params.lineId,
+    });
+    const body = await validate(inventoryDraftLineUpdateSchema, req.body ?? {});
+    const data = await inventoryScanDraftService.updateDraftLine({
+      sessionPublicId: params.id,
+      linePublicId: params.lineId,
+      userPublicId: req.user.id,
+      ...body,
+    });
+    res.status(200).json({ success: true, data: toPublicJson(data) });
+  }
+
+  async draftRemoveLine(req, res) {
+    if (!req.user?.id) throw new AppError(401, 'Unauthorized');
+    const params = await validate(inventoryDraftLineParamsSchema, {
+      id: req.params.id,
+      lineId: req.params.lineId,
+    });
+    const data = await inventoryScanDraftService.removeDraftLine({
+      sessionPublicId: params.id,
+      linePublicId: params.lineId,
+      userPublicId: req.user.id,
+    });
+    res.status(200).json({ success: true, data: toPublicJson(data) });
+  }
+
+  async draftUpdateMeta(req, res) {
+    if (!req.user?.id) throw new AppError(401, 'Unauthorized');
+    const params = await validate(inventoryDraftSessionParamsSchema, { id: req.params.id });
+    const body = await validate(inventoryDraftMetaSchema, req.body ?? {});
+    const data = await inventoryScanDraftService.updateDraftMeta({
+      sessionPublicId: params.id,
+      userPublicId: req.user.id,
+      ...body,
+    });
+    res.status(200).json({ success: true, data: toPublicJson(data) });
+  }
+
+  async draftConfirm(req, res) {
+    if (!req.user?.id) throw new AppError(401, 'Unauthorized');
+    const params = await validate(inventoryDraftSessionParamsSchema, { id: req.params.id });
+    const data = await inventoryScanDraftService.confirmDraft({
+      sessionPublicId: params.id,
+      userPublicId: req.user.id,
+    });
+    res.status(200).json({ success: true, data: toPublicJson(data) });
+  }
+
+  async draftDiscard(req, res) {
+    if (!req.user?.id) throw new AppError(401, 'Unauthorized');
+    const params = await validate(inventoryDraftSessionParamsSchema, { id: req.params.id });
+    const data = await inventoryScanDraftService.discardDraft({
+      sessionPublicId: params.id,
+      userPublicId: req.user.id,
+    });
+    res.status(200).json({ success: true, data: toPublicJson(data) });
   }
 }
 

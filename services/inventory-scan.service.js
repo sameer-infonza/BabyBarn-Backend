@@ -36,7 +36,7 @@ function reasonOrThrow(reason) {
 }
 
 export async function resolveScan(code) {
-  return lookup(code, { ensureIfSku: false });
+  return lookup(code, { ensureIfSku: true });
 }
 
 async function adjustFromHit(hit, delta, reason, actor) {

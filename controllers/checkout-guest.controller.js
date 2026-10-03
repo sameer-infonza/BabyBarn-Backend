@@ -8,6 +8,7 @@ const guestSessionSchema = z.object({
   firstName: z.string().max(120).optional(),
   lastName: z.string().max(120).optional(),
   phone: z.string().max(40).optional(),
+  continueAsGuest: z.boolean().optional(),
 });
 
 export async function createGuestSession(req, res, next) {

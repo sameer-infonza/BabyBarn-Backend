@@ -982,3 +982,30 @@ export const membershipCheckoutSchema = z.object({
   babyName: z.string().min(1).optional(),
   shippingAddress: membershipShippingSchema.optional(),
 });
+
+export const inventoryDraftIdentifySchema = z.object({
+  code: z.string().trim().min(1).max(80),
+  incrementScanned: z.boolean().optional().default(true),
+});
+
+export const inventoryDraftLineUpdateSchema = z.object({
+  action: z.enum(['NO_CHANGE', 'ADD', 'REMOVE', 'SET']).optional(),
+  pendingQty: z.number().int().min(0).optional(),
+  reason: z.string().trim().max(500).nullable().optional(),
+  note: z.string().trim().max(1000).nullable().optional(),
+  refreshExpectations: z.boolean().optional().default(false),
+});
+
+export const inventoryDraftMetaSchema = z.object({
+  sessionNote: z.string().trim().max(1000).nullable().optional(),
+  location: z.string().trim().max(120).nullable().optional(),
+});
+
+export const inventoryDraftSessionParamsSchema = z.object({
+  id: z.string().trim().min(1).max(80),
+});
+
+export const inventoryDraftLineParamsSchema = z.object({
+  id: z.string().trim().min(1).max(80),
+  lineId: z.string().trim().min(1).max(80),
+});

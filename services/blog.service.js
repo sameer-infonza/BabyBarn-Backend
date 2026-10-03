@@ -168,7 +168,16 @@ export async function listAdminPosts({ search, status, category, tag, featured, 
   const take = Math.min(50, Math.max(1, Number(limit) || 20));
   const skip = (Math.max(1, Number(page) || 1) - 1) * take;
   const where = { deletedAt: null };
-  if (status && ['DRAFT', 'SCHEDULED', 'PUBLISHED'].includes(status)) where.status = status;
+  // UI “Unpublished” = DRAFT that was previously published (publishedAt set). Pure drafts have null publishedAt.
+  if (status === 'UNPUBLISHED') {
+    where.status = 'DRAFT';
+    where.publishedAt = { not: null };
+  } else if (status === 'DRAFT') {
+    where.status = 'DRAFT';
+    where.publishedAt = null;
+  } else if (status && ['SCHEDULED', 'PUBLISHED'].includes(status)) {
+    where.status = status;
+  }
   if (featured === 'true' || featured === true) where.featured = true;
   if (featured === 'false') where.featured = false;
   if (search && String(search).trim()) {
@@ -185,9 +194,17 @@ export async function listAdminPosts({ search, status, category, tag, featured, 
   if (tag) {
     where.tags = { some: { tag: { slug: String(tag) } } };
   }
-  const countWhere = { ...where };
-  delete countWhere.status;
-  const [rows, total, grouped] = await Promise.all([
+  const countWhere = { deletedAt: null };
+  if (featured === 'true' || featured === true) countWhere.featured = true;
+  if (featured === 'false') countWhere.featured = false;
+  if (search && String(search).trim()) {
+    const q = String(search).trim();
+    countWhere.OR = where.OR;
+  }
+  if (category) countWhere.categories = where.categories;
+  if (tag) countWhere.tags = where.tags;
+
+  const [rows, total, grouped, draftOnly, unpublished] = await Promise.all([
     prisma.blogPost.findMany({
       where,
       include: POST_INCLUDE,
@@ -201,12 +218,18 @@ export async function listAdminPosts({ search, status, category, tag, featured, 
       where: countWhere,
       _count: { _all: true },
     }),
+    prisma.blogPost.count({ where: { ...countWhere, status: 'DRAFT', publishedAt: null } }),
+    prisma.blogPost.count({ where: { ...countWhere, status: 'DRAFT', publishedAt: { not: null } } }),
   ]);
-  const statusCounts = { ALL: 0, DRAFT: 0, SCHEDULED: 0, PUBLISHED: 0 };
+  const statusCounts = { ALL: 0, DRAFT: 0, SCHEDULED: 0, PUBLISHED: 0, UNPUBLISHED: 0 };
   for (const row of grouped) {
+    if (row.status === 'DRAFT') continue;
     statusCounts[row.status] = row._count._all;
     statusCounts.ALL += row._count._all;
   }
+  statusCounts.DRAFT = draftOnly;
+  statusCounts.UNPUBLISHED = unpublished;
+  statusCounts.ALL += draftOnly + unpublished;
   return {
     items: rows.map(toAdmin),
     statusCounts,
@@ -447,23 +470,38 @@ export async function setFeatured(user, publicId, featured) {
 
 export async function blogAnalytics() {
   const live = { deletedAt: null, status: 'PUBLISHED' };
-  const [views, mostViewed, recent] = await Promise.all([
+  const [views, publishedViews, mostViewed, recent, grouped] = await Promise.all([
     prisma.blogPost.aggregate({ where: { deletedAt: null }, _sum: { viewCount: true } }),
+    prisma.blogPost.aggregate({ where: live, _sum: { viewCount: true }, _count: { _all: true } }),
     prisma.blogPost.findMany({
       where: live,
       orderBy: { viewCount: 'desc' },
-      take: 5,
+      take: 6,
       include: POST_INCLUDE,
     }),
     prisma.blogPost.findMany({
       where: live,
       orderBy: { publishedAt: 'desc' },
-      take: 5,
+      take: 6,
       include: POST_INCLUDE,
     }),
+    prisma.blogPost.groupBy({
+      by: ['status'],
+      where: { deletedAt: null },
+      _count: { _all: true },
+    }),
   ]);
+  const statusCounts = { ALL: 0, DRAFT: 0, SCHEDULED: 0, PUBLISHED: 0 };
+  for (const row of grouped) {
+    statusCounts[row.status] = row._count._all;
+    statusCounts.ALL += row._count._all;
+  }
+  const publishedCount = publishedViews._count._all || 0;
+  const publishedViewSum = publishedViews._sum.viewCount || 0;
   return {
     totalViews: views._sum.viewCount || 0,
+    statusCounts,
+    avgViewsPerArticle: publishedCount ? Math.round(publishedViewSum / publishedCount) : 0,
     mostViewed: mostViewed.map(toCard),
     recentlyPublished: recent.map(toCard),
   };
