@@ -185,6 +185,8 @@ export const updateProfileSchema = z.object({
   avatarUrl: z.string().max(2048).optional().nullable(),
   children: z.array(profileChildSchema).max(12).optional(),
   notificationPrefs: notificationPrefsSchema.optional(),
+  /** Clients may only clear the post-register membership intro (skip). */
+  accessOnboardingPending: z.literal(false).optional(),
 });
 
 export const changePasswordSchema = z.object({

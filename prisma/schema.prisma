@@ -260,6 +260,8 @@ model User {
   isGuest            Boolean  @default(false)
   guestCreatedAt     DateTime?
   convertedAt        DateTime?
+  /// True until the post-register Farmhouse Friends intro is skipped or membership is purchased.
+  accessOnboardingPending Boolean @default(false)
   /// Bumped on password/email change to invalidate existing JWTs.
   tokenVersion       Int      @default(0)
   /// Set when expired guest PII has been purged (retention policy). Prevents reprocessing.

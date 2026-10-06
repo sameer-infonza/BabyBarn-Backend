@@ -7,7 +7,7 @@ const guestSessionSchema = z.object({
   email: z.string().email(),
   firstName: z.string().max(120).optional(),
   lastName: z.string().max(120).optional(),
-  phone: z.string().max(40).optional(),
+  phone: z.string().trim().min(7, 'Mobile number is required').max(40),
   continueAsGuest: z.boolean().optional(),
 });
 

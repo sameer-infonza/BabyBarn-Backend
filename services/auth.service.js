@@ -14,6 +14,7 @@ import {
   portalToScope,
   rehomeMisScopedStaffToStaffPortal,
 } from '../lib/portal-scope.js';
+import { linkEligibleGuestOrdersToUser } from './guest-order-link.service.js';
 
 const RESET_TOKEN_BYTES = 32;
 const RESET_TOKEN_TTL_MS = 60 * 60 * 1000;
@@ -144,6 +145,7 @@ function toPublicUser(user) {
     notificationPrefs: normalizeNotificationPrefs(user.notificationPrefs),
     membershipShippingAddressJson: user.membershipShippingAddressJson ?? undefined,
     isGuest: Boolean(user.isGuest),
+    accessOnboardingPending: Boolean(user.accessOnboardingPending),
   };
   if (roleName === 'ADMIN' || roleName === 'ADMIN_TEAM') {
     out.adminModules = user.adminModules !== undefined ? user.adminModules : null;
@@ -227,9 +229,12 @@ export class AuthService {
             convertedAt: new Date(),
             emailVerifiedAt: existingUser.emailVerifiedAt ?? new Date(),
             portalScope: PORTAL_SCOPE.CUSTOMER,
+            accessOnboardingPending: true,
           },
           include: { role: true },
         });
+
+        await linkEligibleGuestOrdersToUser(user.id, user.email);
 
         const tokens = await issueSessionTokens(user);
 
@@ -237,7 +242,7 @@ export class AuthService {
           user: toPublicUser(user),
           ...tokens,
           convertedFromGuest: true,
-          message: 'Account created. Your previous guest orders are now in your dashboard.',
+          message: 'Account created. Your recent guest orders are now in your dashboard.',
         };
       }
       throw new AppError(
@@ -267,6 +272,7 @@ export class AuthService {
           roleId: userRoleId,
           portalScope: PORTAL_SCOPE.CUSTOMER,
           emailVerifiedAt: null,
+          accessOnboardingPending: true,
         },
         include: { role: true },
       });
@@ -422,6 +428,7 @@ export class AuthService {
         children: true,
         notificationPrefs: true,
         membershipShippingAddressJson: true,
+        accessOnboardingPending: true,
         adminModules: true,
         adminNotificationAccess: true,
         role: { select: { name: true } },
@@ -450,6 +457,7 @@ export class AuthService {
       children: normalizeChildren(user.children),
       notificationPrefs: normalizeNotificationPrefs(user.notificationPrefs),
       membershipShippingAddressJson: user.membershipShippingAddressJson ?? undefined,
+      accessOnboardingPending: Boolean(user.accessOnboardingPending),
     };
     if (user.role.name === 'ADMIN' || user.role.name === 'ADMIN_TEAM') {
       base.adminModules = user.adminModules ?? null;
@@ -476,6 +484,9 @@ export class AuthService {
     if (payload.notificationPrefs !== undefined) {
       data.notificationPrefs = normalizeNotificationPrefs(payload.notificationPrefs);
     }
+    if (payload.accessOnboardingPending === false) {
+      data.accessOnboardingPending = false;
+    }
 
     const updated = await prisma.user.update({
       where: { publicId },
@@ -487,6 +498,7 @@ export class AuthService {
         lastName: true,
         phone: true,
         avatarUrl: true,
+        accessOnboardingPending: true,
         dateOfBirth: true,
         children: true,
         notificationPrefs: true,
@@ -506,6 +518,7 @@ export class AuthService {
       dateOfBirth: updated.dateOfBirth ? updated.dateOfBirth.toISOString() : null,
       children: normalizeChildren(updated.children),
       notificationPrefs: normalizeNotificationPrefs(updated.notificationPrefs),
+      accessOnboardingPending: Boolean(updated.accessOnboardingPending),
       role: updated.role.name,
     };
     if (updated.role.name === 'ADMIN' || updated.role.name === 'ADMIN_TEAM') {
@@ -911,12 +924,13 @@ export class AuthService {
 
     const user = await prisma.user.findUnique({ where: { id: record.userId } });
     if (user) {
+      await linkEligibleGuestOrdersToUser(user.id, user.email);
       await this.sendAuthEmail({
         to: user.email,
         template: 'welcome',
         context: {
           name: [user.firstName, user.lastName].filter(Boolean).join(' ').trim(),
-          actionUrl: `${config.frontend.customerUrl}/dashboard`,
+          actionUrl: `${config.frontend.customerUrl}/access/welcome`,
         },
       });
     }

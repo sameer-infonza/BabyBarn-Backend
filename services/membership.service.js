@@ -153,6 +153,7 @@ export async function completeMembershipPayment(session) {
         accessMemberUntil: until,
         accessNumber,
         accessRenewalReminderSentAt: null,
+        accessOnboardingPending: false,
         ...(typeof session.customer === 'string' ? { stripeCustomerId: session.customer } : {}),
       },
     }),
@@ -256,6 +257,7 @@ export async function completeMembershipFromBundledCheckout({
         accessMemberUntil: until,
         accessNumber,
         accessRenewalReminderSentAt: null,
+        accessOnboardingPending: false,
       },
     });
     return tx.membershipPayment.create({

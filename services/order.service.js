@@ -30,6 +30,8 @@ import {
 import { walletService } from './wallet.service.js';
 import { shippingService } from './shipping.service.js';
 import { writeAdminAudit } from './audit.service.js';
+import { assertGuestTrackVisible } from './guest-order-link.service.js';
+import { GUEST_TRACK_WINDOW_DAYS } from '../lib/guest-order-visibility.js';
 import {
   canCustomerCancelOrder,
   customerCancelUnavailableReason,
@@ -779,45 +781,49 @@ export class OrderService {
       throw new AppError(400, 'Order number and email are required', 'TRACKING_LOOKUP_REQUIRED');
     }
 
+    const include = {
+      orderItems: {
+        include: {
+          product: {
+            select: { publicId: true, name: true, slug: true, imageUrl: true, productType: true },
+          },
+        },
+      },
+    };
+
     const order = await prisma.order.findFirst({
       where: {
         OR: [{ orderNumber: resolvedOrderNumber }, { publicId: resolvedOrderNumber }],
         contactEmail: { equals: resolvedEmail, mode: 'insensitive' },
       },
-      include: {
-        orderItems: {
-          include: {
-            product: {
-              select: { publicId: true, name: true, slug: true, imageUrl: true, productType: true },
-            },
-          },
-        },
-      },
+      include,
     });
 
-    if (!order) {
-      const fallback = await prisma.order.findFirst({
+    const found =
+      order ||
+      (await prisma.order.findFirst({
         where: {
           OR: [{ orderNumber: resolvedOrderNumber }, { publicId: resolvedOrderNumber }],
           user: { email: { equals: resolvedEmail, mode: 'insensitive' } },
         },
-        include: {
-          orderItems: {
-            include: {
-              product: {
-                select: { publicId: true, name: true, slug: true, imageUrl: true, productType: true },
-              },
-            },
-          },
-        },
-      });
-      if (!fallback) {
-        throw new AppError(404, 'Order not found. Check your order number and email.', 'ORDER_NOT_FOUND');
-      }
-      return this.formatPublicTrackingOrder(fallback);
+        include,
+      }));
+
+    if (!found) {
+      throw new AppError(404, 'Order not found. Check your order number and email.', 'ORDER_NOT_FOUND');
     }
 
-    return this.formatPublicTrackingOrder(order);
+    // Public guest tracking: last 45 days, or longer while a return is still open.
+    const visible = await assertGuestTrackVisible(found);
+    if (!visible) {
+      throw new AppError(
+        404,
+        `This order is no longer available for guest tracking (orders older than ${GUEST_TRACK_WINDOW_DAYS} days are hidden once any return is closed). Sign in if you have a Baby Barn account.`,
+        'GUEST_TRACK_EXPIRED'
+      );
+    }
+
+    return this.formatPublicTrackingOrder(found);
   }
 
   formatPublicTrackingOrder(order) {
@@ -837,7 +843,10 @@ export class OrderService {
       trackingNumber: order.trackingNumber,
       shippingCarrier: order.shippingCarrier,
       trackingCarrier: order.shippingCarrier,
+      trackingEta: order.trackingEta || null,
       placedAsGuest: Boolean(order.placedAsGuest),
+      /** Email used for guest track / register prefill (caller already proved ownership). */
+      contactEmail: order.contactEmail || null,
       cancellationReviewStatus: order.cancellationReviewStatus || null,
       canCancel,
       cancelUnavailableReason: canCancel ? null : customerCancelUnavailableReason(order),
