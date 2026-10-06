@@ -24,6 +24,7 @@ import checkoutRoutes from './routes/checkout.js';
 import wishlistRoutes from './routes/wishlist.js';
 import stockAlertsRoutes from './routes/stock-alerts.js';
 import systemRoutes from './routes/system.js';
+import reviewsRoutes from './routes/reviews.js';
 import { primaryLanIpv4 } from './lib/lan-host.js';
 import { stripeWebhook } from './controllers/payment.controller.js';
 import { startScheduledJobs } from './services/scheduled-jobs.service.js';
@@ -185,6 +186,7 @@ function mountApi(prefix) {
   app.use(`${prefix}/wishlist`, wishlistRoutes);
   app.use(`${prefix}/stock-alerts`, stockAlertsRoutes);
   app.use(`${prefix}/system`, systemRoutes);
+  app.use(`${prefix}/reviews`, reviewsRoutes);
 }
 
 mountApi('/api');

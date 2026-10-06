@@ -2,7 +2,8 @@ import { Router } from 'express';
 import { productController } from '../controllers/product.controller.js';
 import { productUploadController } from '../controllers/product-upload.controller.js';
 import { categoryController } from '../controllers/category.controller.js';
-import { authenticate, authorize } from '../middleware/auth.js';
+import { reviewController } from '../controllers/review.controller.js';
+import { authenticate, authorize, requireCustomerFullAccount } from '../middleware/auth.js';
 import { requireConsoleModule, requireConsoleModuleAny } from '../middleware/admin-console.js';
 import { productImageUpload } from '../utils/product-upload.js';
 
@@ -79,6 +80,17 @@ router.delete(
   authenticate,
   authorize('ADMIN'),
   (req, res, next) => categoryController.remove(req, res).catch(next)
+);
+
+router.get(
+  '/:id/reviews',
+  (req, res, next) => reviewController.listProductPublic(req, res).catch(next)
+);
+router.get(
+  '/:id/reviews/eligibility',
+  authenticate,
+  requireCustomerFullAccount,
+  (req, res, next) => reviewController.productEligibility(req, res).catch(next)
 );
 
 router.get('/:id', (req, res, next) => productController.getProductById(req, res).catch(next));

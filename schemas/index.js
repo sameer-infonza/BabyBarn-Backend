@@ -1009,3 +1009,35 @@ export const inventoryDraftLineParamsSchema = z.object({
   id: z.string().trim().min(1).max(80),
   lineId: z.string().trim().min(1).max(80),
 });
+
+const ratingField = z.coerce.number().int().min(1).max(5);
+
+export const createProductReviewSchema = z.object({
+  productId: z.string().trim().min(1).max(120),
+  rating: ratingField,
+  body: z.string().trim().max(4000).optional().nullable(),
+  imageUrls: z.array(z.string().trim().min(1).max(500)).max(5).optional(),
+  reviewerDisplayName: z.string().trim().max(80).optional().nullable(),
+});
+
+export const updateProductReviewSchema = z.object({
+  rating: ratingField.optional(),
+  body: z.string().trim().max(4000).optional().nullable(),
+  imageUrls: z.array(z.string().trim().min(1).max(500)).max(5).optional(),
+  reviewerDisplayName: z.string().trim().max(80).optional().nullable(),
+});
+
+export const createPlatformReviewSchema = z.object({
+  returnRequestId: z.string().trim().min(1).max(120),
+  returnExperienceRating: ratingField,
+  storeCreditExperienceRating: ratingField,
+  overallPlatformRating: ratingField,
+  feedback: z.string().trim().max(4000).optional().nullable(),
+});
+
+export const updatePlatformReviewSchema = z.object({
+  returnExperienceRating: ratingField.optional(),
+  storeCreditExperienceRating: ratingField.optional(),
+  overallPlatformRating: ratingField.optional(),
+  feedback: z.string().trim().max(4000).optional().nullable(),
+});
